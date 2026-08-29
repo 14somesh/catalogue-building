@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block content %}
+  {% include "components/cover_hook.html" %}
+
+  {% for brand_group in brand_groups %}
+    {% for page in brand_group.pages %}
+      <section class="page">
+        {% include "components/brand_header.html" %}
+
+        {% if page.type == "2-up" %}
+          <div class="stack">
+            {% set product = page.products[0] %}
+            {% include "components/product_card.html" %}
+
+            <div class="stack__divider"><i></i></div>
+
+            {% set product = page.products[1] %}
+            {% include "components/product_card.html" %}
+          </div>
+        {% elif page.type == "1-up" %}
+          <div class="stack stack--single">
+            {% set product = page.products[0] %}
+            {% include "components/single_product_card.html" %}
+          </div>
+        {% endif %}
+
+        {% include "components/brand_footer.html" %}
+      </section>
+    {% endfor %}
+  {% endfor %}
+
+  {% include "components/back_hook.html" %}
+{% endblock %}

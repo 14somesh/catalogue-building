@@ -1,0 +1,55 @@
+category:
+  name: "POWERBANK"
+  display_title: "Powerbanks & Portable Chargers"
+
+# Explicit brand rendering order in catalogue (leave empty to follow sheet appearance order)
+# The real brand order will be supplied when the product sheet is populated in Phase 5
+brand_order: []
+
+page_setup:
+  paper_size: "A4"
+  orientation: "portrait"
+  products_per_page: 2
+  show_page_numbers: true
+
+image_validation:
+  min_width_px: 800
+  min_height_px: 800
+  recommended_dpi: 300
+  allowed_formats: ["png", "jpg", "jpeg", "webp"]
+
+validation_rules:
+  title_max_chars: 40
+  subtitle_max_chars: 80
+  bullet_max_chars: 60       # Matched to two-column card layout
+  required_bullets: 4
+
+llm:
+  model: "gemini-3.6-flash"
+  temperature: 0.2
+
+search:
+  provider: "gemini_grounding"   # Options: "gemini_grounding", "duckduckgo"
+  max_results: 3
+  timeout_secs: 15
+  official_domains:
+    stuffcool: "stuffcool.com"
+    anker: "anker.com"
+    ambrane: "ambraneindia.com"
+    portronics: "portronics.com"
+    urbrn: "urbnworld.com"
+    duracell: "duracell.in"
+
+company:
+  name: "VIANET"
+  location: "Pune"
+  email: "sales@vianet.co.in"
+  contact_line: "Corporate gifting · Pune · sales@vianet.co.in"
+
+paths:
+  excel_file: "data/catalogue_data.xlsx"
+  images_dir: "images/"
+  brochures_dir: "brochures/"
+  output_dir: "dist/"
+  output_filename_pattern: "{category}_catalogue_{timestamp}.pdf"
+  output_pdf: "dist/catalogue.pdf"

@@ -1,0 +1,347 @@
+/* ============================================================
+   layout.css  —  Vianet 2-up catalogue layout (Deep Teal & Ivory Edition)
+   ============================================================ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  background-color: #1B3A47 !important;
+  background: #1B3A47 !important;
+  color: var(--c-on-dark);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+@page {
+  size: 210mm 297mm;
+  margin: 0;
+}
+
+/* ---- Page (Full-bleed Deep Teal, Zero Gaps) ---- */
+.page {
+  position: relative;
+  width: 210mm;
+  height: 297mm;
+  min-height: 297mm;
+  max-height: 297mm;
+  margin: 0 !important;
+  padding: var(--page-pad-y) var(--page-pad-x);
+  display: flex;
+  flex-direction: column;
+  background-color: #1B3A47 !important;
+  background: #1B3A47 !important;
+  page-break-after: always;
+  page-break-inside: avoid;
+  overflow: hidden;
+}
+.page:last-child { page-break-after: auto; }
+
+/* ---- Header ---- */
+.hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--c-hairline-light);
+  flex: 0 0 auto;
+}
+
+/* Top-left: Vianet Logo in soft semi-transparent glass panel */
+.hdr__panel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--c-glass-bg);
+  border: 1px solid var(--c-glass-border);
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r-md);
+  backdrop-filter: blur(8px);
+}
+.hdr__logo-mark {
+  width: 18px;
+  height: 18px;
+  display: block;
+  object-fit: contain;
+}
+.hdr__logo-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+.hdr__logo-word {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  color: var(--c-on-dark);
+}
+.hdr__logo-sub {
+  font-family: var(--font-body);
+  font-weight: var(--fw-med);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--c-on-dark-muted);
+  margin-top: 2px;
+  text-transform: uppercase;
+}
+
+/* Top-right: Category + Brand in matching semi-transparent panel */
+.hdr__brand-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--c-glass-bg);
+  border: 1px solid var(--c-glass-border);
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r-md);
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-caption);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--c-on-dark);
+}
+.hdr__brand-panel .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--c-accent-gold);
+}
+
+/* ---- Product Stack (2 stacked vertically) ---- */
+.stack {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  padding: var(--s-3) 0;
+}
+/* Single-product page: vertically centered in middle of page */
+.stack--single {
+  justify-content: center;
+  padding: 0;
+}
+
+.stack__divider {
+  display: flex;
+  align-items: center;
+  color: var(--c-hairline-light);
+  margin: var(--s-2) 0;
+}
+.stack__divider::before,
+.stack__divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--c-hairline-light);
+}
+.stack__divider::before { margin-right: var(--s-3); }
+.stack__divider::after  { margin-left: var(--s-3); }
+.stack__divider i {
+  width: 7px;
+  height: 7px;
+  transform: rotate(45deg);
+  background: var(--c-accent-gold);
+  border-radius: 1px;
+}
+
+/* ---- Product Block (Equal Height / Aligned Edges) ---- */
+.prod {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: var(--s-6);
+  align-items: stretch; /* Vertically aligns image tile and details panel to equal height */
+}
+.prod--single {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: var(--s-6);
+  align-items: stretch;
+}
+
+/* LEFT: Ivory rounded image tile matching details panel height */
+.prod__media {
+  width: 240px;
+  max-width: 240px;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  background: var(--c-tile-bg);
+  border: 1px solid var(--c-tile-border);
+  border-radius: var(--r-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-tile);
+  flex-shrink: 0;
+  padding: var(--s-3);
+}
+.prod__img {
+  max-width: 90%;
+  max-height: 90%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  filter: var(--shadow-product);
+  pointer-events: none;
+}
+
+/* RIGHT: Product details panel in soft ivory (#F5F2EC) */
+.prod__body {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--c-panel-ivory);
+  border: 1px solid var(--c-panel-border);
+  border-radius: var(--r-lg);
+  padding: var(--s-5) var(--s-6);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  color: var(--c-ink);
+  box-shadow: var(--shadow-panel);
+}
+
+.prod__eyebrow {
+  font-family: var(--font-body);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.05em;
+  word-spacing: normal;
+  text-transform: uppercase;
+  color: var(--c-accent-gold-deep);
+  margin-bottom: var(--s-1);
+}
+
+.prod__name {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-name);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+  color: var(--c-ink);
+  white-space: nowrap;
+  margin-bottom: var(--s-1);
+}
+.prod__name.is-wrapped { white-space: normal; }
+.prod__name em {
+  font-style: normal;
+  color: var(--c-accent-gold-deep);
+}
+
+.prod__subtitle {
+  font-size: var(--fs-subtitle);
+  line-height: var(--lh-snug);
+  color: var(--c-muted);
+  max-width: 48ch;
+  margin-bottom: var(--s-2);
+}
+.prod__subtitle b.spec {
+  color: var(--c-accent-gold-deep);
+  font-weight: var(--fw-bold);
+}
+
+.prod__rule {
+  width: 32px;
+  height: var(--tick-w);
+  background: var(--c-accent-gold);
+  border-radius: 2px;
+  margin-bottom: var(--s-3);
+}
+
+/* Bullets: 2 columns with gold vertical ticks */
+.feats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-2) var(--s-5);
+  margin-bottom: var(--s-3);
+  list-style: none;
+}
+.feat {
+  position: relative;
+  padding-left: var(--s-3);
+  font-size: var(--fs-bullet);
+  line-height: var(--lh-body);
+  color: var(--c-ink);
+}
+.feat::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  width: var(--tick-w);
+  height: calc(100% - 6px);
+  min-height: 12px;
+  background: var(--c-accent-gold);
+  border-radius: 2px;
+}
+
+/* Gold MRP Badge (Gold background with dark teal text) */
+.mrp {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  background: var(--c-accent-gold);
+  color: var(--c-bg-teal-deep);
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-badge);
+}
+.mrp__label {
+  font-size: var(--fs-fine);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.08em;
+  color: var(--c-bg-teal-deep);
+  opacity: 0.88;
+  text-transform: uppercase;
+}
+.mrp__price {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-price);
+  line-height: 1;
+  color: var(--c-bg-teal-deep);
+}
+.mrp__gst {
+  font-size: var(--fs-fine);
+  font-weight: var(--fw-med);
+  color: var(--c-bg-teal-deep);
+  opacity: 0.88;
+}
+
+/* ---- Footer ---- */
+.ftr {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--c-hairline-light);
+  flex: 0 0 auto;
+}
+.ftr__contact {
+  font-size: var(--fs-caption);
+  color: var(--c-on-dark-muted);
+  letter-spacing: 0.04em;
+}
+
+/* ---- Print / PDF Engine ---- */
+@media print {
+  html, body {
+    background-color: #1B3A47 !important;
+    background: #1B3A47 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .page {
+    box-shadow: none;
+  }
+}

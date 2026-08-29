@@ -1,0 +1,86 @@
+/* ============================================================
+   tokens.css  —  Vianet catalogue design tokens (Deep Teal & Champagne Gold)
+   Digital-first palette: Deep Teal Page, Unified Ivory Image Tiles & Detail Panels.
+   ============================================================ */
+:root {
+
+  /* ---- Brand palette ---- */
+  --c-bg-teal:          #1B3A47;   /* deep teal/navy full-bleed background */
+  --c-bg-teal-deep:     #122730;   /* darker shade for badge text & contrast */
+  --c-panel-ivory:      #F5F2EC;   /* soft ivory product details panel */
+  --c-panel-border:     #EAE5DC;   /* border for details panel & image tile */
+  
+  --c-tile-bg:          #F5F2EC;   /* ivory image tile (matching panel color exactly) */
+  --c-tile-border:      #EAE5DC;   /* matching ivory border */
+  
+  --c-accent-gold:      #C9A961;   /* champagne gold accent */
+  --c-accent-gold-deep: #A68335;   /* deeper gold for text contrast on ivory */
+  --c-accent-gold-glow: rgba(201, 169, 97, 0.35);
+
+  --c-ink:              #162830;   /* dark ink for text on ivory panels */
+  --c-muted:            #546770;   /* subtitles, secondary text on ivory */
+  --c-faint:            #8A99A0;   /* eyebrow labels, fine print */
+  
+  --c-hairline-dark:    #E2DDD2;   /* dividers on ivory panel */
+  --c-hairline-light:   rgba(255, 255, 255, 0.18); /* dividers on teal background */
+
+  --c-glass-bg:         rgba(255, 255, 255, 0.10);  /* header glass panel */
+  --c-glass-border:     rgba(255, 255, 255, 0.18);  /* header glass border */
+  --c-on-dark:          #FFFFFF;   /* white text on teal */
+  --c-on-dark-muted:    rgba(255, 255, 255, 0.72); /* light muted text on teal */
+
+  /* ---- Typography ---- */
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body:    "Inter", "Segoe UI", system-ui, sans-serif;
+
+  /* Type scale (px) */
+  --fs-eyebrow:   11px;   /* "01 — STUFFCOOL SERIES" */
+  --fs-fine:      11px;   /* "MRP", "incl. GST" */
+  --fs-caption:   12px;   /* footer, category pill */
+  --fs-bullet:    13px;   /* feature bullets */
+  --fs-subtitle:  14px;   /* product subtitle */
+  --fs-price:     23px;   /* MRP price */
+  --fs-name:      36px;   /* product name */
+  --fs-name-min:  22px;   /* auto-shrink floor */
+
+  --lh-tight:  1.10;
+  --lh-snug:   1.30;
+  --lh-body:   1.48;
+
+  --fw-reg:  400;
+  --fw-med:  500;
+  --fw-semi: 600;
+  --fw-bold: 700;
+
+  /* ---- Spacing (4px grid) ---- */
+  --s-1:  4px;
+  --s-2:  8px;
+  --s-3:  12px;
+  --s-4:  16px;
+  --s-5:  20px;
+  --s-6:  24px;
+  --s-7:  28px;
+  --s-8:  32px;
+  --s-10: 40px;
+  --s-12: 48px;
+  --s-16: 64px;
+
+  /* ---- Radii ---- */
+  --r-sm:   8px;
+  --r-md:   12px;
+  --r-lg:   16px;
+  --r-pill: 999px;
+
+  /* ---- Page geometry (A4 portrait) ---- */
+  --page-w:      210mm;
+  --page-h:      297mm;
+  --page-pad-x:  15mm;
+  --page-pad-y:  13mm;
+
+  /* ---- Effects ---- */
+  --shadow-tile:    0 10px 24px -6px rgba(8, 20, 26, 0.28);
+  --shadow-panel:   0 12px 28px -8px rgba(8, 20, 26, 0.32);
+  --shadow-badge:   0 6px 14px -4px rgba(201, 169, 97, 0.42);
+  --shadow-product: drop-shadow(0 12px 16px rgba(20, 40, 50, 0.18));
+  --tick-w: 3px;   /* accent vertical tick before each bullet */
+}

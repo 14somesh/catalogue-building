@@ -1,0 +1,25 @@
+<article class="prod prod--single">
+  <div class="prod__media">
+    <img class="prod__img" src="{{ product.image_url }}" alt="{{ product.name }}">
+  </div>
+
+  <div class="prod__body">
+    <p class="prod__eyebrow">{{ product.index }} — {{ product.brand }} {{ product.series }}</p>
+    <h2 class="prod__name">{{ product.name_html | safe }}</h2>
+    <p class="prod__subtitle">{{ product.subtitle_html | safe }}</p>
+
+    <span class="prod__rule"></span>
+
+    <div class="feats">
+      {% for bullet in product.bullets %}
+        <div class="feat">{{ bullet }}</div>
+      {% endfor %}
+    </div>
+
+    <div class="mrp">
+      <span class="mrp__label">MRP</span>
+      <span class="mrp__price">₹{{ product.price }}</span>
+      <span class="mrp__gst">incl. GST</span>
+    </div>
+  </div>
+</article>

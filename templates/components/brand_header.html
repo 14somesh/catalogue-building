@@ -1,0 +1,13 @@
+<header class="hdr">
+  <div class="hdr__panel">
+    <img class="hdr__logo-mark" src="{{ logo_mark_url }}" alt="Vianet Logo">
+    <div class="hdr__logo-text">
+      <span class="hdr__logo-word">{{ company_name | default('VIANET') }}</span>
+      <span class="hdr__logo-sub">{{ company_location | default('PUNE') }}</span>
+    </div>
+  </div>
+  <div class="hdr__brand-panel">
+    <span class="dot"></span>
+    <span>{{ category | default('POWERBANK') }} &middot; {{ brand_group.brand | default('STUFFCOOL') }}</span>
+  </div>
+</header>

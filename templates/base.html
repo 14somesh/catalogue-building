@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ category_display_title | default("Product Catalogue") }}</title>
+  <style>
+    {{ fonts_css | safe }}
+    {{ tokens_css | safe }}
+    {{ layout_css | safe }}
+  </style>
+</head>
+<body>
+  {% block content %}{% endblock %}
+
+  <script>
+  (function () {
+    function fit(el, max, min) {
+      var size = max;
+      el.style.fontSize = size + 'px';
+      el.classList.remove('is-wrapped');
+      var parent = el.closest('.prod__body') || el.parentElement;
+      var targetWidth = parent ? (parent.clientWidth - 8) : 340;
+      while (el.scrollWidth > targetWidth && size > min) {
+        size -= 1;
+        el.style.fontSize = size + 'px';
+      }
+      if (el.scrollWidth > targetWidth) {
+        el.classList.add('is-wrapped');
+      }
+    }
+
+    function run() {
+      document.querySelectorAll('.prod__name').forEach(function (el) {
+        fit(el, 44, 24);
+      });
+      window.__namesFitted = true;
+    }
+
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(run);
+    } else {
+      run();
+    }
+  })();
+  </script>
+</body>
+</html>
