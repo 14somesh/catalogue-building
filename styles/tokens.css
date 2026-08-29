@@ -34,18 +34,18 @@
   --font-body:    "Inter", "Segoe UI", system-ui, sans-serif;
 
   /* Type scale (px) */
-  --fs-eyebrow:   10.5px; /* "01 — STUFFCOOL SERIES" */
-  --fs-fine:      10.5px; /* "MRP", "incl. GST" */
+  --fs-eyebrow:   10px;   /* "01 — STUFFCOOL SERIES" */
+  --fs-fine:      10px;   /* "MRP", "incl. GST" */
   --fs-caption:   11.5px; /* footer, category pill */
-  --fs-bullet:    12px;   /* feature bullets */
-  --fs-subtitle:  13px;   /* product subtitle */
-  --fs-price:     20px;   /* MRP price */
-  --fs-name:      30px;   /* product name */
-  --fs-name-min:  20px;   /* auto-shrink floor */
+  --fs-bullet:    11.5px; /* feature bullets */
+  --fs-subtitle:  12px;   /* product subtitle */
+  --fs-price:     18px;   /* MRP price */
+  --fs-name:      28px;   /* product name */
+  --fs-name-min:  18px;   /* auto-shrink floor */
 
   --lh-tight:  1.10;
-  --lh-snug:   1.28;
-  --lh-body:   1.42;
+  --lh-snug:   1.26;
+  --lh-body:   1.38;
 
   --fw-reg:  400;
   --fw-med:  500;
@@ -64,6 +64,10 @@
   --s-10: 40px;
   --s-12: 48px;
   --s-16: 64px;
+
+  /* ---- Block geometry (Fixed Uniform Dimensions) ---- */
+  --prod-h:      235px;   /* fixed uniform height for all cards */
+  --prod-tile-w: 235px;   /* square tile width */
 
   /* ---- Radii ---- */
   --r-sm:   8px;

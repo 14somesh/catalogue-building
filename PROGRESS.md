@@ -81,9 +81,9 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Final Proportions & Flow):**
-  - Compact 165px Card Footprint: Reduced card footprint by another 20% (`165px 1fr` grid, `--page-pad-x: 20mm; --page-pad-y: 16mm;`), establishing clear teal breathing margins across all edges while keeping products prominent inside their ivory tiles.
-  - Top-Aligned Single Product Layout: Reverted Page 3 (`stack--single`) to top-aligned under the header per design specification.
-  - Tight Cohesive Hierarchy: Eliminated expanding gaps between subtitle and the gold rule/bullets by switching `.prod__body` to `justify-content: center` with compact margins, ensuring zero dead zones.
-  - Master Resolution CDN Pipeline: Maintained 1200x1200px native assets with `deviceScaleFactor: 2` rendering.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1205.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1205.pdf) (3 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Fixed Uniform Blocks & Square Tiles):**
+  - Fixed Uniform Card Height: Locked all product blocks across all pages (`.prod`, `.prod__media`, `.prod__body`) to an exact fixed uniform height (`--prod-h: 235px;`). Card dimensions are consistent regardless of subtitle or bullet length.
+  - Wider Square Image Tiles: Widened the image tile to `--prod-tile-w: 235px` (1:1 square tile ratio), creating a balanced split with the ivory details panel.
+  - Comfortable Product Framing: Adjusted product display scale to `max-width: 80%; max-height: 80%;` inside the tile for comfortable padding while preserving 100% native uncompressed source resolution and 2x retina rendering.
+  - Top-Aligned Single Product Layout: Maintained single-product Page 3 top-aligned under the header.
+- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1222.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1222.pdf) (3 A4 pages).
