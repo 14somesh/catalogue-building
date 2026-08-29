@@ -44,6 +44,26 @@ html, body {
 }
 .page:last-child { page-break-after: auto; }
 
+/* Cover Page (Page 1 Full-Bleed A4 Image) */
+.page--cover {
+  padding: 0 !important;
+  margin: 0 !important;
+  width: 210mm;
+  height: 297mm;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #1B3A47 !important;
+  background: #1B3A47 !important;
+  overflow: hidden;
+}
+.cover__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 /* ---- Header ---- */
 .hdr {
   display: flex;
@@ -207,7 +227,7 @@ html, body {
   background: var(--c-panel-ivory);
   border: 1px solid var(--c-panel-border);
   border-radius: var(--r-lg);
-  padding: var(--s-3) var(--s-5);
+  padding: var(--s-4) var(--s-5);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -215,18 +235,9 @@ html, body {
   box-shadow: var(--shadow-panel);
 }
 
-.prod__eyebrow {
-  font-family: var(--font-body);
-  font-weight: var(--fw-bold);
-  font-size: var(--fs-eyebrow);
-  letter-spacing: 0.05em;
-  word-spacing: normal;
-  text-transform: uppercase;
-  color: var(--c-accent-gold-deep);
-  margin-bottom: 2px;
-}
-
 .prod__name {
+  display: flex;
+  align-items: baseline;
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
   font-size: var(--fs-name);
@@ -237,6 +248,14 @@ html, body {
   margin-bottom: 2px;
 }
 .prod__name.is-wrapped { white-space: normal; }
+.prod__num {
+  color: var(--c-accent-gold-deep);
+  font-size: 0.88em;
+  margin-right: 0.28em;
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  flex-shrink: 0;
+}
 .prod__name em {
   font-style: normal;
   color: var(--c-accent-gold-deep);
@@ -262,13 +281,15 @@ html, body {
   margin-bottom: var(--s-2);
 }
 
-/* Bullets: 2 columns with gold vertical ticks */
+/* Bullets: 2 columns with aligned row baselines */
 .feats {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 2px var(--s-4);
+  grid-auto-rows: auto;
+  gap: 3px var(--s-4);
   margin-bottom: var(--s-2);
   list-style: none;
+  align-items: start;
 }
 .feat {
   position: relative;
@@ -276,6 +297,7 @@ html, body {
   font-size: var(--fs-bullet);
   line-height: var(--lh-body);
   color: var(--c-ink);
+  align-self: start;
 }
 .feat::before {
   content: "";
@@ -300,7 +322,7 @@ html, body {
   padding: 4px var(--s-3);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-badge);
-  margin-top: 3px;
+  margin-top: var(--s-2);
 }
 .mrp__label {
   font-size: var(--fs-fine);

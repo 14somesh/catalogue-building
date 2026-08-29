@@ -1,1 +1,5 @@
-{# Structural Hook for Catalogue Front Cover #}
+{% if cover_image_url %}
+<section class="page page--cover">
+  <img class="cover__img" src="{{ cover_image_url }}" alt="Catalogue Cover">
+</section>
+{% endif %}

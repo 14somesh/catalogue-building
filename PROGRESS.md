@@ -81,9 +81,11 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Fixed Uniform Blocks & Square Tiles):**
-  - Fixed Uniform Card Height: Locked all product blocks across all pages (`.prod`, `.prod__media`, `.prod__body`) to an exact fixed uniform height (`--prod-h: 235px;`). Card dimensions are consistent regardless of subtitle or bullet length.
-  - Wider Square Image Tiles: Widened the image tile to `--prod-tile-w: 235px` (1:1 square tile ratio), creating a balanced split with the ivory details panel.
-  - Comfortable Product Framing: Adjusted product display scale to `max-width: 80%; max-height: 80%;` inside the tile for comfortable padding while preserving 100% native uncompressed source resolution and 2x retina rendering.
-  - Top-Aligned Single Product Layout: Maintained single-product Page 3 top-aligned under the header.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1222.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1222.pdf) (3 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Cover Page & Inline Numbering):**
+  - Full-Bleed Cover Page (Page 1): Integrated `images/cover.png` via [`templates/components/cover_hook.html`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/templates/components/cover_hook.html) as a full A4 portrait cover page edge-to-edge with no margins, headers, footers, or overlays.
+  - Removed Eyebrow Line: Eliminated the `"01 — STUFFCOOL SERIES"` line across all product cards.
+  - Inline Gold Numbering: Placed the two-digit index before the product name on the same line (e.g. `01 click 10`, `05 major ultra`) in champagne gold (`.prod__num`).
+  - MRP Badge Clearance: With the eyebrow removed and balanced card padding, the MRP badge sits inside the ivory panel with comfortable bottom clearance.
+  - Aligned Bullet Rows: Configured CSS grid row tracks so both bullet columns start each row at the exact same vertical baseline.
+  - Locked Geometry: Preserved fixed uniform 235px card heights, 235px square image tiles, and 80% product framing.
+- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1256.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1256.pdf) (4 A4 pages).

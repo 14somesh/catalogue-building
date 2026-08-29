@@ -287,6 +287,9 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
     company_location = company_cfg.get("location", "PUNE")
     contact_line = company_cfg.get("contact_line", "Corporate gifting · Pune · sales@vianet.co.in")
 
+    cover_img_path = "images/cover.png"
+    cover_image_url = image_to_base64(cover_img_path) if os.path.exists(cover_img_path) else None
+
     rendered_html = template.render(
         fonts_css=fonts_css,
         tokens_css=tokens_css,
@@ -298,7 +301,8 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         contact_line=contact_line,
         email=company_cfg.get("email", "sales@vianet.co.in"),
         brand_groups=brand_groups,
-        logo_mark_url=logo_mark_url
+        logo_mark_url=logo_mark_url,
+        cover_image_url=cover_image_url
     )
 
     preview_html_path = os.path.abspath("dist/catalogue_preview.html")

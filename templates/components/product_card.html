@@ -4,8 +4,7 @@
   </div>
 
   <div class="prod__body">
-    <p class="prod__eyebrow">{{ product.index }} — {{ product.brand }} {{ product.series }}</p>
-    <h2 class="prod__name">{{ product.name_html | safe }}</h2>
+    <h2 class="prod__name"><span class="prod__num">{{ product.index }}</span>{{ product.name_html | safe }}</h2>
     <p class="prod__subtitle">{{ product.subtitle_html | safe }}</p>
 
     <span class="prod__rule"></span>
