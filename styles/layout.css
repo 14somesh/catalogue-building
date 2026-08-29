@@ -278,12 +278,13 @@ html, body {
   font-size: 0.88em;
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
-  margin-right: 0.20em;
+  display: inline;
 }
 .prod__name em {
   font-style: normal;
   color: var(--c-accent-gold-deep);
-  margin-left: 0; /* use standard single space from HTML */
+  margin-left: 0;
+  display: inline;
 }
 
 .prod__subtitle {
@@ -336,7 +337,7 @@ html, body {
   border-radius: 2px;
 }
 
-/* Gold MRP Badge (Seated cleanly inside card with generous bottom clearance) */
+/* Gold DP Badge (Seated cleanly inside card with generous bottom clearance) */
 .mrp {
   align-self: flex-start;
   display: inline-flex;

@@ -81,8 +81,10 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Massive Brand Divider & Single Space Flow):**
-  - Massive Dynamic Brand Title: Scaled brand name on [`page--brand`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/styles/layout.css) to a massive, bold white uppercase headline (`105px` baseline with dynamic JS auto-fitting in [`templates/base.html`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/templates/base.html)) filling nearly the full page width, vertically centered and left-aligned with the product cards.
-  - Single Normal Space Precision: Removed additional CSS em margins so multi-word product names (e.g. `01 click 10`, `05 major ultra`) render with exact single normal spaces.
-  - Maintained Locked Sizing: Preserved fixed 235px card heights, 235px square image tiles, 80% product framing, and high-DPI 2x retina rendering.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1341.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1341.pdf) (5 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Production Hardening & Clean Reset):**
+  - Updated Price Badge Label: Changed label on the gold price badge from `MRP` to `DP` (`DP ₹X,XXX incl. GST`).
+  - Strict Single-Space Typography: Enforced single normal spaces between product numbers and names (e.g. `01 click 10`, `03 giga`, `05 major ultra`).
+  - Created [`RENDER_RULES.md`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/RENDER_RULES.md): Documented Section A (Automated build-time validation rules) and Section B (Human post-build visual checklist).
+  - Automated Build Validation: Implemented `validate_product_data()` in [`src/4_build.py`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/src/4_build.py) enforcing required fields, asset presence, whitespace integrity, and typography rules before compiling PDFs.
+  - Reset for Clean Run: Emptied product data rows in [`data/catalogue_data.xlsx`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/data/catalogue_data.xlsx) while preserving all 38 header columns and retaining image assets in `images/stuffcool/`.
+- **Status:** Complete, production-ready, and committed to git.

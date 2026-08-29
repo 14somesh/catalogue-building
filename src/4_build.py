@@ -156,10 +156,62 @@ def format_subtitle_html(subtitle: str) -> str:
     return f'{subtitle[:s]}<b class="spec">{subtitle[s:e]}</b>{subtitle[e:]}'
 
 
+def validate_product_data(prod: dict, raw_row: dict) -> None:
+    """
+    SECTION A — Build-time validation rules enforced automatically.
+    Fails loudly before PDF compilation if data integrity issues exist.
+    """
+    pid = prod.get("product_id") or raw_row.get("Product_ID") or "UNKNOWN"
+    model = str(prod.get("model_name", "")).strip()
+    brand = str(prod.get("brand", "")).strip()
+    subtitle = str(prod.get("subtitle", "")).strip()
+    bullets = prod.get("bullets", [])
+    raw_img_path = prod.get("image_full_path", "")
+    price_val = prod.get("mrp_raw") or prod.get("mrp")
+
+    # 1. All required fields non-empty before rendering
+    if not model:
+        raise ValueError(f"Build validation failed: Product {pid} is missing 'Model_Name'")
+    if not brand:
+        raise ValueError(f"Build validation failed: Product {pid} is missing 'Brand'")
+    if not subtitle:
+        raise ValueError(f"Build validation failed: Product {pid} ({model}) is missing 'Subtitle'")
+    if not bullets or len(bullets) == 0:
+        raise ValueError(f"Build validation failed: Product {pid} ({model}) has no bullets defined")
+    if not raw_img_path:
+        raise ValueError(f"Build validation failed: Product {pid} ({model}) is missing 'Local_Image_Path'")
+    if price_val is None or str(price_val).strip() in ("", "nan", "None"):
+        raise ValueError(f"Build validation failed: Product {pid} ({model}) is missing pricing/MRP field")
+
+    # 2. Every product has an image file present at the expected path
+    if not os.path.exists(raw_img_path) or os.path.getsize(raw_img_path) == 0:
+        raise FileNotFoundError(
+            f"Build validation failed: Product {pid} ({model}) image file not found or empty at '{raw_img_path}'"
+        )
+
+    # 3. No collapsed or doubled spaces in product names or between number and name
+    if "  " in model:
+        raise ValueError(f"Build validation failed: Product {pid} Model_Name contains double spaces: '{model}'")
+    if model.startswith(" ") or model.endswith(" "):
+        raise ValueError(f"Build validation failed: Product {pid} Model_Name has leading/trailing spaces: '{model}'")
+    
+    formatted_name = format_name_html(model)
+    if "  " in formatted_name:
+        raise ValueError(f"Build validation failed: Product {pid} formatted name HTML contains double spaces: '{formatted_name}'")
+    if re.search(r'\w<em>', formatted_name) or re.search(r'</em>\w', formatted_name):
+        raise ValueError(f"Build validation failed: Product {pid} formatted name HTML has collapsed space before/after <em>: '{formatted_name}'")
+
+    # 4. No letter-spacing applied that breaks words apart
+    for field_name, field_val in [("Model_Name", model), ("Brand", brand), ("Subtitle", subtitle)]:
+        if re.search(r'\b(?:[A-Za-z]\s+){3,}[A-Za-z]\b', str(field_val)):
+            raise ValueError(f"Build validation failed: Product {pid} {field_name} contains broken spaced-out letters: '{field_val}'")
+
+
 def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
     """
-    Main PDF builder: reads Excel, arranges 2-products-per-page with 1-up odd remainder,
-    renders Jinja2 templates with crimson/ink styling, and compiles print-ready A4 PDF via Playwright.
+    Main PDF builder: reads Excel, validates data against Section A rules,
+    arranges 2-products-per-page with 1-up odd remainder, renders Jinja2 templates,
+    and compiles print-ready A4 PDF via Playwright.
     """
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
@@ -203,6 +255,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         products = []
         for idx_in_brand, (_, row) in enumerate(brand_df.iterrows(), 1):
             prod = get_effective_product_dict(row)
+            validate_product_data(prod, row.to_dict())
             
             # Resolve image and ensure background-stripped cutout
             brand_slug = prod.get("brand_slug", slugify(brand_name))
