@@ -34,18 +34,18 @@
   --font-body:    "Inter", "Segoe UI", system-ui, sans-serif;
 
   /* Type scale (px) */
-  --fs-eyebrow:   11px;   /* "01 — STUFFCOOL SERIES" */
-  --fs-fine:      11px;   /* "MRP", "incl. GST" */
-  --fs-caption:   12px;   /* footer, category pill */
-  --fs-bullet:    13px;   /* feature bullets */
-  --fs-subtitle:  14px;   /* product subtitle */
-  --fs-price:     23px;   /* MRP price */
-  --fs-name:      36px;   /* product name */
-  --fs-name-min:  22px;   /* auto-shrink floor */
+  --fs-eyebrow:   10.5px; /* "01 — STUFFCOOL SERIES" */
+  --fs-fine:      10.5px; /* "MRP", "incl. GST" */
+  --fs-caption:   11.5px; /* footer, category pill */
+  --fs-bullet:    12px;   /* feature bullets */
+  --fs-subtitle:  13px;   /* product subtitle */
+  --fs-price:     20px;   /* MRP price */
+  --fs-name:      30px;   /* product name */
+  --fs-name-min:  20px;   /* auto-shrink floor */
 
   --lh-tight:  1.10;
-  --lh-snug:   1.30;
-  --lh-body:   1.48;
+  --lh-snug:   1.28;
+  --lh-body:   1.42;
 
   --fw-reg:  400;
   --fw-med:  500;
@@ -71,11 +71,11 @@
   --r-lg:   16px;
   --r-pill: 999px;
 
-  /* ---- Page geometry (A4 portrait) ---- */
+  /* ---- Page geometry (A4 portrait with generous teal margins) ---- */
   --page-w:      210mm;
   --page-h:      297mm;
-  --page-pad-x:  15mm;
-  --page-pad-y:  13mm;
+  --page-pad-x:  20mm;
+  --page-pad-y:  16mm;
 
   /* ---- Effects ---- */
   --shadow-tile:    0 10px 24px -6px rgba(8, 20, 26, 0.28);

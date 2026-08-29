@@ -81,12 +81,9 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Balanced & High-Fidelity):**
-  - Refined Card Proportions: Reduced the image tile by 15% (to `205px` width) with `grid-template-columns: 205px 1fr`, creating generous teal breathing room across the A4 page while keeping products filling 90% of the tile.
-  - Eliminated Dead Panel Space: Configured `.prod__body` with `justify-content: space-between`, distributing series label, name, subtitle, spec bullets, and the gold MRP badge cleanly from top to bottom.
-  - High-Fidelity Image Pipeline:
-    - Added CDN master asset upgrade rule in [`src/2_images.py`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/src/2_images.py) (`&width=2048`), re-downloading uncompressed native assets.
-    - Rendered in Chromium at `deviceScaleFactor: 2` without upscaling beyond native pixels.
-  - Divider Breathing Room: Increased `.stack__divider` margin to `var(--s-6) 0` for clear visual separation.
-  - Full-Bleed & Centered Layout: Full-bleed teal background edge-to-edge with single-product Page 3 vertically centered.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1200.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1200.pdf) (3 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Final Proportions & Flow):**
+  - Compact 165px Card Footprint: Reduced card footprint by another 20% (`165px 1fr` grid, `--page-pad-x: 20mm; --page-pad-y: 16mm;`), establishing clear teal breathing margins across all edges while keeping products prominent inside their ivory tiles.
+  - Top-Aligned Single Product Layout: Reverted Page 3 (`stack--single`) to top-aligned under the header per design specification.
+  - Tight Cohesive Hierarchy: Eliminated expanding gaps between subtitle and the gold rule/bullets by switching `.prod__body` to `justify-content: center` with compact margins, ensuring zero dead zones.
+  - Master Resolution CDN Pipeline: Maintained 1200x1200px native assets with `deviceScaleFactor: 2` rendering.
+- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1205.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1205.pdf) (3 A4 pages).

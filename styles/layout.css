@@ -25,7 +25,7 @@ html, body {
   margin: 0;
 }
 
-/* ---- Page (Full-bleed Deep Teal, Zero Gaps) ---- */
+/* ---- Page (Full-bleed Deep Teal, Generous Margins) ---- */
 .page {
   position: relative;
   width: 210mm;
@@ -122,19 +122,19 @@ html, body {
   display: flex;
   flex-direction: column;
   justify-content: space-evenly;
-  padding: var(--s-4) 0;
+  padding: var(--s-3) 0;
 }
-/* Single-product page: vertically centered in middle of page */
+/* Single-product page: top-aligned under header */
 .stack--single {
-  justify-content: center;
-  padding: 0;
+  justify-content: flex-start;
+  padding-top: var(--s-8);
 }
 
 .stack__divider {
   display: flex;
   align-items: center;
   color: var(--c-hairline-light);
-  margin: var(--s-6) 0; /* Generous breathing space around divider */
+  margin: var(--s-6) 0;
 }
 .stack__divider::before,
 .stack__divider::after {
@@ -153,24 +153,24 @@ html, body {
   border-radius: 1px;
 }
 
-/* ---- Product Block (Compact 205px proportions) ---- */
+/* ---- Product Block (Proportional 165px Compact Layout) ---- */
 .prod {
   display: grid;
-  grid-template-columns: 205px 1fr;
+  grid-template-columns: 165px 1fr;
   gap: var(--s-5);
   align-items: stretch; /* Vertically aligns image tile and details panel to equal height */
 }
 .prod--single {
   display: grid;
-  grid-template-columns: 205px 1fr;
+  grid-template-columns: 165px 1fr;
   gap: var(--s-5);
   align-items: stretch;
 }
 
-/* LEFT: Ivory rounded image tile (205px compact width) */
+/* LEFT: Ivory rounded image tile (165px compact width) */
 .prod__media {
-  width: 205px;
-  max-width: 205px;
+  width: 165px;
+  max-width: 165px;
   min-width: 0;
   overflow: hidden;
   position: relative;
@@ -182,7 +182,7 @@ html, body {
   justify-content: center;
   box-shadow: var(--shadow-tile);
   flex-shrink: 0;
-  padding: var(--s-3);
+  padding: var(--s-2);
 }
 .prod__img {
   max-width: 90%;
@@ -195,17 +195,17 @@ html, body {
   pointer-events: none;
 }
 
-/* RIGHT: Product details panel in soft ivory (#F5F2EC) — distributed content, no dead space */
+/* RIGHT: Product details panel in soft ivory (#F5F2EC) — tight cohesive hierarchy */
 .prod__body {
   min-width: 0;
   overflow: hidden;
   background: var(--c-panel-ivory);
   border: 1px solid var(--c-panel-border);
   border-radius: var(--r-lg);
-  padding: var(--s-4) var(--s-5);
+  padding: var(--s-3) var(--s-4);
   display: flex;
   flex-direction: column;
-  justify-content: space-between; /* Clean vertical distribution from top to bottom */
+  justify-content: center; /* Tight, cohesive flow without dead gaps */
   color: var(--c-ink);
   box-shadow: var(--shadow-panel);
 }
@@ -218,13 +218,13 @@ html, body {
   word-spacing: normal;
   text-transform: uppercase;
   color: var(--c-accent-gold-deep);
-  margin-bottom: var(--s-1);
+  margin-bottom: 2px;
 }
 
 .prod__name {
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
-  font-size: 32px;
+  font-size: var(--fs-name);
   line-height: var(--lh-tight);
   letter-spacing: -0.02em;
   color: var(--c-ink);
@@ -238,10 +238,10 @@ html, body {
 }
 
 .prod__subtitle {
-  font-size: 13.5px;
+  font-size: var(--fs-subtitle);
   line-height: var(--lh-snug);
   color: var(--c-muted);
-  max-width: 48ch;
+  max-width: 46ch;
   margin-bottom: var(--s-2);
 }
 .prod__subtitle b.spec {
@@ -261,15 +261,15 @@ html, body {
 .feats {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--s-2) var(--s-4);
+  gap: var(--s-1) var(--s-4);
   margin-bottom: var(--s-2);
   list-style: none;
 }
 .feat {
   position: relative;
   padding-left: var(--s-3);
-  font-size: 12.5px;
-  line-height: 1.40;
+  font-size: var(--fs-bullet);
+  line-height: var(--lh-body);
   color: var(--c-ink);
 }
 .feat::before {
@@ -279,7 +279,7 @@ html, body {
   top: 2px;
   width: var(--tick-w);
   height: calc(100% - 4px);
-  min-height: 12px;
+  min-height: 11px;
   background: var(--c-accent-gold);
   border-radius: 2px;
 }
@@ -292,13 +292,13 @@ html, body {
   gap: var(--s-2);
   background: var(--c-accent-gold);
   color: var(--c-bg-teal-deep);
-  padding: 6px var(--s-3);
+  padding: 5px var(--s-3);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-badge);
-  margin-top: var(--s-1);
+  margin-top: 2px;
 }
 .mrp__label {
-  font-size: 10.5px;
+  font-size: var(--fs-fine);
   font-weight: var(--fw-bold);
   letter-spacing: 0.08em;
   color: var(--c-bg-teal-deep);
@@ -308,12 +308,12 @@ html, body {
 .mrp__price {
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
-  font-size: 21px;
+  font-size: var(--fs-price);
   line-height: 1;
   color: var(--c-bg-teal-deep);
 }
 .mrp__gst {
-  font-size: 10.5px;
+  font-size: var(--fs-fine);
   font-weight: var(--fw-med);
   color: var(--c-bg-teal-deep);
   opacity: 0.88;
