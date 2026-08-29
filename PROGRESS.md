@@ -81,9 +81,8 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Brand Divider & Multi-word Spacing):**
-  - Dynamic Brand Divider Pages: Added full A4 brand divider pages (`page--brand`) rendered dynamically before each brand group from the master sheet. Styled in deep teal with the brand name in large bold white uppercase (`56px`), centered vertically and left-aligned with the card margin.
-  - Multi-Word Accent Spacing Fix: Resolved whitespace collapsing on `.prod__name em` and `.prod__num`, ensuring natural spacing across multi-word product names (e.g. `01 click 10`, `05 major ultra`).
-  - Page Sequence: Cover page (`images/cover.png`) → Brand divider page (`STUFFCOOL`) → Product pages (Pages 3–5).
-  - Preserved All Locked Dimensions: Kept fixed 235px card heights, 235px square image tiles, 80% product framing, and high-DPI 2x retina rendering.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1334.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1334.pdf) (5 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Massive Brand Divider & Single Space Flow):**
+  - Massive Dynamic Brand Title: Scaled brand name on [`page--brand`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/styles/layout.css) to a massive, bold white uppercase headline (`105px` baseline with dynamic JS auto-fitting in [`templates/base.html`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/templates/base.html)) filling nearly the full page width, vertically centered and left-aligned with the product cards.
+  - Single Normal Space Precision: Removed additional CSS em margins so multi-word product names (e.g. `01 click 10`, `05 major ultra`) render with exact single normal spaces.
+  - Maintained Locked Sizing: Preserved fixed 235px card heights, 235px square image tiles, 80% product framing, and high-DPI 2x retina rendering.
+- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1341.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1341.pdf) (5 A4 pages).

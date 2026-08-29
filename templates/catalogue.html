@@ -6,7 +6,9 @@
   {% for brand_group in brand_groups %}
     <!-- Dynamic Brand Divider Page -->
     <section class="page page--brand">
-      <h1 class="brand-divider__title">{{ brand_group.brand }}</h1>
+      <div class="brand-divider">
+        <h1 class="brand-divider__title">{{ brand_group.brand }}</h1>
+      </div>
     </section>
 
     {% for page in brand_group.pages %}

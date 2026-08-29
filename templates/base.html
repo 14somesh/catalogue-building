@@ -30,9 +30,23 @@
       }
     }
 
+    function fitBrand(el, max, min) {
+      var size = max;
+      el.style.fontSize = size + 'px';
+      var parent = el.parentElement;
+      var targetWidth = parent ? parent.clientWidth : 650;
+      while (el.scrollWidth > targetWidth && size > min) {
+        size -= 2;
+        el.style.fontSize = size + 'px';
+      }
+    }
+
     function run() {
       document.querySelectorAll('.prod__name').forEach(function (el) {
         fit(el, 44, 24);
+      });
+      document.querySelectorAll('.brand-divider__title').forEach(function (el) {
+        fitBrand(el, 120, 36);
       });
       window.__namesFitted = true;
     }
