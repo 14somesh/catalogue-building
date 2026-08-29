@@ -4,6 +4,11 @@
   {% include "components/cover_hook.html" %}
 
   {% for brand_group in brand_groups %}
+    <!-- Dynamic Brand Divider Page -->
+    <section class="page page--brand">
+      <h1 class="brand-divider__title">{{ brand_group.brand }}</h1>
+    </section>
+
     {% for page in brand_group.pages %}
       <section class="page">
         {% include "components/brand_header.html" %}

@@ -81,11 +81,9 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Cover Page & Inline Numbering):**
-  - Full-Bleed Cover Page (Page 1): Integrated `images/cover.png` via [`templates/components/cover_hook.html`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/templates/components/cover_hook.html) as a full A4 portrait cover page edge-to-edge with no margins, headers, footers, or overlays.
-  - Removed Eyebrow Line: Eliminated the `"01 — STUFFCOOL SERIES"` line across all product cards.
-  - Inline Gold Numbering: Placed the two-digit index before the product name on the same line (e.g. `01 click 10`, `05 major ultra`) in champagne gold (`.prod__num`).
-  - MRP Badge Clearance: With the eyebrow removed and balanced card padding, the MRP badge sits inside the ivory panel with comfortable bottom clearance.
-  - Aligned Bullet Rows: Configured CSS grid row tracks so both bullet columns start each row at the exact same vertical baseline.
-  - Locked Geometry: Preserved fixed uniform 235px card heights, 235px square image tiles, and 80% product framing.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1256.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1256.pdf) (4 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Brand Divider & Multi-word Spacing):**
+  - Dynamic Brand Divider Pages: Added full A4 brand divider pages (`page--brand`) rendered dynamically before each brand group from the master sheet. Styled in deep teal with the brand name in large bold white uppercase (`56px`), centered vertically and left-aligned with the card margin.
+  - Multi-Word Accent Spacing Fix: Resolved whitespace collapsing on `.prod__name em` and `.prod__num`, ensuring natural spacing across multi-word product names (e.g. `01 click 10`, `05 major ultra`).
+  - Page Sequence: Cover page (`images/cover.png`) → Brand divider page (`STUFFCOOL`) → Product pages (Pages 3–5).
+  - Preserved All Locked Dimensions: Kept fixed 235px card heights, 235px square image tiles, 80% product framing, and high-DPI 2x retina rendering.
+- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1334.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1334.pdf) (5 A4 pages).

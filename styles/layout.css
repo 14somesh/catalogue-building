@@ -64,6 +64,26 @@ html, body {
   display: block;
 }
 
+/* Brand Divider Page (Full A4, Vertically Centered, Left-Aligned to Card Margin) */
+.page--brand {
+  padding: var(--page-pad-y) var(--page-pad-x) !important;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  background-color: #1B3A47 !important;
+  background: #1B3A47 !important;
+}
+.brand-divider__title {
+  font-family: var(--font-display);
+  font-weight: var(--fw-bold);
+  font-size: 56px;
+  line-height: 1.1;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #FFFFFF;
+}
+
 /* ---- Header ---- */
 .hdr {
   display: flex;
@@ -236,8 +256,6 @@ html, body {
 }
 
 .prod__name {
-  display: flex;
-  align-items: baseline;
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
   font-size: var(--fs-name);
@@ -251,14 +269,16 @@ html, body {
 .prod__num {
   color: var(--c-accent-gold-deep);
   font-size: 0.88em;
-  margin-right: 0.28em;
+  margin-right: 0.35em;
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
-  flex-shrink: 0;
+  display: inline-block;
 }
 .prod__name em {
   font-style: normal;
   color: var(--c-accent-gold-deep);
+  margin-left: 0.28em;
+  display: inline-block;
 }
 
 .prod__subtitle {
