@@ -36,52 +36,6 @@ def image_to_base64(filepath: str) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def strip_flat_bg_to_cutout(source_path: str, cutout_path: str, tol: int = 35) -> str:
-    """
-    Strips flat cyan background and crops tightly to content bounding box,
-    allowing CSS object-fit to scale products to fill 90% of the tile naturally.
-    """
-    if not os.path.exists(source_path):
-        return ""
-    
-    os.makedirs(os.path.dirname(cutout_path), exist_ok=True)
-    
-    im = Image.open(source_path).convert("RGBA")
-    a = np.array(im, dtype=np.float32)
-    
-    # Sample corner pixels to detect solid background
-    corners = [a[0, 0, :3], a[0, -1, :3], a[-1, 0, :3], a[-1, -1, :3]]
-    bg = np.median(np.stack(corners), axis=0)
-    
-    r, g, b, alpha = a[:, :, 0], a[:, :, 1], a[:, :, 2], a[:, :, 3]
-    dist = np.sqrt(((a[:, :, :3] - bg) ** 2).sum(axis=2))
-    
-    # Detect cyan background and cyan-tinted ground shadows
-    is_solid_bg = (dist < tol)
-    is_cyan_shadow = (b > r + 25) & (g > r + 15) & (b > 120)
-    
-    mask = is_solid_bg | is_cyan_shadow
-    a[:, :, 3] = np.where(mask, 0, alpha)
-    
-    clean_im = Image.fromarray(a.astype(np.uint8))
-    
-    bbox = clean_im.getbbox()
-    if not bbox:
-        clean_im.save(cutout_path)
-        return cutout_path
-        
-    pad = 8
-    w, h = clean_im.size
-    left = max(0, bbox[0] - pad)
-    top = max(0, bbox[1] - pad)
-    right = min(w, bbox[2] + pad)
-    bottom = min(h, bbox[3] + pad)
-    cropped = clean_im.crop((left, top, right, bottom))
-    
-    cropped.save(cutout_path)
-    return cutout_path
-
-
 def load_self_hosted_fonts_css() -> str:
     """Reads self-hosted fonts.css and embeds font files as base64 data URIs for offline PDF compilation."""
     fonts_css_path = "fonts/fonts.css"
@@ -257,17 +211,9 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
             prod = get_effective_product_dict(row)
             validate_product_data(prod, row.to_dict())
             
-            # Resolve image and ensure background-stripped cutout
-            brand_slug = prod.get("brand_slug", slugify(brand_name))
-            model_slug = prod.get("model_slug", "")
+            # Resolve product image
             raw_img_path = prod.get("image_full_path", "")
-            cutout_img_path = os.path.join("images", f"{brand_slug}_cut", f"{model_slug}.png")
-            
-            if not os.path.exists(cutout_img_path) and os.path.exists(raw_img_path):
-                strip_flat_bg_to_cutout(raw_img_path, cutout_img_path)
-                
-            active_img_path = cutout_img_path if os.path.exists(cutout_img_path) else raw_img_path
-            image_b64 = image_to_base64(active_img_path) if os.path.exists(active_img_path) else ""
+            image_b64 = image_to_base64(raw_img_path) if os.path.exists(raw_img_path) else ""
             
             # Format price
             mrp_raw = prod.get("mrp_raw")
