@@ -50,9 +50,26 @@ def validate_image_file(file_path: str, min_width: int = 800, min_height: int = 
         return "missing", None
 
 
+def upgrade_cdn_url_resolution(url: str) -> str:
+    """
+    Ensures CDN image URLs (e.g. Shopify CDN) request maximum master resolution (e.g., width=2048).
+    Never requests a constrained or downscaled variant.
+    """
+    import re
+    if "cdn/shop" in url or "cdn.shopify" in url:
+        # Replace existing width query or append width=2048 for master asset
+        if "width=" in url:
+            url = re.sub(r"width=\d+", "width=2048", url)
+        else:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}width=2048"
+    return url
+
+
 def download_image(url: str, dest_path: str, timeout: int = 15) -> bool:
     """
-    Downloads an image from a web URL, converts/saves it as a clean PNG at dest_path.
+    Downloads an image from a web URL at maximum available resolution.
+    Converts/saves it as a clean native-resolution PNG at dest_path without upscaling.
     """
     try:
         import io
@@ -60,17 +77,23 @@ def download_image(url: str, dest_path: str, timeout: int = 15) -> bool:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        response = requests.get(url, headers=headers, timeout=timeout)
+        
+        # Rule: Always request highest resolution source offers
+        max_res_url = upgrade_cdn_url_resolution(url)
+        
+        response = requests.get(max_res_url, headers=headers, timeout=timeout)
         if response.status_code == 200:
             image = Image.open(io.BytesIO(response.content))
             # Convert palette/CMYK to RGB/RGBA
             if image.mode in ("P", "CMYK", "LA"):
                 image = image.convert("RGBA" if "A" in image.mode else "RGB")
+            
+            # Save at native resolution — never upscale beyond native pixel size
             image.save(dest_path, format="PNG")
-            logger.info(f"Successfully downloaded and saved image to {dest_path} ({image.width}x{image.height}px, format=PNG)")
+            logger.info(f"Successfully saved native-resolution image to {dest_path} ({image.width}x{image.height}px, format=PNG)")
             return True
         else:
-            logger.warning(f"Failed to download image from {url}: HTTP {response.status_code}")
+            logger.warning(f"Failed to download image from {max_res_url}: HTTP {response.status_code}")
             return False
     except Exception as e:
         logger.error(f"Error downloading image from {url}: {e}")

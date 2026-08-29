@@ -81,10 +81,12 @@
   4. `PB-SC-004`: **Lucid** (10,000 mAh 15W Magnetic Wireless with Built-in Stand)
   5. `PB-SC-005`: **Major Ultra** (20,000 mAh 65W PD Laptop-Grade Powerbank)
 - **High-Res Images:** Downloaded & verified at 1200x1200px PNG in `images/stuffcool/`.
-- **Deep Teal & Champagne Gold Digital Edition (Full-Bleed & Scaled):**
-  - Full-Bleed Edge-to-Edge Teal: Removed top edge white gaps by enforcing `prefer_css_page_size=True` in Playwright and setting `html, body, .page` to explicit 210mm x 297mm zero-margin full-bleed backgrounds.
-  - Scaled & Normalized Image Tile Filling: Implemented tight content-bounding cropping (`strip_flat_bg_to_cutout`) and `max-width: 90%; max-height: 90%` containment, ensuring every product (`Click 10`, `Aura`, `Giga`, `Lucid`, `Major Ultra`) fills roughly 90% of the tile naturally and consistently.
-  - Unified Ivory Theme: Matching ivory image tiles (`#F5F2EC`, border `#EAE5DC`) with equal-height alignment to the details panel.
-  - Vertically Centered Remainder: Single product card vertically centered on Page 3.
-  - High-DPI 2x Retina Compilation: Razor-sharp PDF output at fit-to-page zoom.
-- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1134.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1134.pdf) (3 A4 pages).
+- **Deep Teal & Champagne Gold Digital Edition (Balanced & High-Fidelity):**
+  - Refined Card Proportions: Reduced the image tile by 15% (to `205px` width) with `grid-template-columns: 205px 1fr`, creating generous teal breathing room across the A4 page while keeping products filling 90% of the tile.
+  - Eliminated Dead Panel Space: Configured `.prod__body` with `justify-content: space-between`, distributing series label, name, subtitle, spec bullets, and the gold MRP badge cleanly from top to bottom.
+  - High-Fidelity Image Pipeline:
+    - Added CDN master asset upgrade rule in [`src/2_images.py`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/src/2_images.py) (`&width=2048`), re-downloading uncompressed native assets.
+    - Rendered in Chromium at `deviceScaleFactor: 2` without upscaling beyond native pixels.
+  - Divider Breathing Room: Increased `.stack__divider` margin to `var(--s-6) 0` for clear visual separation.
+  - Full-Bleed & Centered Layout: Full-bleed teal background edge-to-edge with single-product Page 3 vertically centered.
+- **Generated PDF:** [`dist/powerbank_catalogue_2026-08-29_1200.pdf`](file:///d:/CODING/Anti%20Gravity/Catalogue/Vianet%20Catalogue/dist/powerbank_catalogue_2026-08-29_1200.pdf) (3 A4 pages).

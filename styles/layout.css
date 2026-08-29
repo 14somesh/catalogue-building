@@ -116,13 +116,13 @@ html, body {
   background: var(--c-accent-gold);
 }
 
-/* ---- Product Stack (2 stacked vertically) ---- */
+/* ---- Product Stack (2 stacked vertically with generous breathing space) ---- */
 .stack {
   flex: 1;
   display: flex;
   flex-direction: column;
   justify-content: space-evenly;
-  padding: var(--s-3) 0;
+  padding: var(--s-4) 0;
 }
 /* Single-product page: vertically centered in middle of page */
 .stack--single {
@@ -134,7 +134,7 @@ html, body {
   display: flex;
   align-items: center;
   color: var(--c-hairline-light);
-  margin: var(--s-2) 0;
+  margin: var(--s-6) 0; /* Generous breathing space around divider */
 }
 .stack__divider::before,
 .stack__divider::after {
@@ -153,24 +153,24 @@ html, body {
   border-radius: 1px;
 }
 
-/* ---- Product Block (Equal Height / Aligned Edges) ---- */
+/* ---- Product Block (Compact 205px proportions) ---- */
 .prod {
   display: grid;
-  grid-template-columns: 240px 1fr;
-  gap: var(--s-6);
+  grid-template-columns: 205px 1fr;
+  gap: var(--s-5);
   align-items: stretch; /* Vertically aligns image tile and details panel to equal height */
 }
 .prod--single {
   display: grid;
-  grid-template-columns: 240px 1fr;
-  gap: var(--s-6);
+  grid-template-columns: 205px 1fr;
+  gap: var(--s-5);
   align-items: stretch;
 }
 
-/* LEFT: Ivory rounded image tile matching details panel height */
+/* LEFT: Ivory rounded image tile (205px compact width) */
 .prod__media {
-  width: 240px;
-  max-width: 240px;
+  width: 205px;
+  max-width: 205px;
   min-width: 0;
   overflow: hidden;
   position: relative;
@@ -195,17 +195,17 @@ html, body {
   pointer-events: none;
 }
 
-/* RIGHT: Product details panel in soft ivory (#F5F2EC) */
+/* RIGHT: Product details panel in soft ivory (#F5F2EC) — distributed content, no dead space */
 .prod__body {
   min-width: 0;
   overflow: hidden;
   background: var(--c-panel-ivory);
   border: 1px solid var(--c-panel-border);
   border-radius: var(--r-lg);
-  padding: var(--s-5) var(--s-6);
+  padding: var(--s-4) var(--s-5);
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: space-between; /* Clean vertical distribution from top to bottom */
   color: var(--c-ink);
   box-shadow: var(--shadow-panel);
 }
@@ -224,12 +224,12 @@ html, body {
 .prod__name {
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
-  font-size: var(--fs-name);
+  font-size: 32px;
   line-height: var(--lh-tight);
   letter-spacing: -0.02em;
   color: var(--c-ink);
   white-space: nowrap;
-  margin-bottom: var(--s-1);
+  margin-bottom: 2px;
 }
 .prod__name.is-wrapped { white-space: normal; }
 .prod__name em {
@@ -238,7 +238,7 @@ html, body {
 }
 
 .prod__subtitle {
-  font-size: var(--fs-subtitle);
+  font-size: 13.5px;
   line-height: var(--lh-snug);
   color: var(--c-muted);
   max-width: 48ch;
@@ -250,41 +250,41 @@ html, body {
 }
 
 .prod__rule {
-  width: 32px;
+  width: 28px;
   height: var(--tick-w);
   background: var(--c-accent-gold);
   border-radius: 2px;
-  margin-bottom: var(--s-3);
+  margin-bottom: var(--s-2);
 }
 
 /* Bullets: 2 columns with gold vertical ticks */
 .feats {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--s-2) var(--s-5);
-  margin-bottom: var(--s-3);
+  gap: var(--s-2) var(--s-4);
+  margin-bottom: var(--s-2);
   list-style: none;
 }
 .feat {
   position: relative;
   padding-left: var(--s-3);
-  font-size: var(--fs-bullet);
-  line-height: var(--lh-body);
+  font-size: 12.5px;
+  line-height: 1.40;
   color: var(--c-ink);
 }
 .feat::before {
   content: "";
   position: absolute;
   left: 0;
-  top: 3px;
+  top: 2px;
   width: var(--tick-w);
-  height: calc(100% - 6px);
+  height: calc(100% - 4px);
   min-height: 12px;
   background: var(--c-accent-gold);
   border-radius: 2px;
 }
 
-/* Gold MRP Badge (Gold background with dark teal text) */
+/* Gold MRP Badge (Seated cleanly at the bottom) */
 .mrp {
   align-self: flex-start;
   display: inline-flex;
@@ -292,12 +292,13 @@ html, body {
   gap: var(--s-2);
   background: var(--c-accent-gold);
   color: var(--c-bg-teal-deep);
-  padding: var(--s-2) var(--s-4);
+  padding: 6px var(--s-3);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-badge);
+  margin-top: var(--s-1);
 }
 .mrp__label {
-  font-size: var(--fs-fine);
+  font-size: 10.5px;
   font-weight: var(--fw-bold);
   letter-spacing: 0.08em;
   color: var(--c-bg-teal-deep);
@@ -307,12 +308,12 @@ html, body {
 .mrp__price {
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
-  font-size: var(--fs-price);
+  font-size: 21px;
   line-height: 1;
   color: var(--c-bg-teal-deep);
 }
 .mrp__gst {
-  font-size: var(--fs-fine);
+  font-size: 10.5px;
   font-weight: var(--fw-med);
   color: var(--c-bg-teal-deep);
   opacity: 0.88;
