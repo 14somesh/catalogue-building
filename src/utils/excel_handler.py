@@ -26,7 +26,7 @@ EXPECTED_COLUMNS = [
     "Image_URL", "Image_Status", "Image_Source", "Image_Tier",
     "Override_Title", "Override_Subtitle", "Override_MRP", "Override_Spec_Capacity", "Override_Spec_Output", "Override_Spec_Ports", "Override_Spec_Weight", "Override_Spec_Warranty",
     "Override_Bullet_1", "Override_Bullet_2", "Override_Bullet_3", "Override_Bullet_4", "Override_Image_Path",
-    "Attempts", "Fix_Log", "Flags", "Status"
+    "Attempts", "Fix_Log", "Flags", "LLM_Provider", "Status"
 ]
 
 RAW_FIELD_TO_SOURCE_MAP = {

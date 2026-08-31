@@ -246,43 +246,70 @@ else:
     print("FAIL: Deterministic validator passed a row with missing image.")
 
 # ----------------------------------------------------------------------
-# Test (e): Simulated Daily Quota 429 Halts Immediately Without Retrying
+# Test (e): Simulated Daily Quota 429 -> Failover to Groq without Halting
 # ----------------------------------------------------------------------
-print("\n--- TEST (e): Simulated Daily Quota 429 (GenerateRequestsPerDay) -> Immediate Halt ---")
+print("\n--- TEST (e): Simulated Gemini Quota Exhaustion -> Seamless Failover to Groq ---")
 from unittest.mock import patch, MagicMock
 from src.utils.llm_client import (
     draft_bullets_and_subtitle,
+    _draft_copy_gemini,
+    _draft_copy_groq,
     GeminiDailyQuotaExhaustedError,
-    classify_gemini_error
+    AllLLMProvidersExhaustedError,
+    classify_gemini_error,
+    reset_provider_states,
+    is_provider_exhausted
 )
 
-call_count_e = 0
+reset_provider_states()
+call_count_e_gemini = 0
+call_count_e_groq = 0
 
-def mock_daily_quota_generate(*args, **kwargs):
-    global call_count_e
-    call_count_e += 1
+def mock_gemini_quota_exhausted(*args, **kwargs):
+    global call_count_e_gemini
+    call_count_e_gemini += 1
     raise Exception("429 RESOURCE_EXHAUSTED: quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier exceeded")
 
-with patch("src.utils.llm_client.get_gemini_client") as mock_get_client:
-    mock_client = MagicMock()
-    mock_client.models.generate_content.side_effect = mock_daily_quota_generate
-    mock_get_client.return_value = mock_client
+def mock_groq_success(*args, **kwargs):
+    global call_count_e_groq
+    call_count_e_groq += 1
+    mock_resp = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = '{"title": "Stuffcool Aura", "subtitle": "Ultra-fast charging powerbank", "bullet_1": "10000mAh capacity for all day power.", "bullet_2": "20W Type-C PD fast charging port.", "bullet_3": "Compact and lightweight design.", "bullet_4": "Multi-layer safety protection."}'
+    mock_resp.choices = [mock_choice]
+    return mock_resp
+
+with patch("src.utils.llm_client.get_gemini_client") as mock_gemini_client_fn, \
+     patch("src.utils.llm_client.get_groq_client") as mock_groq_client_fn:
     
-    call_count_e = 0
-    try:
-        draft_bullets_and_subtitle("Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"})
-        print("FAIL: Daily quota 429 did not raise GeminiDailyQuotaExhaustedError!")
-    except GeminiDailyQuotaExhaustedError as e:
-        if call_count_e == 1:
-            print(f"PASS: Daily quota 429 halted immediately on attempt {call_count_e} (0 retries).")
-            print(f"   >>> Exception message: {e}")
-        else:
-            print(f"FAIL: Daily quota 429 made {call_count_e} attempts before raising (expected 1).")
+    mock_g_client = MagicMock()
+    mock_g_client.models.generate_content.side_effect = mock_gemini_quota_exhausted
+    mock_gemini_client_fn.return_value = mock_g_client
+
+    mock_gr_client = MagicMock()
+    mock_gr_client.chat.completions.create.side_effect = mock_groq_success
+    mock_groq_client_fn.return_value = mock_gr_client
+
+    call_count_e_gemini = 0
+    call_count_e_groq = 0
+    
+    res_copy, provider_used = draft_bullets_and_subtitle(
+        "Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"}
+    )
+
+    if provider_used == "groq" and res_copy and res_copy.get("title") == "Stuffcool Aura" and is_provider_exhausted("gemini"):
+        print(f"PASS: Gemini quota exhaustion failed over to Groq without halting.")
+        print(f"   >>> Provider Used: '{provider_used}'")
+        print(f"   >>> Gemini Calls: {call_count_e_gemini} (marked exhausted) | Groq Calls: {call_count_e_groq}")
+        print(f"   >>> Drafted Title: '{res_copy.get('title')}'")
+    else:
+        print(f"FAIL: Fallback did not resolve to Groq. provider={provider_used}, res={res_copy}")
 
 # ----------------------------------------------------------------------
 # Test (f): Simulated 503 Transient Error Retries with Backoff
 # ----------------------------------------------------------------------
 print("\n--- TEST (f): Simulated 503 Transient Error -> Exponential Backoff & Retry ---")
+reset_provider_states()
 call_count_f = 0
 sleep_calls_f = []
 
@@ -292,7 +319,7 @@ def mock_503_then_success(*args, **kwargs):
     if call_count_f < 3:
         raise Exception("503 Service Unavailable: Model is overloaded, please try again.")
     mock_resp = MagicMock()
-    mock_resp.text = json_str = '{"title": "Stuffcool Aura", "subtitle": "Fast charging", "bullet_1": "B1", "bullet_2": "B2", "bullet_3": "B3", "bullet_4": "B4"}'
+    mock_resp.text = '{"title": "Stuffcool Aura", "subtitle": "Fast charging", "bullet_1": "B1", "bullet_2": "B2", "bullet_3": "B3", "bullet_4": "B4"}'
     return mock_resp
 
 def mock_sleep_f(seconds):
@@ -306,10 +333,10 @@ with patch("src.utils.llm_client.get_gemini_client") as mock_get_client, \
     
     call_count_f = 0
     sleep_calls_f = []
-    res_f = draft_bullets_and_subtitle("Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"})
+    res_f, prov_f = draft_bullets_and_subtitle("Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"})
     
     if res_f and res_f.get("title") == "Stuffcool Aura" and call_count_f == 3 and sleep_calls_f == [2, 4]:
-        print(f"PASS: 503 transient error retried with exponential backoff across {call_count_f} attempts.")
+        print(f"PASS: 503 transient error retried with exponential backoff across {call_count_f} attempts on {prov_f}.")
         print(f"   >>> Backoff sleep intervals: {sleep_calls_f}s")
         print(f"   >>> Successfully resolved copy on attempt 3: title='{res_f.get('title')}'")
     else:
@@ -333,9 +360,9 @@ dummy_parser_res = ParserResult(
 )
 
 with patch.object(collect_module, "execute_spec_escalation", return_value=(dummy_parser_res, "tier-1: brand-page")), \
-     patch.object(collect_module, "draft_bullets_and_subtitle", return_value=None), \
+     patch.object(collect_module, "draft_bullets_and_subtitle", return_value=(None, None)), \
      patch.object(review_mod.collect_mod, "execute_spec_escalation", return_value=(dummy_parser_res, "tier-1: brand-page")), \
-     patch.object(review_mod.collect_mod, "draft_bullets_and_subtitle", return_value=None):
+     patch.object(review_mod.collect_mod, "draft_bullets_and_subtitle", return_value=(None, None)):
     
     row_input = {
         "Product_ID": "TEST-DEFERRED",
@@ -369,6 +396,62 @@ with patch.object(collect_module, "execute_spec_escalation", return_value=(dummy
         print(f"   >>> Flags: '{final_loop_row.get('Flags')}'")
     else:
         print(f"FAIL: LLM failure status={final_status}, attempts={final_attempts}, saved_capacity={saved_capacity}")
+
+# ----------------------------------------------------------------------
+# Test (h): All Providers Exhausted -> Halts with AllLLMProvidersExhaustedError
+# ----------------------------------------------------------------------
+print("\n--- TEST (h): All LLM Providers Exhausted -> Halts Run Cleanly ---")
+reset_provider_states()
+
+def mock_exhausted(*args, **kwargs):
+    raise Exception("429 RESOURCE_EXHAUSTED: daily limit reached")
+
+with patch("src.utils.llm_client.get_gemini_client") as mock_gemini_fn, \
+     patch("src.utils.llm_client.get_groq_client") as mock_groq_fn:
+    
+    mock_g = MagicMock()
+    mock_g.models.generate_content.side_effect = mock_exhausted
+    mock_gemini_fn.return_value = mock_g
+
+    mock_gr = MagicMock()
+    mock_gr.chat.completions.create.side_effect = mock_exhausted
+    mock_groq_fn.return_value = mock_gr
+
+    try:
+        draft_bullets_and_subtitle("Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"})
+        print("FAIL: Did not raise AllLLMProvidersExhaustedError when all providers exhausted.")
+    except AllLLMProvidersExhaustedError as e:
+        print(f"PASS: AllLLMProvidersExhaustedError raised when both providers exhausted.")
+        print(f"   >>> Message: '{e}'")
+
+# ----------------------------------------------------------------------
+# Test (i): Pre-flight Multi-Provider Quota Check Probes Both Providers
+# ----------------------------------------------------------------------
+print("\n--- TEST (i): Pre-flight Multi-Provider Check ---")
+from src.utils.llm_client import preflight_quota_check
+
+reset_provider_states()
+with patch("src.utils.llm_client.get_gemini_client") as mock_gemini_fn, \
+     patch("src.utils.llm_client.get_groq_client") as mock_groq_fn:
+    
+    mock_g = MagicMock()
+    mock_gemini_fn.return_value = mock_g
+
+    mock_gr = MagicMock()
+    mock_groq_fn.return_value = mock_gr
+
+    ok, available = preflight_quota_check({
+        "providers": [
+            {"name": "gemini", "model": "gemini-3.6-flash"},
+            {"name": "groq", "model": "llama-3.3-70b-versatile"}
+        ]
+    })
+    
+    if ok and "gemini" in available and "groq" in available:
+        print(f"PASS: Pre-flight check successfully probed both providers.")
+        print(f"   >>> Available Providers: {available}")
+    else:
+        print(f"FAIL: Pre-flight check returned ok={ok}, available={available}")
 
 print("\n" + "=" * 80)
 print("ALL STEP 3 REGRESSION AND VERIFICATION TESTS COMPLETED")

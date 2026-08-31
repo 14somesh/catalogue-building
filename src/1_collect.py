@@ -194,11 +194,12 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict) -> Tuple[Dict[s
         }, False, f"[{product_id}] BLOCKED: All tiers exhausted"
 
     # Call LLM ONLY to draft bullets and subtitle from verified product text
-    llm_copy = draft_bullets_and_subtitle(
+    llm_copy, provider_used = draft_bullets_and_subtitle(
         brand=brand,
         model_name=model_name,
         product_description_block=parser_res.description_text or "",
-        specs=parser_res.specs
+        specs=parser_res.specs,
+        llm_config=config.get("llm", {})
     )
 
     if not llm_copy:
@@ -226,6 +227,7 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict) -> Tuple[Dict[s
             "Source_Spec_Warranty": source_url if specs.get("warranty") else "brand-default-policy",
             "Tier_Spec_Warranty": tier,
             "Status": "Deferred",
+            "LLM_Provider": None,
             "Flags": "Deferred: LLM copy drafting failed due to infrastructure error",
             "Fix_Log": f"Specs collected via {provenance}; LLM copy drafting deferred due to infrastructure error"
         }
@@ -281,6 +283,7 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict) -> Tuple[Dict[s
         "Raw_Bullet_4": llm_copy.get("bullet_4"),
         "Source_Bullet_4": source_url,
         "Tier_Bullet_4": tier,
+        "LLM_Provider": provider_used,
         "Status": "Collected",
         "Flags": None,
         "Fix_Log": f"Collected via {provenance}"

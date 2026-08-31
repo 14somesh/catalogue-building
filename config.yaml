@@ -25,8 +25,13 @@ validation_rules:
   required_bullets: 4
 
 llm:
-  model: "gemini-3.6-flash"
-  temperature: 0.2
+  providers:
+    - name: "gemini"
+      model: "gemini-3.6-flash"
+      temperature: 0.2
+    - name: "groq"
+      model: "llama-3.3-70b-versatile"
+      temperature: 0.2
 
 search:
   provider: "gemini_grounding"   # Options: "gemini_grounding", "duckduckgo"

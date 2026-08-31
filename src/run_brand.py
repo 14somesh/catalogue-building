@@ -18,7 +18,7 @@ from src.utils.excel_handler import (
 )
 from src.utils.validators import validate_row_deterministic
 from src.utils.scraper import load_brand_defaults
-from src.utils.llm_client import preflight_quota_check, GeminiDailyQuotaExhaustedError
+from src.utils.llm_client import preflight_quota_check, AllLLMProvidersExhaustedError
 import importlib
 review_mod = importlib.import_module("src.3_review")
 process_row_loop = review_mod.process_row_loop
@@ -33,7 +33,7 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
     Generates a comprehensive Markdown run report for human review:
     - Summary header: Ready / Blocked / Deferred / Warnings
     - Blocked and Deferred rows grouped with diagnostic fix logs
-    - Full breakdown per product row with field sources, tiers, attempts, and image metrics.
+    - Full breakdown per product row with field sources, tiers, attempts, image metrics, and LLM Provider.
     """
     os.makedirs(output_dir, exist_ok=True)
     timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M")
@@ -122,6 +122,7 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
         attempts = row.get("Attempts", 0)
         img_source = row.get("Image_Source", "None")
         img_tier = row.get("Image_Tier", "N/A")
+        llm_provider = row.get("LLM_Provider") or "N/A"
         
         brand_slug = slugify(brand)
         model_slug = slugify(model)
@@ -136,7 +137,7 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
                 dims_str = "Unreadable"
 
         report_lines.append(f"### {status_icon} [{pid}] {brand} {model}")
-        report_lines.append(f"- **Status:** `{status}` | **Attempts:** {attempts}")
+        report_lines.append(f"- **Status:** `{status}` | **Attempts:** {attempts} | **LLM Provider:** `{llm_provider}`")
         report_lines.append(f"- **Dealer Price (DP):** ₹{get_effective_value(row, 'MRP')}")
         report_lines.append(f"- **Image Source:** `{img_source}` (Tier {img_tier}) | **Dimensions:** `{dims_str}`")
         
@@ -185,7 +186,7 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
 def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic_audit: bool = False) -> str:
     """
     Main unattended orchestrator for a specific brand:
-    pre-flight check -> load -> collect -> images -> validate -> fix loop -> report.
+    multi-provider pre-flight check -> load -> collect -> images -> validate -> fix loop -> report.
     """
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
@@ -198,7 +199,7 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
         logger.error(f"No products found for brand '{brand_name}' in {excel_path}")
         raise ValueError(f"Brand '{brand_name}' not found in catalogue data.")
 
-    # ==================== PRE-FLIGHT QUOTA CHECK ====================
+    # ==================== PRE-FLIGHT MULTI-PROVIDER QUOTA CHECK ====================
     brand_indices = df[brand_mask].index
     pending_count = sum(
         1 for idx in brand_indices
@@ -211,10 +212,9 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
     logger.info(f"[Pre-flight] Estimated LLM calls needed: {estimated_calls} ({calls_per_row} per pending product).")
 
     if pending_count > 0:
-        llm_model = config.get("llm", {}).get("model", "gemini-3.6-flash")
         try:
-            preflight_quota_check(model=llm_model)
-        except GeminiDailyQuotaExhaustedError as e:
+            preflight_quota_check(llm_config=config.get("llm", {}))
+        except AllLLMProvidersExhaustedError as e:
             logger.error(f"[Pre-flight HALT] {e}")
             print(f"\n[HALT] {e}\n")
             return ""
@@ -231,7 +231,7 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
             )
             for k, v in processed_row.items():
                 df.at[idx, k] = v
-        except GeminiDailyQuotaExhaustedError as e:
+        except AllLLMProvidersExhaustedError as e:
             logger.error(f"[Pipeline HALT] {e}")
             print(f"\n[HALT] {e}\n")
             return ""

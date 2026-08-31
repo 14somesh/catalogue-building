@@ -193,7 +193,7 @@ def process_row_loop(
             # Step 4: LLM Semantic Advisory Pass (WARN-ONLY, optional behind flag, off by default)
             if enable_semantic_audit:
                 prod_payload = get_effective_product_dict(current_row)
-                sem_flags, _ = audit_product_semantics(prod_payload)
+                sem_flags, _ = audit_product_semantics(prod_payload, llm_config=config.get("llm", {}))
                 for sf in sem_flags:
                     warnings.append(f"[Advisory] {sf}")
 
