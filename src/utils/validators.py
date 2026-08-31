@@ -67,9 +67,13 @@ def validate_row_deterministic(
     override_title = str(row_dict.get("Override_Title", "")).strip() if not is_empty_value(row_dict.get("Override_Title")) else ""
     
     # --------------------------------------------------------------------------
-    # HARD CHECK a: All spec tiers exhausted / No data collected
+    # HARD CHECK a: All spec tiers exhausted / No data collected / Deferred
     # --------------------------------------------------------------------------
-    if row_dict.get("Status") == "Blocked" or (not raw_title and not override_title):
+    if row_dict.get("Status") == "Blocked":
+        hard_flags.append("Product marked as Blocked")
+    elif row_dict.get("Status") == "Deferred":
+        hard_flags.append("Product deferred due to infrastructure error")
+    elif not raw_title and not override_title:
         hard_flags.append("All spec tiers exhausted without finding technical specifications")
 
     # --------------------------------------------------------------------------

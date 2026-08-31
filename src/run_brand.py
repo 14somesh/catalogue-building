@@ -18,6 +18,7 @@ from src.utils.excel_handler import (
 )
 from src.utils.validators import validate_row_deterministic
 from src.utils.scraper import load_brand_defaults
+from src.utils.llm_client import preflight_quota_check, GeminiDailyQuotaExhaustedError
 import importlib
 review_mod = importlib.import_module("src.3_review")
 process_row_loop = review_mod.process_row_loop
@@ -30,8 +31,8 @@ logger = setup_logger("run_brand")
 def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") -> str:
     """
     Generates a comprehensive Markdown run report for human review:
-    - Summary header: Ready / Blocked / Warnings
-    - Blocked rows grouped at the top with diagnostic fix logs
+    - Summary header: Ready / Blocked / Deferred / Warnings
+    - Blocked and Deferred rows grouped with diagnostic fix logs
     - Full breakdown per product row with field sources, tiers, attempts, and image metrics.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -41,12 +42,13 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
 
     ready_rows = [r for r in brand_rows if r.get("Status") in ("Ready_For_Review", "Approved")]
     blocked_rows = [r for r in brand_rows if r.get("Status") == "Blocked"]
-    warn_rows = [r for r in brand_rows if not is_empty_value(r.get("Flags")) and r.get("Status") != "Blocked"]
+    deferred_rows = [r for r in brand_rows if r.get("Status") == "Deferred"]
+    warn_rows = [r for r in brand_rows if not is_empty_value(r.get("Flags")) and r.get("Status") not in ("Blocked", "Deferred")]
 
     report_lines = [
         f"# Pipeline Run Report: Brand '{brand}'",
         f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
-        f"**Total Products:** {len(brand_rows)} | **Ready for Review:** {len(ready_rows)} | **Blocked:** {len(blocked_rows)} | **Warnings:** {len(warn_rows)}",
+        f"**Total Products:** {len(brand_rows)} | **Ready for Review:** {len(ready_rows)} | **Blocked:** {len(blocked_rows)} | **Deferred:** {len(deferred_rows)} | **Warnings:** {len(warn_rows)}",
         "",
         "---",
         ""
@@ -79,6 +81,30 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
         report_lines.append("## ✅ No Blocked Rows! All products collected and validated cleanly.")
         report_lines.append("")
 
+    # ==================== DEFERRED ROWS SECTION ====================
+    if deferred_rows:
+        report_lines.append("## ⏳ DEFERRED ROWS (Infrastructure / Retry on Next Run)")
+        report_lines.append("The following products could not complete processing due to temporary API or network limits. Collected specs and provenance are preserved, and these rows will be retried on the next run.")
+        report_lines.append("")
+        for d_row in deferred_rows:
+            pid = d_row.get("Product_ID")
+            model = d_row.get("Model_Name")
+            flags = d_row.get("Flags") or "Deferred due to infrastructure failure"
+            attempts = d_row.get("Attempts", 0)
+            fix_log = d_row.get("Fix_Log") or "Deferred"
+
+            report_lines.append(f"### 🟡 [{pid}] {brand} {model}")
+            report_lines.append(f"- **Status:** `Deferred`")
+            report_lines.append(f"- **Reason / Flags:** {flags}")
+            report_lines.append(f"- **Attempts Used:** {attempts}")
+            report_lines.append(f"- **Fix Log / Diagnostics:**")
+            for entry in fix_log.split("\n"):
+                if entry.strip():
+                    report_lines.append(f"  - {entry.strip()}")
+            report_lines.append("")
+        report_lines.append("---")
+        report_lines.append("")
+
     # ==================== ALL ROWS BREAKDOWN ====================
     report_lines.append("## 📋 Product Rows Breakdown")
     report_lines.append("")
@@ -87,7 +113,12 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
         pid = row.get("Product_ID")
         model = row.get("Model_Name")
         status = row.get("Status", "Pending")
-        status_icon = "🟢" if status in ("Ready_For_Review", "Approved") else "🔴"
+        if status in ("Ready_For_Review", "Approved"):
+            status_icon = "🟢"
+        elif status == "Deferred":
+            status_icon = "🟡"
+        else:
+            status_icon = "🔴"
         attempts = row.get("Attempts", 0)
         img_source = row.get("Image_Source", "None")
         img_tier = row.get("Image_Tier", "N/A")
@@ -151,10 +182,10 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
     return report_path
 
 
-def run_brand(brand_name: str, config_path: str = "config.yaml") -> str:
+def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic_audit: bool = False) -> str:
     """
     Main unattended orchestrator for a specific brand:
-    load -> collect -> images -> validate -> fix loop -> report.
+    pre-flight check -> load -> collect -> images -> validate -> fix loop -> report.
     """
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
@@ -167,15 +198,43 @@ def run_brand(brand_name: str, config_path: str = "config.yaml") -> str:
         logger.error(f"No products found for brand '{brand_name}' in {excel_path}")
         raise ValueError(f"Brand '{brand_name}' not found in catalogue data.")
 
-    logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products)...")
+    # ==================== PRE-FLIGHT QUOTA CHECK ====================
+    brand_indices = df[brand_mask].index
+    pending_count = sum(
+        1 for idx in brand_indices
+        if is_empty_value(df.loc[idx, "Raw_Title"]) and is_empty_value(df.loc[idx, "Override_Title"])
+    )
+    calls_per_row = 2 if enable_semantic_audit else 1
+    estimated_calls = pending_count * calls_per_row
+
+    logger.info(f"[Pre-flight] Brand '{brand_name}': {len(brand_indices)} total products, {pending_count} pending collection.")
+    logger.info(f"[Pre-flight] Estimated LLM calls needed: {estimated_calls} ({calls_per_row} per pending product).")
+
+    if pending_count > 0:
+        llm_model = config.get("llm", {}).get("model", "gemini-3.6-flash")
+        try:
+            preflight_quota_check(model=llm_model)
+        except GeminiDailyQuotaExhaustedError as e:
+            logger.error(f"[Pre-flight HALT] {e}")
+            print(f"\n[HALT] {e}\n")
+            return ""
+
+    logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products, semantic audit={enable_semantic_audit})...")
     brand_defaults = load_brand_defaults(brand_name)
     all_rows = [row.to_dict() for _, row in df.iterrows()]
 
     for idx in df[brand_mask].index:
         row_dict = df.loc[idx].to_dict()
-        processed_row = process_row_loop(row_dict, all_rows, config, brand_defaults)
-        for k, v in processed_row.items():
-            df.at[idx, k] = v
+        try:
+            processed_row = process_row_loop(
+                row_dict, all_rows, config, brand_defaults, enable_semantic_audit=enable_semantic_audit
+            )
+            for k, v in processed_row.items():
+                df.at[idx, k] = v
+        except GeminiDailyQuotaExhaustedError as e:
+            logger.error(f"[Pipeline HALT] {e}")
+            print(f"\n[HALT] {e}\n")
+            return ""
 
     save_catalogue_data(df, excel_path)
     
@@ -190,6 +249,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Brand Pipeline Runner")
     parser.add_argument("--brand", required=True, help="Brand name to process (e.g. Stuffcool)")
     parser.add_argument("--config", default="config.yaml", help="Path to configuration YAML file")
+    parser.add_argument("--semantic-audit", action="store_true", default=False, help="Enable optional LLM semantic audit pass")
     args = parser.parse_args()
     
-    run_brand(args.brand, config_path=args.config)
+    run_brand(args.brand, config_path=args.config, enable_semantic_audit=args.semantic_audit)

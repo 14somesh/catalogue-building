@@ -5,10 +5,8 @@ brands:
     collection_url: "https://www.stuffcool.com/collections/power-bank"
     default_warranty: "6 Months (Extendable to 1 Year)"
     retail_order:
-      - "croma"
       - "reliance"
-      - "flipkart"
-      - "tatacliq"
+      - "croma"
     qualifier_tokens:
       - "Max"
       - "Ultra"
@@ -26,10 +24,8 @@ brands:
   # Standard template for future brands
   _default:
     retail_order:
-      - "croma"
       - "reliance"
-      - "flipkart"
-      - "tatacliq"
+      - "croma"
     qualifier_tokens:
       - "Max"
       - "Ultra"

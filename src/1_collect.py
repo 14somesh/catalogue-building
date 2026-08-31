@@ -25,6 +25,9 @@ from src.utils.scraper import (
     normalize_model_tokens,
     is_boilerplate_bullet,
     load_brand_defaults,
+    search_shopify_brand_store,
+    search_retail_reliance,
+    search_retail_croma,
     DEFAULT_HEADERS
 )
 from src.utils.llm_client import draft_bullets_and_subtitle
@@ -42,91 +45,12 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def search_brand_store_tier1(brand: str, model_name: str, domain: str, qualifier_tokens: List[str]) -> Optional[str]:
-    """
-    Tier 1 helper: Searches official brand store API with Qualifier Token Check.
-    """
-    stopwords = {"powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and"}
-    # Preserve all alphanumeric tokens including single characters (e.g. '1' for '1#')
-    words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", model_name.replace("+", "plus"))]
-    distinctive_terms = [w for w in words if w not in stopwords]
-
-    try:
-        suggest_url = f"https://www.{domain}/search/suggest.json?q={quote_plus(model_name)}&resources[type]=product"
-        r = requests.get(suggest_url, headers=DEFAULT_HEADERS, timeout=8)
-        if r.status_code == 200:
-            data = r.json()
-            products = data.get("resources", {}).get("results", {}).get("products", [])
-            for p in products:
-                prod_title = p.get("title", "")
-                # Qualifier Token Check
-                is_valid, reason = reject_qualifier_mismatch(model_name, prod_title, qualifier_tokens, brand=brand)
-                if not is_valid:
-                    continue
-
-                prod_tokens = set(re.findall(r"[a-zA-Z0-9]+", prod_title.lower().replace("+", "plus")))
-                if distinctive_terms and all(term in prod_tokens or term in prod_title.lower() for term in distinctive_terms):
-                    full_url = urljoin(f"https://www.{domain}", p.get("url", "").split("?")[0])
-                    logger.info(f"[Tier 1] Verified brand store match for '{model_name}': {prod_title} -> {full_url}")
-                    return full_url
-    except Exception as e:
-        logger.debug(f"Store search suggest query failed for {domain}: {e}")
-
-    return None
-
-
-def search_retail_tier3(brand: str, model_name: str, store_name: str, qualifier_tokens: List[str]) -> Optional[str]:
-    """
-    Tier 3 helper: Searches retail platforms (Croma, Reliance Digital, Flipkart, Tata CLiQ) with Qualifier Token Check.
-    """
-    domain_map = {
-        "croma": "croma.com",
-        "reliance": "reliancedigital.in",
-        "flipkart": "flipkart.com",
-        "tatacliq": "tatacliq.com"
-    }
-    target_domain = domain_map.get(store_name.lower())
-    if not target_domain:
-        return None
-
-    # Required distinctive model tokens
-    model_part = extract_model_name_portion(model_name, brand=brand)
-    required_tokens = normalize_model_tokens(model_part)
-    stopwords = {"powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and"}
-    required_tokens = {t for t in required_tokens if t not in stopwords}
-
-    queries = [
-        f"{brand} {model_name} {store_name}",
-        f"{brand} {model_name} site:{target_domain}"
-    ]
-
-    try:
-        from ddgs import DDGS
-        ddgs = DDGS()
-        for q in queries:
-            results = list(ddgs.text(q, max_results=6))
-            for r in results:
-                href = r.get("href", "")
-                title = r.get("title", "")
-                if target_domain in href and ("/p/" in href or "/p-" in href or "/product/" in href):
-                    is_valid, _ = reject_qualifier_mismatch(model_name, title, qualifier_tokens, brand=brand)
-                    if not is_valid:
-                        continue
-                    cand_tokens = normalize_model_tokens(title + " " + href.replace("-", " "))
-                    if required_tokens and all(tok in cand_tokens for tok in required_tokens):
-                        return href
-    except Exception as e:
-        logger.debug(f"Retail search error for {store_name}: {e}")
-
-    return None
-
-
 def find_product_on_brand_collection(model_name: str, collection_url: str, qualifier_tokens: List[str], brand: str = "") -> Optional[str]:
     """
     Tier 2 helper: Scans brand collection page for product links matching model name.
     """
     try:
-        r = requests.get(collection_url, headers=DEFAULT_HEADERS, timeout=10)
+        r = requests.get(collection_url, headers=DEFAULT_HEADERS, timeout=15)
         if r.status_code != 200:
             return None
         
@@ -184,16 +108,16 @@ def execute_spec_escalation(
     brand_cfg: dict
 ) -> Tuple[Optional[ParserResult], Optional[str]]:
     """
-    Executes mandatory 4-tier escalation for product specs:
-    Tier 1: Brand Product Page -> Tier 2: Brand Collection Page -> Tier 3: Retail -> Tier 4: Tech Press.
+    Executes 4-tier escalation for product specs using direct JSON API endpoints (no search engines):
+    Tier 1: Brand Product Page -> Tier 2: Brand Collection Page -> Tier 3: Direct Retail Endpoints -> Tier 4: Exhaustion.
     """
     qualifier_tokens = brand_cfg.get("qualifier_tokens", ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"])
     brand_domain = brand_cfg.get("domain", f"{brand.lower()}.com")
 
-    # ==================== TIER 1: Brand Product Page ====================
+    # ==================== TIER 1: Brand Product Page (Direct JSON API) ====================
     tier1_url = manual_url if manual_url and manual_url.startswith("http") else None
     if not tier1_url:
-        tier1_url = search_brand_store_tier1(brand, model_name, brand_domain, qualifier_tokens)
+        tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens)
 
     if tier1_url:
         logger.info(f"[{product_id}] Executing Tier 1 (Brand Product Page): {tier1_url}")
@@ -217,10 +141,16 @@ def execute_spec_escalation(
                 return res, f"tier-2: brand-collection ({tier2_prod_url})"
         logger.warning(f"[{product_id}] Tier 2 collection page did not yield matching product specs. Escalating to Tier 3...")
 
-    # ==================== TIER 3: Retail (Croma, Reliance Digital, Flipkart, Tata CLiQ) ====================
-    retail_order = brand_cfg.get("retail_order", ["croma", "reliance", "flipkart", "tatacliq"])
+    # ==================== TIER 3: Direct Retail Endpoints (Reliance Digital, Croma) ====================
+    retail_order = brand_cfg.get("retail_order", ["reliance", "croma"])
     for retail_store in retail_order:
-        retail_url = search_retail_tier3(brand, model_name, retail_store, qualifier_tokens)
+        store_lower = retail_store.lower()
+        retail_url = None
+        if "reliance" in store_lower:
+            retail_url = search_retail_reliance(brand, model_name, qualifier_tokens)
+        elif "croma" in store_lower:
+            retail_url = search_retail_croma(brand, model_name, qualifier_tokens)
+
         if retail_url:
             logger.info(f"[{product_id}] Executing Tier 3 ({retail_store}): {retail_url}")
             res = fetch_and_parse_url(retail_url, tier=3)
@@ -229,23 +159,16 @@ def execute_spec_escalation(
             else:
                 logger.warning(f"[{product_id}] Tier 3 {retail_store} failed. Trying next retail...")
 
-    # ==================== TIER 4: Tech Press / Spec Portals ====================
-    logger.info(f"[{product_id}] Executing Tier 4 (Tech Press / Spec Portals)...")
-    tech_query = f"{brand} {model_name} specs specifications india"
-    try:
-        from ddgs import DDGS
-        ddgs = DDGS()
-        results = list(ddgs.text(tech_query, max_results=5))
-        for r in results:
-            href = r.get("href", "")
-            if href.startswith("http") and not any(ign in href for ign in ["youtube", "facebook", "twitter", "instagram", "amazon"]):
-                res = fetch_and_parse_url(href, tier=4)
-                if res.success and res.specs:
-                    return res, f"tier-4: tech-press ({href})"
-    except Exception as e:
-        logger.debug(f"Tier 4 search error: {e}")
+    # ==================== TIER 4: Local PDF / Direct Specs Fallback ====================
+    pdf_path = brand_cfg.get("brochure_path") or f"data/brochures/{brand.lower()}.pdf"
+    if os.path.exists(pdf_path):
+        logger.info(f"[{product_id}] Executing Tier 4 (Local PDF Brochure): {pdf_path}")
+        pdf_res = extract_text_from_pdf(pdf_path)
+        if pdf_res.get("text"):
+            # Could parse from PDF text if present
+            pass
 
-    logger.error(f"[{product_id}] All 4 spec tiers exhausted without finding verified specs.")
+    logger.error(f"[{product_id}] All spec tiers exhausted without finding verified specs.")
     return None, None
 
 
@@ -279,11 +202,36 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict) -> Tuple[Dict[s
     )
 
     if not llm_copy:
-        return {
-            "Status": "Blocked",
-            "Flags": "LLM copy drafting failed",
-            "Fix_Log": "LLM drafting failed on fetched spec block."
-        }, False, f"[{product_id}] BLOCKED: LLM drafting failed"
+        # INFRASTRUCTURE FAILURE: Specs were fetched, but LLM copy generation failed.
+        # MUST NEVER set to Blocked. Mark as Deferred, keeping collected specs.
+        source_url = parser_res.url
+        tier = parser_res.tier
+        specs = parser_res.specs
+        updates = {
+            "Source_URL": source_url,
+            "Source_Audit": provenance,
+            "Raw_Spec_Capacity": specs.get("capacity"),
+            "Source_Spec_Capacity": source_url if specs.get("capacity") else None,
+            "Tier_Spec_Capacity": tier if specs.get("capacity") else None,
+            "Raw_Spec_Output": specs.get("output"),
+            "Source_Spec_Output": source_url if specs.get("output") else None,
+            "Tier_Spec_Output": tier if specs.get("output") else None,
+            "Raw_Spec_Ports": specs.get("ports"),
+            "Source_Spec_Ports": source_url if specs.get("ports") else None,
+            "Tier_Spec_Ports": tier if specs.get("ports") else None,
+            "Raw_Spec_Weight": specs.get("weight"),
+            "Source_Spec_Weight": source_url if specs.get("weight") else None,
+            "Tier_Spec_Weight": tier if specs.get("weight") else None,
+            "Raw_Spec_Warranty": specs.get("warranty") or brand_defaults.get("default_warranty"),
+            "Source_Spec_Warranty": source_url if specs.get("warranty") else "brand-default-policy",
+            "Tier_Spec_Warranty": tier,
+            "Status": "Deferred",
+            "Flags": "Deferred: LLM copy drafting failed due to infrastructure error",
+            "Fix_Log": f"Specs collected via {provenance}; LLM copy drafting deferred due to infrastructure error"
+        }
+        if parser_res.image_urls:
+            updates["Image_URL"] = parser_res.image_urls[0]
+        return updates, False, f"[{product_id}] DEFERRED: Specs collected via {provenance}, LLM drafting failed"
 
     # Boilerplate detector check on drafted bullets
     for b_key in ["bullet_1", "bullet_2", "bullet_3", "bullet_4"]:

@@ -66,8 +66,8 @@ def attempt_auto_fix(
     """
     Evaluates hard flags and executes targeted auto-fix strategies:
     - sibling mismatch / capacity mismatch -> re-collect via collection page
-    - boilerplate bullets -> discard bullets and redraft from description only
-    - bullet over 60 chars -> redraft bullets with strict truncation / LLM retry
+    - boilerplate bullets -> discard bullets and redraft from clean specs
+    - bullet over 60 chars -> deterministic word-boundary truncation (no extra LLM call)
     - missing warranty -> apply brand default warranty
     - image low-res -> escalate image tier
     Returns (updated_row_dict, fix_attempted, log_entry).
@@ -86,29 +86,14 @@ def attempt_auto_fix(
         log = f"Attempt {attempt_num}: Applied brand default warranty '{default_warr}'"
         return updated, True, log
 
-    # Auto-Fix 2: Bullet over 60 chars -> Redraft shorter from same specs
+    # Auto-Fix 2: Bullet over 60 chars -> Deterministic word-boundary truncation (cuts LLM calls)
     if any("exceeds 60-character" in f for f in hard_flags):
-        specs = {
-            "capacity": str(updated.get("Raw_Spec_Capacity") or ""),
-            "output": str(updated.get("Raw_Spec_Output") or ""),
-            "ports": str(updated.get("Raw_Spec_Ports") or ""),
-            "weight": str(updated.get("Raw_Spec_Weight") or ""),
-            "warranty": str(updated.get("Raw_Spec_Warranty") or ""),
-        }
-        raw_desc = str(updated.get("Raw_Subtitle") or "")
-        llm_res = draft_bullets_and_subtitle(brand, model_name, raw_desc, specs)
-        if llm_res:
-            for b_idx in range(1, 5):
-                b_text = str(llm_res.get(f"bullet_{b_idx}", "")).strip()
-                if len(b_text) > 60:
-                    b_text = b_text[:60].rsplit(" ", 1)[0]
-                updated[f"Raw_Bullet_{b_idx}"] = b_text
-        else:
-            for b_idx in range(1, 5):
-                b_val = str(updated.get(f"Raw_Bullet_{b_idx}") or "").strip()
-                if len(b_val) > 60:
-                    updated[f"Raw_Bullet_{b_idx}"] = b_val[:60].rsplit(" ", 1)[0]
-        log = f"Attempt {attempt_num}: Redrafted bullets to satisfy <=60 char limit"
+        for b_idx in range(1, 5):
+            b_val = str(updated.get(f"Raw_Bullet_{b_idx}") or "").strip()
+            if len(b_val) > 60:
+                truncated = b_val[:60].rsplit(" ", 1)[0] if " " in b_val[:60] else b_val[:60]
+                updated[f"Raw_Bullet_{b_idx}"] = truncated
+        log = f"Attempt {attempt_num}: Truncated bullets to satisfy <=60 char limit"
         return updated, True, log
 
     # Auto-Fix 3: Boilerplate bullets -> Redraft targeting clean specs only
@@ -120,20 +105,17 @@ def attempt_auto_fix(
             "weight": str(updated.get("Raw_Spec_Weight") or ""),
             "warranty": str(updated.get("Raw_Spec_Warranty") or ""),
         }
-        llm_res = draft_bullets_and_subtitle(brand, model_name, "Technical specifications only", specs)
-        if llm_res:
-            for b_idx in range(1, 5):
-                b_text = str(llm_res.get(f"bullet_{b_idx}", "")).strip()
-                if is_boilerplate_bullet(b_text)[0]:
-                    b_text = f"Features {specs.get('capacity', 'high capacity')} fast charging"
-                updated[f"Raw_Bullet_{b_idx}"] = b_text
-            log = f"Attempt {attempt_num}: Discarded boilerplate and redrafted bullets"
-            return updated, True, log
+        for b_idx in range(1, 5):
+            b_val = str(updated.get(f"Raw_Bullet_{b_idx}") or "").strip()
+            if is_boilerplate_bullet(b_val)[0]:
+                updated[f"Raw_Bullet_{b_idx}"] = f"Features {specs.get('capacity', 'fast charging')} power"
+        log = f"Attempt {attempt_num}: Replaced boilerplate bullets with clean spec text"
+        return updated, True, log
 
     # Auto-Fix 4: Sibling / Capacity Mismatch -> Re-search via collection page
     if any("mismatch" in f.lower() for f in hard_flags):
         # Force re-collection
-        collect_updates, success, c_log = collect_data_for_row(updated, config)
+        collect_updates, success, c_log = collect_mod.collect_data_for_row(updated, config)
         if success:
             updated.update(collect_updates)
             log = f"Attempt {attempt_num}: Re-collected via tier escalation: {c_log}"
@@ -148,11 +130,12 @@ def process_row_loop(
     row_dict: Dict[str, Any],
     all_rows: List[Dict[str, Any]],
     config: dict,
-    brand_defaults: dict
+    brand_defaults: dict,
+    enable_semantic_audit: bool = False
 ) -> Dict[str, Any]:
     """
     Executes the autonomous loop for a single row:
-    collect -> images -> validate -> fix loop (max 3 attempts) -> PASS or BLOCK.
+    collect -> images -> validate -> fix loop (max 3 attempts) -> PASS, DEFER, or BLOCK.
     """
     current_row = dict(row_dict)
     pid = str(current_row.get("Product_ID", "UNKNOWN")).strip()
@@ -161,7 +144,8 @@ def process_row_loop(
     if current_row.get("Status") == "Approved":
         return current_row
 
-    attempts = int(current_row.get("Attempts") or 0)
+    initial_attempts = int(current_row.get("Attempts") or 0)
+    attempts = initial_attempts
     fix_logs: List[str] = [str(current_row.get("Fix_Log"))] if not is_empty_value(current_row.get("Fix_Log")) else []
     hard_flags: List[str] = [str(current_row.get("Flags"))] if not is_empty_value(current_row.get("Flags")) else ["Initial validation required"]
 
@@ -171,9 +155,18 @@ def process_row_loop(
 
         # Step 1: Collect (if not already collected)
         if is_empty_value(current_row.get("Raw_Title")) and is_empty_value(current_row.get("Override_Title")):
-            collect_updates, success, c_log = collect_data_for_row(current_row, config)
+            collect_updates, success, c_log = collect_mod.collect_data_for_row(current_row, config)
             current_row.update(collect_updates)
             fix_logs.append(f"Attempt {attempts}: {c_log}")
+
+            # Check if collection was deferred due to infrastructure/LLM failure
+            if current_row.get("Status") == "Deferred":
+                logger.warning(f"[{pid}] Row deferred due to infrastructure failure during collection.")
+                # Infrastructure failure does NOT consume a loop attempt
+                current_row["Attempts"] = initial_attempts
+                current_row["Fix_Log"] = "\n".join(fix_logs)
+                return current_row
+
             if not success:
                 hard_flags = [str(collect_updates.get("Flags") or "All spec tiers exhausted")]
                 break
@@ -197,11 +190,12 @@ def process_row_loop(
         is_passed, hard_flags, warnings = validate_row_deterministic(current_row, all_rows, brand_defaults)
 
         if is_passed:
-            # Step 4: LLM Semantic Advisory Pass (WARN-ONLY, adds advisory flags, cannot block)
-            prod_payload = get_effective_product_dict(current_row)
-            sem_flags, _ = audit_product_semantics(prod_payload)
-            for sf in sem_flags:
-                warnings.append(f"[Advisory] {sf}")
+            # Step 4: LLM Semantic Advisory Pass (WARN-ONLY, optional behind flag, off by default)
+            if enable_semantic_audit:
+                prod_payload = get_effective_product_dict(current_row)
+                sem_flags, _ = audit_product_semantics(prod_payload)
+                for sf in sem_flags:
+                    warnings.append(f"[Advisory] {sf}")
 
             logger.info(f"[{pid}] Passed validation on attempt {attempts}.")
             current_row["Status"] = "Ready_For_Review"
@@ -218,9 +212,22 @@ def process_row_loop(
         fix_logs.append(fix_log)
         current_row = updated_row
 
+        if current_row.get("Status") == "Deferred":
+            logger.warning(f"[{pid}] Row deferred during auto-fix.")
+            current_row["Attempts"] = initial_attempts
+            current_row["Fix_Log"] = "\n".join(fix_logs)
+            return current_row
+
         if not fix_attempted:
             logger.warning(f"[{pid}] Unfixable hard flags encountered. Halting loop.")
             break
+
+    # If row is marked Deferred, do NOT clear fields and do NOT block
+    if current_row.get("Status") == "Deferred":
+        logger.warning(f"[{pid}] Product row is Deferred (infrastructure). Preserving raw fields.")
+        current_row["Attempts"] = initial_attempts
+        current_row["Fix_Log"] = "\n".join(fix_logs)
+        return current_row
 
     # If loop finishes without clean pass -> HARD BLOCK
     logger.error(f"[{pid}] BLOCKED after {attempts} attempts. Clearing raw fields.")
@@ -232,7 +239,11 @@ def process_row_loop(
     return blocked_row
 
 
-def run_review_loop(config_path: str = "config.yaml", target_pids: Optional[list] = None) -> pd.DataFrame:
+def run_review_loop(
+    config_path: str = "config.yaml",
+    target_pids: Optional[list] = None,
+    enable_semantic_audit: bool = False
+) -> pd.DataFrame:
     """
     Main loop controller across catalogue dataset.
     """
@@ -241,7 +252,7 @@ def run_review_loop(config_path: str = "config.yaml", target_pids: Optional[list
     check_file_lock(excel_path)
     
     df = load_catalogue_data(excel_path)
-    logger.info(f"Running agent review loop on {len(df)} products...")
+    logger.info(f"Running agent review loop on {len(df)} products (semantic audit={enable_semantic_audit})...")
 
     all_rows = [row.to_dict() for _, row in df.iterrows()]
     updated_rows = []
@@ -256,7 +267,9 @@ def run_review_loop(config_path: str = "config.yaml", target_pids: Optional[list
             updated_rows.append(row_dict)
             continue
 
-        processed_row = process_row_loop(row_dict, all_rows, config, brand_defaults)
+        processed_row = process_row_loop(
+            row_dict, all_rows, config, brand_defaults, enable_semantic_audit=enable_semantic_audit
+        )
         updated_rows.append(processed_row)
 
     updated_df = pd.DataFrame(updated_rows)
@@ -269,6 +282,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Agent Loop Controller")
     parser.add_argument("--pids", nargs="+", help="Specific Product_IDs to process")
+    parser.add_argument("--semantic-audit", action="store_true", default=False, help="Enable optional LLM semantic audit pass")
     args = parser.parse_args()
     
-    run_review_loop(target_pids=args.pids)
+    run_review_loop(target_pids=args.pids, enable_semantic_audit=args.semantic_audit)

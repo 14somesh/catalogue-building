@@ -35,6 +35,8 @@ dummy_brand_defaults = {
 # Test (a): Row with 404 on every tier ends as BLOCKED with ALL Raw_ fields empty
 # ----------------------------------------------------------------------
 print("\n--- TEST (a): 404 on All Tiers -> BLOCKED with Empty Raw_ Fields ---")
+from unittest.mock import patch, MagicMock
+
 row_404 = {
     "Product_ID": "TEST-404",
     "Brand": "NonExistentBrand",
@@ -44,7 +46,8 @@ row_404 = {
     "Fix_Log": None
 }
 
-result_a = process_row_loop(row_404, [row_404], dummy_config, dummy_brand_defaults)
+with patch.object(review_mod.collect_mod, "execute_spec_escalation", return_value=(None, None)):
+    result_a = process_row_loop(row_404, [row_404], dummy_config, dummy_brand_defaults)
 
 status_a = result_a.get("Status")
 raw_fields_populated = [
@@ -170,7 +173,8 @@ row_unfixable = {
     "Fix_Log": None
 }
 
-result_c = process_row_loop(row_unfixable, [row_unfixable], dummy_config, dummy_brand_defaults)
+with patch.object(review_mod.collect_mod, "collect_data_for_row", return_value=({}, False, "All tiers exhausted")):
+    result_c = process_row_loop(row_unfixable, [row_unfixable], dummy_config, dummy_brand_defaults)
 
 status_c = result_c.get("Status")
 attempts_c = result_c.get("Attempts", 0)
@@ -241,6 +245,131 @@ if not is_passed:
 else:
     print("FAIL: Deterministic validator passed a row with missing image.")
 
+# ----------------------------------------------------------------------
+# Test (e): Simulated Daily Quota 429 Halts Immediately Without Retrying
+# ----------------------------------------------------------------------
+print("\n--- TEST (e): Simulated Daily Quota 429 (GenerateRequestsPerDay) -> Immediate Halt ---")
+from unittest.mock import patch, MagicMock
+from src.utils.llm_client import (
+    draft_bullets_and_subtitle,
+    GeminiDailyQuotaExhaustedError,
+    classify_gemini_error
+)
+
+call_count_e = 0
+
+def mock_daily_quota_generate(*args, **kwargs):
+    global call_count_e
+    call_count_e += 1
+    raise Exception("429 RESOURCE_EXHAUSTED: quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier exceeded")
+
+with patch("src.utils.llm_client.get_gemini_client") as mock_get_client:
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = mock_daily_quota_generate
+    mock_get_client.return_value = mock_client
+    
+    call_count_e = 0
+    try:
+        draft_bullets_and_subtitle("Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"})
+        print("FAIL: Daily quota 429 did not raise GeminiDailyQuotaExhaustedError!")
+    except GeminiDailyQuotaExhaustedError as e:
+        if call_count_e == 1:
+            print(f"PASS: Daily quota 429 halted immediately on attempt {call_count_e} (0 retries).")
+            print(f"   >>> Exception message: {e}")
+        else:
+            print(f"FAIL: Daily quota 429 made {call_count_e} attempts before raising (expected 1).")
+
+# ----------------------------------------------------------------------
+# Test (f): Simulated 503 Transient Error Retries with Backoff
+# ----------------------------------------------------------------------
+print("\n--- TEST (f): Simulated 503 Transient Error -> Exponential Backoff & Retry ---")
+call_count_f = 0
+sleep_calls_f = []
+
+def mock_503_then_success(*args, **kwargs):
+    global call_count_f
+    call_count_f += 1
+    if call_count_f < 3:
+        raise Exception("503 Service Unavailable: Model is overloaded, please try again.")
+    mock_resp = MagicMock()
+    mock_resp.text = json_str = '{"title": "Stuffcool Aura", "subtitle": "Fast charging", "bullet_1": "B1", "bullet_2": "B2", "bullet_3": "B3", "bullet_4": "B4"}'
+    return mock_resp
+
+def mock_sleep_f(seconds):
+    sleep_calls_f.append(seconds)
+
+with patch("src.utils.llm_client.get_gemini_client") as mock_get_client, \
+     patch("src.utils.llm_client.time.sleep", side_effect=mock_sleep_f):
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = mock_503_then_success
+    mock_get_client.return_value = mock_client
+    
+    call_count_f = 0
+    sleep_calls_f = []
+    res_f = draft_bullets_and_subtitle("Stuffcool", "Aura", "Test description", {"capacity": "10000mAh"})
+    
+    if res_f and res_f.get("title") == "Stuffcool Aura" and call_count_f == 3 and sleep_calls_f == [2, 4]:
+        print(f"PASS: 503 transient error retried with exponential backoff across {call_count_f} attempts.")
+        print(f"   >>> Backoff sleep intervals: {sleep_calls_f}s")
+        print(f"   >>> Successfully resolved copy on attempt 3: title='{res_f.get('title')}'")
+    else:
+        print(f"FAIL: 503 handling: calls={call_count_f}, sleeps={sleep_calls_f}, res={res_f}")
+
+# ----------------------------------------------------------------------
+# Test (g): LLM Infrastructure Failure Sets Status='Deferred', Not 'Blocked'
+# ----------------------------------------------------------------------
+print("\n--- TEST (g): LLM Infrastructure Failure -> Status='Deferred' (Preserves Collected Data) ---")
+from src.parsers.base import ParserResult
+collect_module = importlib.import_module("src.1_collect")
+
+dummy_parser_res = ParserResult(
+    success=True,
+    status_code=200,
+    tier=1,
+    url="https://www.stuffcool.com/products/aura-10000mah",
+    specs={"capacity": "10000 mAh", "output": "20W PD", "ports": "Type-C", "weight": "185g", "warranty": "6 Months"},
+    description_text="Authentic Stuffcool Aura 10000mAh powerbank with 20W power delivery.",
+    image_urls=["https://www.stuffcool.com/cdn/aura.png"]
+)
+
+with patch.object(collect_module, "execute_spec_escalation", return_value=(dummy_parser_res, "tier-1: brand-page")), \
+     patch.object(collect_module, "draft_bullets_and_subtitle", return_value=None), \
+     patch.object(review_mod.collect_mod, "execute_spec_escalation", return_value=(dummy_parser_res, "tier-1: brand-page")), \
+     patch.object(review_mod.collect_mod, "draft_bullets_and_subtitle", return_value=None):
+    
+    row_input = {
+        "Product_ID": "TEST-DEFERRED",
+        "Brand": "Stuffcool",
+        "Model_Name": "Aura",
+        "Status": "Pending",
+        "Attempts": 0,
+        "Fix_Log": None
+    }
+    
+    collect_updates, success, log_msg = collect_module.collect_data_for_row(row_input, dummy_config)
+    
+    status_g = collect_updates.get("Status")
+    flags_g = collect_updates.get("Flags")
+    saved_capacity = collect_updates.get("Raw_Spec_Capacity")
+    saved_source = collect_updates.get("Source_Spec_Capacity")
+    
+    final_loop_row = process_row_loop(row_input, [row_input], dummy_config, dummy_brand_defaults)
+    final_status = final_loop_row.get("Status")
+    final_attempts = final_loop_row.get("Attempts")
+    
+    if (status_g == "Deferred" and 
+        final_status == "Deferred" and 
+        saved_capacity == "10000 mAh" and 
+        saved_source is not None and 
+        final_attempts == 0 and 
+        "Hard Block" not in str(flags_g)):
+        print(f"PASS: LLM failure correctly set Status='Deferred' (NOT 'Blocked').")
+        print(f"   >>> Status: '{final_status}' | Loop Attempts Consumed: {final_attempts} (0 consumed)")
+        print(f"   >>> Preserved Collected Specs: Capacity='{saved_capacity}', Source='{saved_source}'")
+        print(f"   >>> Flags: '{final_loop_row.get('Flags')}'")
+    else:
+        print(f"FAIL: LLM failure status={final_status}, attempts={final_attempts}, saved_capacity={saved_capacity}")
+
 print("\n" + "=" * 80)
-print("ALL 4 STEP 3 VERIFICATION TESTS COMPLETED")
+print("ALL STEP 3 REGRESSION AND VERIFICATION TESTS COMPLETED")
 print("=" * 80)

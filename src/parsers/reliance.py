@@ -25,9 +25,30 @@ class RelianceParser(BaseParser):
         soup = BeautifulSoup(html, "html.parser") if html else None
         title = ""
         spec_blocks = []
+        json_ld_images = []
+        json_ld_desc = ""
+
         if soup and status_code == 200:
-            title_el = soup.find("h1", class_=re.compile(r"pdp__title|product-title", re.I)) or soup.find("h1")
-            title = title_el.get_text().strip() if title_el else ""
+            # 1. Try JSON-LD schema
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    import json
+                    data = json.loads(script.get_text())
+                    if isinstance(data, dict) and data.get("@type") == "Product":
+                        title = data.get("name", "")
+                        json_ld_desc = data.get("description", "")
+                        img_field = data.get("image", [])
+                        if isinstance(img_field, list):
+                            json_ld_images.extend(img_field)
+                        elif isinstance(img_field, str):
+                            json_ld_images.append(img_field)
+                except Exception:
+                    pass
+
+            if not title:
+                title_el = soup.find("h1", class_=re.compile(r"pdp__title|product-title", re.I)) or soup.find("h1")
+                title = title_el.get_text().strip() if title_el else ""
+            
             for row in soup.find_all(["tr", "li", "div"], class_=re.compile(r"spec|details|pdp__feature", re.I)):
                 spec_blocks.append(row.get_text(separator=" ", strip=True))
 
@@ -35,7 +56,7 @@ class RelianceParser(BaseParser):
             clean_slug = re.sub(r'\b(online|reliance|digital|buy|best price|prices|fast charging|power bank|powerbank)\b', '', slug_text, flags=re.I)
             title = " ".join(w.capitalize() for w in clean_slug.split()[:4]) + " Powerbank"
 
-        full_text = f"{title}\n{slug_text}\n" + "\n".join(spec_blocks)
+        full_text = f"{title}\n{slug_text}\n{json_ld_desc}\n" + "\n".join(spec_blocks)
 
         specs = {}
         cap = re.search(r'\b(5000|10000|15000|20000|25000|30000)\s*(?:mAh|mah)\b', full_text, re.I)
@@ -68,6 +89,10 @@ class RelianceParser(BaseParser):
             specs["warranty"] = warr.group(0).title()
 
         images = []
+        for img_url in json_ld_images:
+            if img_url and isinstance(img_url, str) and img_url not in images:
+                images.append(img_url)
+
         if soup:
             for img in soup.find_all("img"):
                 src = img.get("src") or img.get("data-src")

@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from typing import Optional, Dict, Any, List, Tuple
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -11,6 +12,21 @@ from src.utils.logger import setup_logger
 logger = setup_logger("llm_client")
 
 load_dotenv()
+
+
+class GeminiDailyQuotaExhaustedError(Exception):
+    """Raised when the Gemini daily / per-day quota is exhausted. Requires immediate fast-fail without retry."""
+    pass
+
+
+class GeminiRateLimitError(Exception):
+    """Raised when a per-minute rate limit is hit and backoff retry is warranted."""
+    pass
+
+
+class GeminiTransientError(Exception):
+    """Raised on 503, connection errors, timeouts, etc."""
+    pass
 
 
 class ProductCopySchema(BaseModel):
@@ -30,6 +46,59 @@ class SemanticAuditSchema(BaseModel):
     summary_flags: List[str] = Field(default_factory=list, description="Concise error/warning flags to record in the Excel Flags column")
 
 
+def classify_gemini_error(e: Exception) -> str:
+    """
+    Classifies Gemini API exceptions into three distinct kinds:
+    1. 'QUOTA_EXHAUSTED' -> Daily/per-project quota violation (e.g. GenerateRequestsPerDayPerProjectPerModel-FreeTier). Fast fail!
+    2. 'RATE_LIMIT' -> 429 with short retryDelay / per-minute quota. Back off and retry.
+    3. 'TRANSIENT' -> 503, timeout, connection reset, overloaded, unavailable. Back off and retry.
+    4. 'OTHER' -> Non-recoverable client/auth errors.
+    """
+    err_str = str(e).lower()
+    
+    # 1. Daily Quota Check (FAIL FAST)
+    daily_markers = [
+        "generaterequestsperday",
+        "perday",
+        "per_day",
+        "daily",
+        "quota exceeded",
+        "free_tier_daily",
+    ]
+    if any(marker in err_str for marker in daily_markers):
+        return "QUOTA_EXHAUSTED"
+
+    # Also check if error string explicitly includes GenerateRequestsPerDayPerProjectPerModel
+    if "generaterequestsperdayperprojectpermodel" in err_str:
+        return "QUOTA_EXHAUSTED"
+
+    # 2. Rate Limit (Per-Minute, recoverable via backoff)
+    rate_limit_markers = [
+        "generaterequestsperminute",
+        "perminute",
+        "per_minute",
+        "rate limit",
+        "ratelimit",
+        "429",
+        "resource_exhausted",
+        "resourceexhausted"
+    ]
+    if any(marker in err_str for marker in rate_limit_markers):
+        return "RATE_LIMIT"
+
+    # 3. Transient errors (503, connection issues, timeouts)
+    transient_markers = [
+        "503", "500", "502", "504",
+        "overloaded", "unavailable", "deadlineexceeded",
+        "connectionerror", "connection reset", "broken pipe",
+        "remotedisconnected", "timeout", "timed out"
+    ]
+    if any(marker in err_str for marker in transient_markers):
+        return "TRANSIENT"
+
+    return "OTHER"
+
+
 def get_gemini_client() -> genai.Client:
     """Initializes and returns the Google GenAI client."""
     api_key = os.getenv("GEMINI_API_KEY")
@@ -38,7 +107,33 @@ def get_gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-import time
+def preflight_quota_check(model: str = "gemini-3.6-flash") -> Tuple[bool, Optional[str]]:
+    """
+    PRE-FLIGHT QUOTA CHECK:
+    Makes a single minimal, cheap test call to confirm the API is reachable and has quota.
+    If daily quota is exhausted, halts immediately with GeminiDailyQuotaExhaustedError.
+    """
+    client = get_gemini_client()
+    try:
+        logger.info(f"[Pre-flight] Testing Gemini API connectivity & quota on model '{model}'...")
+        response = client.models.generate_content(
+            model=model,
+            contents="ping",
+            config=types.GenerateContentConfig(
+                max_output_tokens=5,
+                temperature=0.0
+            )
+        )
+        logger.info("[Pre-flight] Gemini API check passed successfully.")
+        return True, None
+    except Exception as e:
+        err_type = classify_gemini_error(e)
+        if err_type == "QUOTA_EXHAUSTED":
+            msg = "Gemini daily quota exhausted. Run halted. No rows were modified."
+            logger.error(msg)
+            raise GeminiDailyQuotaExhaustedError(msg)
+        logger.error(f"[Pre-flight] Gemini API check failed: {e}")
+        return False, str(e)
 
 
 def draft_bullets_and_subtitle(
@@ -54,7 +149,8 @@ def draft_bullets_and_subtitle(
     LLM SCOPED JOB:
     Given clean product text and specs ALREADY FETCHED by scripts from a verified URL,
     drafts 4 concise sales bullets (<= 60 chars each) and an engaging subtitle (<= 80 chars).
-    Retries transient API/network errors with exponential backoff (at least 3 retries).
+    Retries transient API/network errors with exponential backoff.
+    FAILS FAST on daily quota exhaustion.
     """
     client = get_gemini_client()
 
@@ -107,19 +203,34 @@ def draft_bullets_and_subtitle(
 
         except Exception as e:
             last_error = e
-            err_str = str(e)
-            is_transient = any(code in err_str for code in ["503", "429", "500", "502", "504", "Overloaded", "ResourceExhausted", "RESOURCE_EXHAUSTED", "DeadlineExceeded", "ConnectionError", "timeout", "UNAVAILABLE"])
-            if is_transient and attempt < max_retries:
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            err_type = classify_gemini_error(e)
+
+            if err_type == "QUOTA_EXHAUSTED":
+                msg = "Gemini daily quota exhausted. Run halted. No rows were modified."
+                logger.error(msg)
+                raise GeminiDailyQuotaExhaustedError(msg)
+            
+            elif err_type == "RATE_LIMIT":
+                if attempt < max_retries:
                     backoff_sec = 15 + (attempt * 5)
+                    logger.warning(f"Rate limit (429 per-minute) on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
+                    time.sleep(backoff_sec)
                 else:
+                    logger.error(f"Rate limit exceeded after {max_retries} attempts for {brand} {model_name}.")
+                    break
+
+            elif err_type == "TRANSIENT":
+                if attempt < max_retries:
                     backoff_sec = 2 ** attempt
-                logger.warning(f"Transient API error on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
-                time.sleep(backoff_sec)
+                    logger.warning(f"Transient API error ({e}) on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
+                    time.sleep(backoff_sec)
+                else:
+                    logger.error(f"Transient error persisted after {max_retries} attempts for {brand} {model_name}: {e}")
+                    break
+
             else:
                 logger.error(f"Error calling Gemini API for {brand} {model_name} on attempt {attempt}: {e}")
-                if not is_transient:
-                    break
+                break
 
     logger.error(f"Gemini copy drafting failed after {max_retries} attempts for {brand} {model_name}: {last_error}")
     return None
@@ -133,6 +244,7 @@ def audit_product_semantics(
 ) -> Tuple[List[str], bool]:
     """
     Performs LLM Semantic Audit on resolved product data with exponential backoff retries.
+    FAILS FAST on daily quota exhaustion.
     """
     client = get_gemini_client()
 
@@ -175,11 +287,16 @@ def audit_product_semantics(
             return flags, is_clean
 
         except Exception as e:
-            err_str = str(e)
-            is_transient = any(code in err_str for code in ["503", "429", "500", "502", "504", "Overloaded", "ResourceExhausted", "DeadlineExceeded", "ConnectionError", "timeout", "UNAVAILABLE"])
-            if is_transient and attempt < max_retries:
+            err_type = classify_gemini_error(e)
+
+            if err_type == "QUOTA_EXHAUSTED":
+                msg = "Gemini daily quota exhausted. Run halted. No rows were modified."
+                logger.error(msg)
+                raise GeminiDailyQuotaExhaustedError(msg)
+
+            elif err_type in ("RATE_LIMIT", "TRANSIENT") and attempt < max_retries:
                 backoff_sec = 2 ** attempt
-                logger.warning(f"Transient audit error ({err_str[:120]}) on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
+                logger.warning(f"Transient audit error ({str(e)[:120]}) on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
                 time.sleep(backoff_sec)
             else:
                 logger.warning(f"Error during LLM semantic audit (skipping semantic check): {e}")
