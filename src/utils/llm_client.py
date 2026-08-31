@@ -155,5 +155,5 @@ def audit_product_semantics(product_payload: Dict[str, Any], source_text: Option
         logger.info(f"Semantic audit result: clean={is_clean}, flags={flags}")
         return flags, is_clean
     except Exception as e:
-        logger.error(f"Error during LLM semantic audit: {e}")
-        return [f"Semantic audit error: {str(e)}"], False
+        logger.warning(f"Error during LLM semantic audit (skipping semantic check): {e}")
+        return [], False

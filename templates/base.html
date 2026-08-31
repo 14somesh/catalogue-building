@@ -15,21 +15,6 @@
 
   <script>
   (function () {
-    function fit(el, max, min) {
-      var size = max;
-      el.style.fontSize = size + 'px';
-      el.classList.remove('is-wrapped');
-      var parent = el.closest('.prod__body') || el.parentElement;
-      var targetWidth = parent ? (parent.clientWidth - 8) : 340;
-      while (el.scrollWidth > targetWidth && size > min) {
-        size -= 1;
-        el.style.fontSize = size + 'px';
-      }
-      if (el.scrollWidth > targetWidth) {
-        el.classList.add('is-wrapped');
-      }
-    }
-
     function fitBrand(el, max, min) {
       var size = max;
       el.style.fontSize = size + 'px';
@@ -42,9 +27,6 @@
     }
 
     function run() {
-      document.querySelectorAll('.prod__name').forEach(function (el) {
-        fit(el, 44, 24);
-      });
       document.querySelectorAll('.brand-divider__title').forEach(function (el) {
         fitBrand(el, 120, 36);
       });

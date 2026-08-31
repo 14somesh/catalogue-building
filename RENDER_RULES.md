@@ -35,6 +35,20 @@ These rules are programmatically enforced during every execution of `4_build.py`
    - No broken manual letter-spacing (e.g. `"S T U F F C O O L"` or `"P U N E"`) in data fields or CSS rules that fragment words. Tracking must be applied strictly via standard CSS `letter-spacing` on unified word elements.
    - *Failure behavior:* `ValueError` raised if manual letter-spaced patterns are detected.
 
+5. **Rendered Title Width & Overflow Integrity (No Auto-Shrink):**
+   - Every product title must fit completely within the details panel's available width (`~346px`) at its natural font size.
+   - The engine does not auto-shrink product titles. If any title's rendered text width exceeds the container's available width, the build must fail immediately and identify the offending product row.
+   - *Failure behavior:* `ValueError` raised specifying the overflowing Product ID, model name, text width, and container width.
+
+6. **Image Background Consistency:**
+   - Corner pixels (top-left, top-right, bottom-left, bottom-right) of all product images within each brand group are sampled and compared against the brand's median corner background color.
+   - If any image corner pixels deviate beyond an acceptable Euclidean color distance tolerance, a loud warning is emitted listing the offending filenames and sampled hex colors.
+   - *Failure behavior:* Warning logged listing inconsistent image assets and sampled RGB values.
+
+7. **Image Aspect Ratio (Strict Square 1:1 Framing):**
+   - Every product image must have a square aspect ratio (`width == height`, tolerance < 1%), matching the square `235px × 235px` ivory media tile. Non-square images will crop or distort inside the square container.
+   - *Failure behavior:* Warning/error logged specifying non-square image dimensions and offending filenames.
+
 ---
 
 ## SECTION B — Human Visual Checks (Post-Build Review Checklist)

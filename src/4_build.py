@@ -110,6 +110,73 @@ def format_subtitle_html(subtitle: str) -> str:
     return f'{subtitle[:s]}<b class="spec">{subtitle[s:e]}</b>{subtitle[e:]}'
 
 
+def validate_image_aspect_ratio(image_path: str, product_id: str) -> None:
+    """
+    SECTION A — Rule 7: Image Aspect Ratio (Strict Square 1:1 Framing).
+    Flags any image that is not square, since the tile is square (235x235px) and non-square images crop.
+    """
+    if not os.path.exists(image_path):
+        return
+    try:
+        with Image.open(image_path) as img:
+            w, h = img.size
+            aspect_diff = abs(w - h) / max(w, h)
+            if aspect_diff > 0.01:
+                logger.warning(
+                    f"[RENDER_RULES Section A - Aspect Ratio] Product {product_id} image '{os.path.basename(image_path)}' is not square (1:1): {w}x{h}px (ratio: {w/h:.2f}). Tile is 235x235px square and non-square images will crop."
+                )
+    except Exception as e:
+        logger.error(f"Error inspecting aspect ratio for {image_path}: {e}")
+
+
+def validate_brand_images_background(brand_name: str, image_paths: list) -> None:
+    """
+    SECTION A — Rule 6: Image Background Consistency.
+    Samples corner pixels of every image in a brand folder.
+    If they are not all within close tolerance of each other, warns with the offending filenames.
+    """
+    valid_images = [p for p in image_paths if os.path.exists(p)]
+    if len(valid_images) < 2:
+        return
+
+    corner_colors = {}
+    for p in valid_images:
+        try:
+            with Image.open(p) as img:
+                w, h = img.size
+                rgba = img.convert("RGBA")
+                corners = [
+                    rgba.getpixel((5, 5)),
+                    rgba.getpixel((w - 6, 5)),
+                    rgba.getpixel((5, h - 6)),
+                    rgba.getpixel((w - 6, h - 6))
+                ]
+                avg_corner = np.mean([[c[0], c[1], c[2]] for c in corners], axis=0)
+                hex_col = '#{:02x}{:02x}{:02x}'.format(int(avg_corner[0]), int(avg_corner[1]), int(avg_corner[2]))
+                corner_colors[p] = (avg_corner, hex_col)
+        except Exception as e:
+            logger.warning(f"Could not sample corner background for {p}: {e}")
+
+    if not corner_colors:
+        return
+
+    rgb_matrix = np.array([v[0] for v in corner_colors.values()])
+    median_rgb = np.median(rgb_matrix, axis=0)
+    median_hex = '#{:02x}{:02x}{:02x}'.format(int(median_rgb[0]), int(median_rgb[1]), int(median_rgb[2]))
+
+    inconsistent_files = []
+    for p, (avg_rgb, hex_col) in corner_colors.items():
+        dist = np.linalg.norm(avg_rgb - median_rgb)
+        if dist > 25.0:
+            inconsistent_files.append((os.path.basename(p), hex_col, dist))
+
+    if inconsistent_files:
+        msg_lines = [f"Brand '{brand_name}' has inconsistent image background tones (brand median: {median_hex}):"]
+        for fname, hex_col, dist in inconsistent_files:
+            msg_lines.append(f"  • {fname}: sampled corner color {hex_col} (deviation: {dist:.1f})")
+        logger.warning("\n".join(msg_lines))
+
+
 def validate_product_data(prod: dict, raw_row: dict) -> None:
     """
     SECTION A — Build-time validation rules enforced automatically.
@@ -160,12 +227,15 @@ def validate_product_data(prod: dict, raw_row: dict) -> None:
         if re.search(r'\b(?:[A-Za-z]\s+){3,}[A-Za-z]\b', str(field_val)):
             raise ValueError(f"Build validation failed: Product {pid} {field_name} contains broken spaced-out letters: '{field_val}'")
 
+    # 7. Image Aspect Ratio check
+    validate_image_aspect_ratio(raw_img_path, pid)
+
 
 def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
     """
     Main PDF builder: reads Excel, validates data against Section A rules,
     arranges 2-products-per-page with 1-up odd remainder, renders Jinja2 templates,
-    and compiles print-ready A4 PDF via Playwright.
+    enforces rendered title width checks (no auto-shrink), and compiles print-ready A4 PDF via Playwright.
     """
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
@@ -207,12 +277,14 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
             continue
             
         products = []
+        brand_image_paths = []
         for idx_in_brand, (_, row) in enumerate(brand_df.iterrows(), 1):
             prod = get_effective_product_dict(row)
             validate_product_data(prod, row.to_dict())
             
             # Resolve product image
             raw_img_path = prod.get("image_full_path", "")
+            brand_image_paths.append(raw_img_path)
             image_b64 = image_to_base64(raw_img_path) if os.path.exists(raw_img_path) else ""
             
             # Format price
@@ -228,6 +300,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
             bullets_list = prod.get("bullets", [])
 
             prod_ctx = {
+                "product_id": prod.get("product_id") or row.get("Product_ID"),
                 "index": f"{idx_in_brand:02d}",
                 "brand": brand_name,
                 "series": "SERIES",
@@ -240,6 +313,9 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
                 "category": category_name,
             }
             products.append(prod_ctx)
+
+        # Rule 6: Image Background Consistency per brand
+        validate_brand_images_background(brand_name, brand_image_paths)
             
         # Create pages (2-up per page, with 1-up for odd remainder)
         pages = []
@@ -309,7 +385,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         f.write(rendered_html)
     logger.info(f"Saved HTML preview to {preview_html_path}")
 
-    # 6. Compile PDF with Playwright Chromium
+    # 6. Compile PDF with Playwright Chromium and Validate Rendered Dimensions
     logger.info(f"Compiling PDF via Playwright Headless Chromium to {output_pdf}...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -320,14 +396,48 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         page = context.new_page()
         page.goto(f"file:///{preview_html_path.replace(os.sep, '/')}", wait_until="networkidle")
         
-        # Wait for self-hosted fonts
+        # Wait for self-hosted fonts & brand divider scaling
         page.evaluate("() => document.fonts.ready")
-        
-        # Wait for auto-shrink JS to fit all product names
         page.wait_for_function("window.__namesFitted === true", timeout=15000)
-        
-        # Small stabilization timeout
         page.wait_for_timeout(300)
+
+        # Rule 5 Check: Title width validation (No auto-shrink)
+        overflow_issues = page.evaluate('''() => {
+            const cards = document.querySelectorAll('.prod');
+            const issues = [];
+            cards.forEach(card => {
+                const titleEl = card.querySelector('.prod__name');
+                if (!titleEl) return;
+                const range = document.createRange();
+                range.selectNodeContents(titleEl);
+                const textWidth = range.getBoundingClientRect().width;
+                const containerWidth = titleEl.clientWidth;
+                if (textWidth > containerWidth + 1.0) {
+                    issues.push({
+                        title: titleEl.innerText.replace(/\\s+/g, ' ').trim(),
+                        textWidth: Math.round(textWidth),
+                        containerWidth: Math.round(containerWidth)
+                    });
+                }
+            });
+            return issues;
+        }''')
+
+        if overflow_issues:
+            err_details = [
+                f"  • Title '{item['title']}' exceeds panel available width ({item['textWidth']}px > {item['containerWidth']}px)"
+                for item in overflow_issues
+            ]
+            error_message = (
+                f"\n================================================================================\n"
+                f"[BUILD ERROR] RENDER_RULES.md Section A (Rule 5: Title Width Violation):\n"
+                f"Product titles exceed the available panel width and cannot fit without overflow.\n"
+                f"Auto-shrink is disabled per design specification.\n"
+                + "\n".join(err_details) +
+                f"\n================================================================================\n"
+            )
+            browser.close()
+            raise ValueError(error_message)
         
         # Render PDF
         page.pdf(

@@ -67,12 +67,10 @@ def validate_deterministic_rules(row_dict: Dict[str, Any], config: dict) -> List
     elif len(str(subtitle).strip()) > subtitle_max_chars:
         flags.append(f"Subtitle exceeds {subtitle_max_chars} chars ({len(str(subtitle).strip())} chars)")
 
-    # 2. Rule 2 & Rule 6: MRP Authoritative Validation & Cross-Check
+    # 2. Rule 2: DP Price Validation (Authoritative from Override_MRP or MRP_Input)
     mrp_input = row_dict.get("MRP_Input")
-    raw_mrp_scraped = row_dict.get("Raw_MRP_Scraped")
     override_mrp = row_dict.get("Override_MRP")
 
-    # Authoritative check
     if not is_empty_value(override_mrp):
         try:
             val = float(override_mrp)
@@ -87,27 +85,8 @@ def validate_deterministic_rules(row_dict: Dict[str, Any], config: dict) -> List
                 flags.append("MRP_Input must be greater than 0")
         except (ValueError, TypeError):
             flags.append("MRP_Input is not a valid number")
-    elif not is_empty_value(raw_mrp_scraped):
-        try:
-            val = float(raw_mrp_scraped)
-            if val <= 0:
-                flags.append("Raw_MRP_Scraped must be greater than 0")
-            else:
-                flags.append("MRP_Input empty: using unverified scraped value")
-        except (ValueError, TypeError):
-            flags.append("Raw_MRP_Scraped is not a valid number")
     else:
-        flags.append("Missing MRP (MRP_Input and Raw_MRP_Scraped are both empty)")
-
-    # Rule 6: MRP Discrepancy Cross-Check (MRP_Input vs Raw_MRP_Scraped)
-    if not is_empty_value(mrp_input) and not is_empty_value(raw_mrp_scraped):
-        try:
-            mrp_in_num = float(mrp_input)
-            mrp_scraped_num = float(raw_mrp_scraped)
-            if abs(mrp_in_num - mrp_scraped_num) > 0.01:
-                flags.append(f"MRP mismatch: Input ₹{int(mrp_in_num)} vs Scraped ₹{int(mrp_scraped_num)}")
-        except (ValueError, TypeError):
-            pass
+        flags.append("Missing Price (MRP_Input is empty)")
 
     # 3. Mandatory Specs Check
     specs_to_check = ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight", "Spec_Warranty"]

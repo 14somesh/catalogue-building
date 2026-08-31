@@ -7,11 +7,11 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger("excel_handler")
 
-# Standard 38-column flat schema defined in ARCHITECTURE.md
+# Standard flat schema defined in ARCHITECTURE.md
 EXPECTED_COLUMNS = [
     "Product_ID", "Brand", "Model_Name", "Product_URL", "Brochure_PDF", "Marketplace_URL", "MRP_Input",
     "Source_URL", "Raw_Title", "Raw_Subtitle", "Raw_MRP_Scraped", "Raw_Spec_Capacity", "Raw_Spec_Output", "Raw_Spec_Ports", "Raw_Spec_Weight", "Raw_Spec_Warranty",
-    "Raw_Bullet_1", "Raw_Bullet_2", "Raw_Bullet_3", "Raw_Bullet_4", "Source_Audit", "Image_URL", "Image_Status",
+    "Raw_Bullet_1", "Raw_Bullet_2", "Raw_Bullet_3", "Raw_Bullet_4", "Source_Audit", "Image_URL", "Image_Status", "Image_Source",
     "Override_Title", "Override_Subtitle", "Override_MRP", "Override_Spec_Capacity", "Override_Spec_Output", "Override_Spec_Ports", "Override_Spec_Weight", "Override_Spec_Warranty",
     "Override_Bullet_1", "Override_Bullet_2", "Override_Bullet_3", "Override_Bullet_4", "Override_Image_Path",
     "Flags", "Status"

@@ -64,11 +64,18 @@ def collect_product_data_for_row(row_dict: Dict[str, Any], config: dict) -> Dict
             url = str(product_url).strip()
             logger.info(f"[{product_id}] Priority 2: Using manual Product_URL: {url}")
             page_res = scrape_web_page(url)
-            if page_res.get("text"):
-                raw_text = page_res["text"]
-                source_url_used = url
-                discovered_image_url = page_res.get("image_url")
-                source_audit_note = f"specs: manual-product-url ({url})"
+            if page_res.get("status_code") != 200 or not page_res.get("has_specs"):
+                err_msg = page_res.get("error") or f"HTTP {page_res.get('status_code', 'Unknown')}"
+                logger.error(f"[{product_id}] Manual Product_URL fetch failed: {err_msg}")
+                return {
+                    "success": False,
+                    "error": err_msg,
+                    "status_code": page_res.get("status_code", 0)
+                }
+            raw_text = page_res["text"]
+            source_url_used = url
+            discovered_image_url = page_res.get("image_url")
+            source_audit_note = f"specs: manual-product-url ({url})"
 
     # Priority 3: Manual Marketplace URL Override
     if not raw_text:
@@ -77,11 +84,18 @@ def collect_product_data_for_row(row_dict: Dict[str, Any], config: dict) -> Dict
             url = str(marketplace_url).strip()
             logger.info(f"[{product_id}] Priority 3: Using manual Marketplace_URL: {url}")
             page_res = scrape_web_page(url)
-            if page_res.get("text"):
-                raw_text = page_res["text"]
-                source_url_used = url
-                discovered_image_url = page_res.get("image_url")
-                source_audit_note = f"specs: manual-marketplace-url ({url})"
+            if page_res.get("status_code") != 200 or not page_res.get("has_specs"):
+                err_msg = page_res.get("error") or f"HTTP {page_res.get('status_code', 'Unknown')}"
+                logger.error(f"[{product_id}] Manual Marketplace_URL fetch failed: {err_msg}")
+                return {
+                    "success": False,
+                    "error": err_msg,
+                    "status_code": page_res.get("status_code", 0)
+                }
+            raw_text = page_res["text"]
+            source_url_used = url
+            discovered_image_url = page_res.get("image_url")
+            source_audit_note = f"specs: manual-marketplace-url ({url})"
 
     # Priority 4: Autonomous Web Search
     if not raw_text:
@@ -90,21 +104,32 @@ def collect_product_data_for_row(row_dict: Dict[str, Any], config: dict) -> Dict
         if discovered_url:
             logger.info(f"[{product_id}] Discovered URL via search: {discovered_url} ({source_type})")
             page_res = scrape_web_page(discovered_url)
-            if page_res.get("text"):
+            if page_res.get("status_code") == 200 and page_res.get("has_specs"):
                 raw_text = page_res["text"]
                 source_url_used = discovered_url
                 discovered_image_url = page_res.get("image_url")
                 source_audit_note = f"specs: {source_type} ({discovered_url})"
             else:
-                logger.warning(f"[{product_id}] Failed to extract readable text from {discovered_url}")
+                err_msg = page_res.get("error") or f"HTTP {page_res.get('status_code', 'Unknown')}"
+                logger.warning(f"[{product_id}] Discovered URL failed validation: {err_msg}")
+                return {
+                    "success": False,
+                    "error": f"Search URL failed: {err_msg}",
+                    "status_code": page_res.get("status_code", 0)
+                }
         else:
             logger.warning(f"[{product_id}] Autonomous search found no valid product pages.")
+            return {
+                "success": False,
+                "error": "No valid product pages found via search",
+                "status_code": 0
+            }
 
     if not raw_text:
-        logger.error(f"[{product_id}] No content could be gathered from brochure or web.")
+        logger.error(f"[{product_id}] No substantive content could be gathered.")
         return {
             "success": False,
-            "error": "No content found from any source"
+            "error": "No substantive content gathered from brochure or web"
         }
 
     # Extract structured product data via Gemini LLM
@@ -119,12 +144,7 @@ def collect_product_data_for_row(row_dict: Dict[str, Any], config: dict) -> Dict
             "error": "LLM extraction failed"
         }
 
-    # Format Source_Audit note
-    mrp_input_val = row_dict.get("MRP_Input")
-    if not is_empty_value(mrp_input_val):
-        final_source_audit = f"{source_audit_note} | mrp: input-sheet"
-    else:
-        final_source_audit = f"{source_audit_note} | mrp: scraped-unverified"
+    final_source_audit = f"{source_audit_note} | mrp: input-sheet"
 
     return {
         "success": True,
@@ -133,7 +153,7 @@ def collect_product_data_for_row(row_dict: Dict[str, Any], config: dict) -> Dict
         "image_url": discovered_image_url or extracted.get("image_url"),
         "raw_title": extracted.get("title", ""),
         "raw_subtitle": extracted.get("subtitle", ""),
-        "raw_mrp_scraped": extracted.get("mrp_scraped"),
+        "raw_mrp_scraped": None,
         "raw_spec_capacity": extracted.get("spec_capacity", ""),
         "raw_spec_output": extracted.get("spec_output", ""),
         "raw_spec_ports": extracted.get("spec_ports", ""),
@@ -158,6 +178,13 @@ def run_collection(config_path: str = "config.yaml", force_all: bool = False) ->
     logger.info(f"Running data collection on {len(df)} products in {excel_path}...")
 
     collected_count = 0
+    failed_count = 0
+    raw_columns = [
+        "Raw_Title", "Raw_Subtitle", "Raw_MRP_Scraped", "Raw_Spec_Capacity",
+        "Raw_Spec_Output", "Raw_Spec_Ports", "Raw_Spec_Weight", "Raw_Spec_Warranty",
+        "Raw_Bullet_1", "Raw_Bullet_2", "Raw_Bullet_3", "Raw_Bullet_4"
+    ]
+
     for idx, row in df.iterrows():
         row_dict = row.to_dict()
         product_id = row_dict.get("Product_ID", f"Row_{idx+1}")
@@ -178,8 +205,7 @@ def run_collection(config_path: str = "config.yaml", force_all: bool = False) ->
 
             df.at[idx, "Raw_Title"] = res.get("raw_title", "")
             df.at[idx, "Raw_Subtitle"] = res.get("raw_subtitle", "")
-            if res.get("raw_mrp_scraped") is not None:
-                df.at[idx, "Raw_MRP_Scraped"] = res.get("raw_mrp_scraped")
+            df.at[idx, "Raw_MRP_Scraped"] = None
 
             df.at[idx, "Raw_Spec_Capacity"] = res.get("raw_spec_capacity", "")
             df.at[idx, "Raw_Spec_Output"] = res.get("raw_spec_output", "")
@@ -191,13 +217,22 @@ def run_collection(config_path: str = "config.yaml", force_all: bool = False) ->
             df.at[idx, "Raw_Bullet_3"] = res.get("raw_bullet_3", "")
             df.at[idx, "Raw_Bullet_4"] = res.get("raw_bullet_4", "")
             df.at[idx, "Status"] = "Collected"
+            df.at[idx, "Flags"] = None
             collected_count += 1
             logger.info(f"[{product_id}] Successfully populated Raw_* specs and Source_URL.")
         else:
-            logger.warning(f"[{product_id}] Collection failed: {res.get('error')}")
+            err_msg = res.get("error", "Collection failed")
+            df.at[idx, "Status"] = "Failed"
+            df.at[idx, "Flags"] = err_msg
+            df.at[idx, "Source_URL"] = None
+            df.at[idx, "Source_Audit"] = None
+            for raw_col in raw_columns:
+                df.at[idx, raw_col] = None
+            failed_count += 1
+            logger.warning(f"[{product_id}] Collection failed: {err_msg}")
 
     save_catalogue_data(df, excel_path)
-    logger.info(f"Data collection complete. Updated {collected_count} products.")
+    logger.info(f"Data collection complete. Updated {collected_count} collected, {failed_count} failed.")
     return df
 
 
