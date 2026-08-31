@@ -1,0 +1,45 @@
+# Brand-specific configuration defaults and tier escalation parameters
+brands:
+  Stuffcool:
+    domain: "stuffcool.com"
+    collection_url: "https://www.stuffcool.com/collections/power-bank"
+    default_warranty: "6 Months (Extendable to 1 Year)"
+    retail_order:
+      - "croma"
+      - "reliance"
+      - "flipkart"
+      - "tatacliq"
+    qualifier_tokens:
+      - "Max"
+      - "Ultra"
+      - "Plus"
+      - "Pro"
+      - "Mini"
+      - "Lite"
+      - "Go"
+    image_tier_order:
+      - "brand_product"
+      - "retail"
+      - "amazon"
+      - "collection_thumb"
+
+  # Standard template for future brands
+  _default:
+    retail_order:
+      - "croma"
+      - "reliance"
+      - "flipkart"
+      - "tatacliq"
+    qualifier_tokens:
+      - "Max"
+      - "Ultra"
+      - "Plus"
+      - "Pro"
+      - "Mini"
+      - "Lite"
+      - "Go"
+    image_tier_order:
+      - "brand_product"
+      - "retail"
+      - "amazon"
+      - "collection_thumb"

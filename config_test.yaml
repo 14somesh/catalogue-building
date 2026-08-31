@@ -1,0 +1,49 @@
+brand_order: []
+category:
+  display_title: Powerbanks & Portable Chargers
+  name: POWERBANK
+company:
+  contact_line: "Corporate gifting \xB7 Pune \xB7 sales@vianet.co.in"
+  email: sales@vianet.co.in
+  location: Pune
+  name: VIANET
+image_validation:
+  allowed_formats:
+  - png
+  - jpg
+  - jpeg
+  - webp
+  min_height_px: 800
+  min_width_px: 800
+  recommended_dpi: 300
+llm:
+  model: gemini-3.6-flash
+  temperature: 0.2
+page_setup:
+  orientation: portrait
+  paper_size: A4
+  products_per_page: 2
+  show_page_numbers: true
+paths:
+  brochures_dir: brochures/
+  excel_file: data/test_run.xlsx
+  images_dir: images/test_stuffcool
+  output_dir: dist/
+  output_filename_pattern: '{category}_catalogue_{timestamp}.pdf'
+  output_pdf: dist/catalogue.pdf
+search:
+  max_results: 3
+  official_domains:
+    ambrane: ambraneindia.com
+    anker: anker.com
+    duracell: duracell.in
+    portronics: portronics.com
+    stuffcool: stuffcool.com
+    urbrn: urbnworld.com
+  provider: gemini_grounding
+  timeout_secs: 15
+validation_rules:
+  bullet_max_chars: 60
+  required_bullets: 4
+  subtitle_max_chars: 80
+  title_max_chars: 40

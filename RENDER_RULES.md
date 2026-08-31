@@ -40,12 +40,16 @@ These rules are programmatically enforced during every execution of `4_build.py`
    - The engine does not auto-shrink product titles. If any title's rendered text width exceeds the container's available width, the build must fail immediately and identify the offending product row.
    - *Failure behavior:* `ValueError` raised specifying the overflowing Product ID, model name, text width, and container width.
 
-6. **Image Background Consistency:**
+6. **No Stray Decorative Elements:**
+   - Legacy eyebrow lines (e.g. `"01 — STUFFCOOL SERIES"`), orphaned rule dividers, or abandoned decorative elements must never appear in template output.
+   - *Failure behavior:* `ValueError` raised if obsolete eyebrow or decorative tokens are detected in rendered HTML.
+
+7. **Image Background Consistency:**
    - Corner pixels (top-left, top-right, bottom-left, bottom-right) of all product images within each brand group are sampled and compared against the brand's median corner background color.
    - If any image corner pixels deviate beyond an acceptable Euclidean color distance tolerance, a loud warning is emitted listing the offending filenames and sampled hex colors.
    - *Failure behavior:* Warning logged listing inconsistent image assets and sampled RGB values.
 
-7. **Image Aspect Ratio (Strict Square 1:1 Framing):**
+8. **Image Aspect Ratio (Strict Square 1:1 Framing):**
    - Every product image must have a square aspect ratio (`width == height`, tolerance < 1%), matching the square `235px × 235px` ivory media tile. Non-square images will crop or distort inside the square container.
    - *Failure behavior:* Warning/error logged specifying non-square image dimensions and offending filenames.
 
@@ -56,27 +60,23 @@ These rules are programmatically enforced during every execution of `4_build.py`
 These visual quality standards must be verified by a human reviewer inspecting the compiled PDF before client distribution:
 
 1. **Card & Panel Uniformity:**
-   - Image tile and details panel heights must be strictly identical (`235px`) across all products (`01 click 10`, `02 aura`, `03 giga`, `04 lucid`, `05 major ultra`), regardless of subtitle or bullet copy length.
+   - Image tile and details panel heights must be strictly identical (`235px`) across all products, regardless of subtitle or bullet copy length.
 
 2. **Image Scaling & Framing Consistency:**
    - Product cutouts must fill approximately 80% of their square ivory tile (`235px × 235px`) with comfortable, balanced padding.
    - No product should appear noticeably smaller, oversized, or clipped.
 
-3. **No Overflow or Text Clipping:**
-   - Product images must never overflow or bleed outside their ivory tile.
-   - Subtitles, feature bullets, and product names must never overlap or clip.
-
-4. **DP Badge Positioning & Clearance:**
+3. **DP Badge Positioning & Clearance:**
    - The gold **DP** badge (`₹X,XXX incl. GST`) must sit cleanly inside the ivory panel with comfortable bottom padding (never flush against or touching the card's bottom edge).
 
-5. **Bullet Column Alignment:**
+4. **Bullet Column Alignment:**
    - In the 2-column feature bullet grid, each row track must start at the exact same vertical baseline across both left and right columns.
 
-6. **Full-Bleed Canvas & Page Edges:**
+5. **Full-Bleed Canvas & Page Edges:**
    - Teal background (`#1B3A47`) must reach the very edge of every A4 page with zero white border lines or margin slivers along the top, bottom, or sides.
 
-7. **Razor-Sharp Image Resolution:**
+6. **Razor-Sharp Image Resolution:**
    - Raster images and product cutouts must remain crisp and sharp at fit-to-page zoom, rendered from high-resolution source masters (`1200×1200px+`) with `deviceScaleFactor: 2`.
 
-8. **Brand Divider Page Impact:**
+7. **Brand Divider Page Impact:**
    - Brand divider pages must feature the brand name in massive, bold white uppercase typography filling nearly the full width of the page, vertically centered and left-aligned to the card margin.

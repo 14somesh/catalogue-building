@@ -449,7 +449,30 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         )
         browser.close()
 
-    logger.info(f"PDF build complete: {output_pdf}")
+    # Rule Check: Page Count Sanity Verification
+    import pdfplumber
+    import math
+
+    # Calculate expected page count
+    expected_pages = 1  # Cover page
+    for group in brand_groups:
+        prod_count = len(group["products"])
+        brand_pages = 1 + math.ceil(prod_count / 2)  # 1 divider + 2-up product pages
+        expected_pages += brand_pages
+
+    with pdfplumber.open(output_pdf) as pdf:
+        actual_pages = len(pdf.pages)
+
+    if actual_pages != expected_pages:
+        raise ValueError(
+            f"\n================================================================================\n"
+            f"[BUILD ERROR] Page count sanity check failed!\n"
+            f"Expected {expected_pages} total pages (1 cover + brand dividers + 2-up stacks),\n"
+            f"but compiled PDF contains {actual_pages} pages. Check for layout overflows.\n"
+            f"================================================================================\n"
+        )
+
+    logger.info(f"PDF build complete: {output_pdf} (verified {actual_pages}/{expected_pages} pages)")
     return output_pdf
 
 

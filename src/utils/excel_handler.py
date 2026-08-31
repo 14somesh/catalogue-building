@@ -2,7 +2,7 @@ import os
 import re
 import sys
 import pandas as pd
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 from src.utils.logger import setup_logger
 
 logger = setup_logger("excel_handler")
@@ -10,15 +10,48 @@ logger = setup_logger("excel_handler")
 # Standard flat schema defined in ARCHITECTURE.md
 EXPECTED_COLUMNS = [
     "Product_ID", "Brand", "Model_Name", "Product_URL", "Brochure_PDF", "Marketplace_URL", "MRP_Input",
-    "Source_URL", "Raw_Title", "Raw_Subtitle", "Raw_MRP_Scraped", "Raw_Spec_Capacity", "Raw_Spec_Output", "Raw_Spec_Ports", "Raw_Spec_Weight", "Raw_Spec_Warranty",
-    "Raw_Bullet_1", "Raw_Bullet_2", "Raw_Bullet_3", "Raw_Bullet_4", "Source_Audit", "Image_URL", "Image_Status", "Image_Source",
+    "Source_URL", "Source_Audit",
+    "Raw_Title", "Source_Title", "Tier_Title",
+    "Raw_Subtitle", "Source_Subtitle", "Tier_Subtitle",
+    "Raw_MRP_Scraped", "Source_MRP_Scraped", "Tier_MRP_Scraped",
+    "Raw_Spec_Capacity", "Source_Spec_Capacity", "Tier_Spec_Capacity",
+    "Raw_Spec_Output", "Source_Spec_Output", "Tier_Spec_Output",
+    "Raw_Spec_Ports", "Source_Spec_Ports", "Tier_Spec_Ports",
+    "Raw_Spec_Weight", "Source_Spec_Weight", "Tier_Spec_Weight",
+    "Raw_Spec_Warranty", "Source_Spec_Warranty", "Tier_Spec_Warranty",
+    "Raw_Bullet_1", "Source_Bullet_1", "Tier_Bullet_1",
+    "Raw_Bullet_2", "Source_Bullet_2", "Tier_Bullet_2",
+    "Raw_Bullet_3", "Source_Bullet_3", "Tier_Bullet_3",
+    "Raw_Bullet_4", "Source_Bullet_4", "Tier_Bullet_4",
+    "Image_URL", "Image_Status", "Image_Source", "Image_Tier",
     "Override_Title", "Override_Subtitle", "Override_MRP", "Override_Spec_Capacity", "Override_Spec_Output", "Override_Spec_Ports", "Override_Spec_Weight", "Override_Spec_Warranty",
     "Override_Bullet_1", "Override_Bullet_2", "Override_Bullet_3", "Override_Bullet_4", "Override_Image_Path",
-    "Flags", "Status"
+    "Attempts", "Fix_Log", "Flags", "Status"
 ]
+
+RAW_FIELD_TO_SOURCE_MAP = {
+    "Raw_Title": "Source_Title",
+    "Raw_Subtitle": "Source_Subtitle",
+    "Raw_MRP_Scraped": "Source_MRP_Scraped",
+    "Raw_Spec_Capacity": "Source_Spec_Capacity",
+    "Raw_Spec_Output": "Source_Spec_Output",
+    "Raw_Spec_Ports": "Source_Spec_Ports",
+    "Raw_Spec_Weight": "Source_Spec_Weight",
+    "Raw_Spec_Warranty": "Source_Spec_Warranty",
+    "Raw_Bullet_1": "Source_Bullet_1",
+    "Raw_Bullet_2": "Source_Bullet_2",
+    "Raw_Bullet_3": "Source_Bullet_3",
+    "Raw_Bullet_4": "Source_Bullet_4",
+}
+
 
 class ExcelFileLockedError(Exception):
     """Raised when the Excel file is open and locked by Microsoft Excel or another process."""
+    pass
+
+
+class DataLayerInvariantViolation(Exception):
+    """Raised when a Raw_ field is written without a verified Source_ URL (The Write Guard)."""
     pass
 
 
@@ -31,8 +64,6 @@ def is_file_locked(file_path: str) -> bool:
         return False
         
     try:
-        # On Windows, renaming a file to itself fails with PermissionError [WinError 32]
-        # if Microsoft Excel or another program has the file open.
         os.rename(file_path, file_path)
         return False
     except (PermissionError, IOError, OSError):
@@ -78,6 +109,30 @@ def is_empty_value(val: Any) -> bool:
     return False
 
 
+def validate_write_guard(row: Union[pd.Series, Dict[str, Any]]) -> None:
+    """
+    THE WRITE GUARD:
+    Refuses to write any Raw_ field when its matching Source_ field is empty.
+    Raises DataLayerInvariantViolation immediately.
+    Override_ columns are exempt (human-supplied).
+    """
+    row_dict = row.to_dict() if isinstance(row, pd.Series) else row
+    pid = row_dict.get("Product_ID", "UNKNOWN")
+    
+    for raw_col, source_col in RAW_FIELD_TO_SOURCE_MAP.items():
+        raw_val = row_dict.get(raw_col)
+        if not is_empty_value(raw_val):
+            source_val = row_dict.get(source_col)
+            general_source = row_dict.get("Source_URL")
+            effective_source = source_val if not is_empty_value(source_val) else general_source
+            if is_empty_value(effective_source):
+                raise DataLayerInvariantViolation(
+                    f"[WRITE GUARD VIOLATION] Product {pid}: Field '{raw_col}' has value '{raw_val}' "
+                    f"but its matching source field '{source_col}' and 'Source_URL' are empty! "
+                    f"A field without a verified source URL cannot be written."
+                )
+
+
 def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name: str = "CatalogueData") -> pd.DataFrame:
     """
     Safely reads the catalogue data from Excel, checking for file locks and validating schema columns.
@@ -90,15 +145,14 @@ def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name:
     logger.info(f"Loading catalogue data from {file_path} (sheet: {sheet_name})...")
     df = pd.read_excel(file_path, sheet_name=sheet_name)
     
-    # Check for missing columns
+    # Check for missing columns and append in expected schema order
     missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
     if missing_cols:
-        logger.warning(f"Missing expected columns in sheet: {missing_cols}")
         for col in missing_cols:
             df[col] = None
 
     # Ensure all non-numeric columns are object dtype so string assignment is safe
-    numeric_columns = {"MRP_Input", "Raw_MRP_Scraped", "Override_MRP"}
+    numeric_columns = {"MRP_Input", "Raw_MRP_Scraped", "Override_MRP", "Attempts"}
     for col in df.columns:
         if col not in numeric_columns:
             df[col] = df[col].astype("object")
@@ -108,9 +162,14 @@ def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name:
 
 def save_catalogue_data(df: pd.DataFrame, file_path: str = "data/catalogue_data.xlsx", sheet_name: str = "CatalogueData") -> None:
     """
-    Safely writes DataFrame back to Excel with lock checking.
+    Safely writes DataFrame back to Excel with lock checking and Write Guard enforcement.
     """
     check_file_lock(file_path)
+    
+    # Enforce write guard on all rows before writing to disk
+    for idx, row in df.iterrows():
+        validate_write_guard(row)
+        
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     
     logger.info(f"Saving {len(df)} rows to {file_path}...")
@@ -177,61 +236,35 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
     brand_slug = slugify(brand)
     model_slug = slugify(model_name)
 
-    # Resolve image path
-    image_rel_path = get_effective_value(row_dict, "Image_Path")
-    full_image_path = os.path.join(base_dir, image_rel_path) if image_rel_path else ""
-    image_exists = os.path.exists(full_image_path) and os.path.isfile(full_image_path)
+    image_path = get_effective_value(row_dict, "Image_Path")
 
-    # Format MRP
-    mrp_val = get_effective_value(row_dict, "MRP")
-    try:
-        if isinstance(mrp_val, str):
-            clean_str = re.sub(r"[^\d.]", "", mrp_val)
-            mrp_num = float(clean_str) if clean_str else None
-        elif mrp_val is not None and not pd.isna(mrp_val):
-            mrp_num = float(mrp_val)
-        else:
-            mrp_num = None
-            
-        mrp_formatted = f"₹{int(mrp_num):,}" if mrp_num is not None else "TBD"
-    except (ValueError, TypeError):
-        mrp_num = None
-        mrp_formatted = "TBD"
-
-    bullets = [
-        get_effective_value(row_dict, "Bullet_1") or "",
-        get_effective_value(row_dict, "Bullet_2") or "",
-        get_effective_value(row_dict, "Bullet_3") or "",
-        get_effective_value(row_dict, "Bullet_4") or ""
-    ]
-    # Filter out empty bullets if any
-    bullets = [str(b).strip() for b in bullets if str(b).strip() != ""]
-
-    specs = {
-        "Capacity": get_effective_value(row_dict, "Spec_Capacity") or "",
-        "Output": get_effective_value(row_dict, "Spec_Output") or "",
-        "Ports": get_effective_value(row_dict, "Spec_Ports") or "",
-        "Weight": get_effective_value(row_dict, "Spec_Weight") or "",
-        "Warranty": get_effective_value(row_dict, "Spec_Warranty") or ""
-    }
+    bullets = []
+    for b_idx in range(1, 5):
+        b_val = get_effective_value(row_dict, f"Bullet_{b_idx}")
+        if not is_empty_value(b_val):
+            bullets.append(str(b_val).strip())
 
     return {
-        "product_id": str(row_dict.get("Product_ID", "")).strip(),
+        "product_id": row_dict.get("Product_ID"),
         "brand": brand,
         "brand_slug": brand_slug,
         "model_name": model_name,
         "model_slug": model_slug,
-        "title": str(get_effective_value(row_dict, "Title") or model_name).strip(),
-        "subtitle": str(get_effective_value(row_dict, "Subtitle") or "").strip(),
-        "mrp_raw": mrp_num,
-        "mrp": mrp_formatted,
-        "specs": specs,
+        "title": get_effective_value(row_dict, "Title") or f"{brand} {model_name}",
+        "subtitle": get_effective_value(row_dict, "Subtitle") or "",
+        "mrp": get_effective_value(row_dict, "MRP"),
+        "mrp_raw": get_effective_value(row_dict, "MRP"),
+        "specs": {
+            "capacity": get_effective_value(row_dict, "Spec_Capacity") or "",
+            "output": get_effective_value(row_dict, "Spec_Output") or "",
+            "ports": get_effective_value(row_dict, "Spec_Ports") or "",
+            "weight": get_effective_value(row_dict, "Spec_Weight") or "",
+            "warranty": get_effective_value(row_dict, "Spec_Warranty") or ""
+        },
         "bullets": bullets,
-        "image_path": image_rel_path,
-        "image_full_path": full_image_path,
-        "image_exists": image_exists,
-        "image_status": str(row_dict.get("Image_Status", "")).strip(),
-        "status": str(row_dict.get("Status", "")).strip(),
-        "flags": str(row_dict.get("Flags", "")).strip(),
-        "source_audit": str(row_dict.get("Source_Audit", "")).strip(),
+        "image_full_path": os.path.join(base_dir, image_path) if image_path else "",
+        "image_status": row_dict.get("Image_Status", "missing"),
+        "image_source": row_dict.get("Image_Source"),
+        "flags": row_dict.get("Flags"),
+        "status": row_dict.get("Status", "Pending")
     }

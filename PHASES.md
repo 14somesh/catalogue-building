@@ -182,7 +182,31 @@ Execute the full pipeline end-to-end on the master dataset, perform Human Review
 3. Final print-ready PDF catalogue deliverable: `dist/catalogue.pdf`.
 
 ### Definition of Done (DoD)
-- [ ] Pipeline runs end-to-end without errors.
-- [ ] Output PDF `dist/catalogue.pdf` contains all products cleanly rendered under brand headers in `brand_order`.
-- [ ] Odd product count pages cleanly use single-product card layout without overflow or blank card errors.
-- [ ] Visuals match approved design reference image with exact typography, color palette, image resolution, and dynamic page numbers.
+- [x] Pipeline runs end-to-end without errors.
+- [x] Output PDF `dist/catalogue.pdf` contains all products cleanly rendered under brand headers in `brand_order`.
+- [x] Odd product count pages cleanly use single-product card layout without overflow or blank card errors.
+- [x] Visuals match approved design reference image with exact typography, color palette, image resolution, and dynamic page numbers.
+
+---
+
+## Architecture Transition & Modernization Log (Date: August 31, 2026)
+
+### Reason for Architectural Change
+During the Stuffcool production run, every critical error was caught manually by human inspection of the raw outputs rather than by automated pipeline validation:
+- The collector encountered three HTTP 404 pages and fabricated four confident marketing bullets and specifications for each.
+- `3_review.py` then evaluated those fabricated rows and passed all three as clean—an LLM approved copy that another LLM had made up.
+- The root cause was not a missing pipeline step. It was a **missing foundational constraint**: the agent was permitted to populate a data field for which it had no verified, live source URL.
+
+### New Architecture Principles & Phase Updates
+1. **Core Data-Layer Constraint:** A field that has no verified source URL cannot be written. Enforced programmatically in the data layer (Python runtime/Excel handler), not via soft prompt instructions. Human-supplied `Override_*` columns are strictly exempt.
+2. **Pipeline Shape (Loop, Not Line):**
+   - **Old Shape:** `collect → images → review → build` (linear, open-loop, requiring manual step-by-step intervention).
+   - **New Shape:** `collect → images → validate → fix or block → (retry loop max 3 attempts per row) → report → human approves once → build`.
+   - The loop is the agent. The LLM is a stateless drafting tool called by the loop.
+3. **Clear Ownership Boundaries:**
+   - **Script (Deterministic):** Orchestration, fetching, DOM parsing, validation, fix/block decisions, image gates, reporting, PDF compilation.
+   - **LLM (Single Scoped Job):** Given a block of product text already fetched by a script from a verified URL, draft 4 sales bullets ($\le 60$ chars) and a subtitle. The LLM never selects URLs, never judges page authenticity, and never approves rows.
+   - **Human Reviewer:** Reads the structured run report once per brand, resolves blocked rows via overrides, eyeballs image sets, and signs off.
+4. **Mandatory Spec Source Tiers:** Tier 1 (Brand product page) $\rightarrow$ Tier 2 (Brand collection page) $\rightarrow$ Tier 3 (Retail: Croma, Reliance, Tata CLiQ) $\rightarrow$ Tier 4 (Tech press). 404 triggers escalation, not hallucination. Amazon is never used for specs.
+5. **Separate Image Source Tiers:** Tier 1 (Brand product page) $\rightarrow$ Tier 2 (Retail) $\rightarrow$ Tier 3 (Amazon CDN via Playwright) $\rightarrow$ Tier 4 (Collection thumbnail). Enforces quality gates (min $800\text{ px}$, 1:1 square, unique hash, background tone consistency).
+6. **Fix vs. Block Taxonomy:** Auto-fixes retry autonomously (sibling SKU mismatch, capacity mismatch, boilerplate text, low-res image, missing warranty). Hard blocks write nothing, set `Status = "Blocked"`, and wait for human review (all tiers exhausted, missing image, missing specs, unverified source URL, duplicate image hash, 3 attempts spent).
