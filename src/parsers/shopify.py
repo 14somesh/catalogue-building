@@ -61,6 +61,40 @@ class ShopifyParser(BaseParser):
         # Parse structured specs
         specs = self._extract_specs(full_product_text)
 
+        # Extract MRP / List Price
+        mrp = None
+        # 1. First priority: explicit HTML regular price / MRP text in price-list or product containers
+        for s_tag in soup.find_all(["s", "del", "span", "div", "price-list"], class_=re.compile(r"price-item--regular|compare|mrp|regular-price|price-list", re.I)):
+            txt = s_tag.get_text()
+            m_mrp = re.search(r'MRP[:\s]+(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', txt, re.I) or re.search(r'Regular price\s+(?:MRP[:\s]+)?(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', txt, re.I)
+            if m_mrp:
+                val = float(m_mrp.group(1).replace(",", ""))
+                if val > 10000:
+                    val = val / 100.0
+                if val > 100:
+                    mrp = val
+                    break
+
+        # 2. Second priority: regex on html
+        if not mrp:
+            m = re.search(r'MRP[:\s]+(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', html, re.I)
+            if m:
+                val = float(m.group(1).replace(",", ""))
+                if val > 10000:
+                    val = val / 100.0
+                if val > 100:
+                    mrp = val
+
+        # 3. Third priority: compare_at_price in script JSON (handle paise / cents)
+        if not mrp:
+            m = re.search(r'compare[_\s-]?at[_\s-]?price["\':\s]+([0-9,]+(?:\.\d+)?)', html, re.I)
+            if m:
+                val = float(m.group(1).replace(",", ""))
+                if val > 10000:
+                    val = val / 100.0
+                if val > 100:
+                    mrp = val
+
         # Has specs verification: require at least capacity or wattage/output
         has_specs = bool(specs.get("capacity") or specs.get("output"))
         if not has_specs and not desc_text:
@@ -113,7 +147,8 @@ class ShopifyParser(BaseParser):
             "ports": url if specs.get("ports") else None,
             "weight": url if specs.get("weight") else None,
             "warranty": url if specs.get("warranty") else None,
-            "bullets": url
+            "bullets": url,
+            "mrp": url if mrp else None
         }
 
         return ParserResult(
@@ -123,6 +158,7 @@ class ShopifyParser(BaseParser):
             title=product_title,
             description_text=desc_text[:2000],
             specs=specs,
+            mrp=mrp,
             image_urls=image_urls,
             field_sources=field_sources,
             tier=tier

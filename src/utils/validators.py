@@ -175,7 +175,7 @@ def validate_row_deterministic(
                 
                 is_square = abs(w - h) / max(w, h) <= 0.01
                 if not is_square:
-                    warnings.append(f"Image is not square (1:1): {w}x{h}px; tile is 235x235px square and will crop")
+                    warnings.append(f"Image is not square (1:1): {w}x{h}px; tile is 290x290px square and will crop")
         except Exception as e:
             hard_flags.append(f"Corrupted image file at '{expected_img_path}': {e}")
 
@@ -205,6 +205,20 @@ def validate_row_deterministic(
     has_scraped_source = not is_empty_value(row_dict.get("Source_URL")) and str(row_dict.get("Source_URL")).startswith("http")
     if has_any_override and not has_scraped_source:
         warnings.append("Manual override data present with no live scraped source URL to cross-check")
+
+    # --------------------------------------------------------------------------
+    # WARN p: Scraped MRP lower than DP (indicates potential mismatch or bad parse)
+    # --------------------------------------------------------------------------
+    raw_mrp = row_dict.get("Raw_MRP_Scraped")
+    dp_price = row_dict.get("MRP_Input")
+    if not is_empty_value(raw_mrp) and not is_empty_value(dp_price):
+        try:
+            mrp_num = float(raw_mrp)
+            dp_num = float(dp_price)
+            if mrp_num < dp_num:
+                warnings.append(f"Scraped MRP (₹{mrp_num:,.0f}) is lower than DP (₹{dp_num:,.0f}) — potential product mismatch or bad parse")
+        except Exception:
+            pass
 
     is_passed = len(hard_flags) == 0
     return is_passed, hard_flags, warnings

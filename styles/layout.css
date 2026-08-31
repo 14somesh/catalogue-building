@@ -274,7 +274,7 @@ html, body {
 }
 .prod__name.is-wrapped { white-space: normal; }
 .prod__num {
-  color: var(--c-accent-gold-deep);
+  color: var(--c-ink);
   font-size: 0.88em;
   font-family: var(--font-display);
   font-weight: var(--fw-bold);
@@ -312,7 +312,7 @@ html, body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-auto-rows: auto;
-  gap: 3px var(--s-4);
+  gap: 4px var(--s-4);
   margin-bottom: var(--s-2);
   list-style: none;
   align-items: start;
@@ -337,25 +337,26 @@ html, body {
   border-radius: 2px;
 }
 
-/* Gold DP Badge (Seated cleanly inside card with generous bottom clearance) */
+/* Gold DP / MRP Badge (Seated cleanly inside card with generous bottom clearance) */
 .mrp {
   align-self: flex-start;
   display: inline-flex;
   align-items: baseline;
+  white-space: nowrap;
   gap: var(--s-2);
   background: var(--c-accent-gold);
   color: var(--c-bg-teal-deep);
-  padding: 4px var(--s-3);
+  padding: 5px var(--s-4);
   border-radius: var(--r-md);
   box-shadow: var(--shadow-badge);
   margin-top: var(--s-2);
 }
 .mrp__label {
-  font-size: var(--fs-fine);
+  font-family: var(--font-display);
+  font-size: var(--fs-price);
   font-weight: var(--fw-bold);
-  letter-spacing: 0.08em;
+  line-height: 1;
   color: var(--c-bg-teal-deep);
-  opacity: 0.88;
   text-transform: uppercase;
 }
 .mrp__price {
@@ -365,11 +366,14 @@ html, body {
   line-height: 1;
   color: var(--c-bg-teal-deep);
 }
-.mrp__gst {
-  font-size: var(--fs-fine);
+.mrp__pipe {
+  font-family: var(--font-display);
+  font-size: var(--fs-price);
   font-weight: var(--fw-med);
+  line-height: 1;
   color: var(--c-bg-teal-deep);
-  opacity: 0.88;
+  opacity: 0.55;
+  margin: 0 var(--s-1);
 }
 
 /* ---- Footer ---- */

@@ -4,7 +4,7 @@
   </div>
 
   <div class="prod__body">
-    <h2 class="prod__name"><span class="prod__num">{{ product.index }}</span> {{ product.name_html | safe }}</h2>
+    <h2 class="prod__name"><span class="prod__num">{{ product.index }}.</span> {{ product.name_html | safe }}</h2>
     <p class="prod__subtitle">{{ product.subtitle_html | safe }}</p>
 
     <span class="prod__rule"></span>
@@ -18,7 +18,11 @@
     <div class="mrp">
       <span class="mrp__label">DP</span>
       <span class="mrp__price">₹{{ product.price }}</span>
-      <span class="mrp__gst">incl. GST</span>
+      {% if product.mrp_display %}
+        <span class="mrp__pipe">|</span>
+        <span class="mrp__label">MRP</span>
+        <span class="mrp__price">₹{{ product.mrp_display }}</span>
+      {% endif %}
     </div>
   </div>
 </article>

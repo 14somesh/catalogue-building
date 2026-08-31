@@ -71,6 +71,24 @@ class CromaParser(BaseParser):
         if warr:
             specs["warranty"] = warr.group(0).title()
 
+        # Extract MRP
+        mrp = None
+        if soup:
+            mrp_el = soup.find(class_=re.compile(r"pdp__mrp|mrpPrice|old-price|was-price", re.I))
+            if mrp_el:
+                txt = mrp_el.get_text()
+                nums = re.findall(r'([0-9,]+(?:\.\d+)?)', txt)
+                if nums:
+                    val = float(nums[0].replace(",", ""))
+                    if val > 100:
+                        mrp = val
+        if not mrp and html:
+            m = re.search(r'MRP[:\s]+(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', html, re.I)
+            if m:
+                val = float(m.group(1).replace(",", ""))
+                if val > 100:
+                    mrp = val
+
         # Image extraction
         images = []
         if soup:
@@ -90,7 +108,8 @@ class CromaParser(BaseParser):
             "ports": url if specs.get("ports") else None,
             "weight": url if specs.get("weight") else None,
             "warranty": url if specs.get("warranty") else None,
-            "bullets": url if (specs.get("capacity") or specs.get("output")) else None
+            "bullets": url if (specs.get("capacity") or specs.get("output")) else None,
+            "mrp": url if mrp else None
         }
 
         success = bool(specs.get("capacity") or specs.get("output"))
@@ -101,6 +120,7 @@ class CromaParser(BaseParser):
             title=title,
             description_text="\n".join(spec_text_blocks[:10]) or slug_text,
             specs=specs,
+            mrp=mrp,
             image_urls=images,
             field_sources=field_sources,
             tier=tier,

@@ -113,7 +113,7 @@ def format_subtitle_html(subtitle: str) -> str:
 def validate_image_aspect_ratio(image_path: str, product_id: str) -> None:
     """
     SECTION A — Rule 7: Image Aspect Ratio (Strict Square 1:1 Framing).
-    Flags any image that is not square, since the tile is square (235x235px) and non-square images crop.
+    Flags any image that is not square, since the tile is square (290x290px) and non-square images crop.
     """
     if not os.path.exists(image_path):
         return
@@ -123,7 +123,7 @@ def validate_image_aspect_ratio(image_path: str, product_id: str) -> None:
             aspect_diff = abs(w - h) / max(w, h)
             if aspect_diff > 0.01:
                 logger.warning(
-                    f"[RENDER_RULES Section A - Aspect Ratio] Product {product_id} image '{os.path.basename(image_path)}' is not square (1:1): {w}x{h}px (ratio: {w/h:.2f}). Tile is 235x235px square and non-square images will crop."
+                    f"[RENDER_RULES Section A - Aspect Ratio] Product {product_id} image '{os.path.basename(image_path)}' is not square (1:1): {w}x{h}px (ratio: {w/h:.2f}). Tile is 290x290px square and non-square images will crop."
                 )
     except Exception as e:
         logger.error(f"Error inspecting aspect ratio for {image_path}: {e}")
@@ -296,20 +296,31 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
                 price_str = mrp_val if mrp_val else "TBD"
 
             raw_model = prod.get("model_name", "")
+            display_name = prod.get("display_name") or raw_model
             subtitle_val = prod.get("subtitle", "")
             bullets_list = prod.get("bullets", [])
+            mrp_display_val = prod.get("mrp_display")
+            if mrp_display_val is not None:
+                try:
+                    clean_num = float(str(mrp_display_val).replace("₹", "").replace("MRP", "").replace(",", "").strip())
+                    mrp_display_str = f"{int(clean_num):,}"
+                except Exception:
+                    mrp_display_str = str(mrp_display_val).strip()
+            else:
+                mrp_display_str = None
 
             prod_ctx = {
                 "product_id": prod.get("product_id") or row.get("Product_ID"),
                 "index": f"{idx_in_brand:02d}",
                 "brand": brand_name,
                 "series": "SERIES",
-                "name": raw_model,
-                "name_html": format_name_html(raw_model),
+                "name": display_name,
+                "name_html": format_name_html(display_name),
                 "subtitle_html": format_subtitle_html(subtitle_val),
                 "image_url": image_b64,
                 "bullets": bullets_list,
                 "price": price_str,
+                "mrp_display": mrp_display_str,
                 "category": category_name,
             }
             products.append(prod_ctx)
@@ -456,7 +467,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
     # Calculate expected page count
     expected_pages = 1  # Cover page
     for group in brand_groups:
-        prod_count = len(group["products"])
+        prod_count = group["total_products"]
         brand_pages = 1 + math.ceil(prod_count / 2)  # 1 divider + 2-up product pages
         expected_pages += brand_pages
 

@@ -247,6 +247,7 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict) -> Tuple[Dict[s
     specs = parser_res.specs
 
     # Populate raw fields strictly paired with matching Source_ and Tier_ columns (WRITE GUARD COMPLIANT)
+    mrp_val = parser_res.mrp
     updates = {
         "Source_URL": source_url,
         "Source_Audit": provenance,
@@ -256,6 +257,9 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict) -> Tuple[Dict[s
         "Raw_Subtitle": llm_copy.get("subtitle", ""),
         "Source_Subtitle": source_url,
         "Tier_Subtitle": tier,
+        "Raw_MRP_Scraped": mrp_val if mrp_val else None,
+        "Source_MRP_Scraped": source_url if mrp_val else None,
+        "Tier_MRP_Scraped": tier if mrp_val else None,
         "Raw_Spec_Capacity": specs.get("capacity"),
         "Source_Spec_Capacity": source_url if specs.get("capacity") else None,
         "Tier_Spec_Capacity": tier if specs.get("capacity") else None,

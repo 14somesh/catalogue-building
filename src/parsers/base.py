@@ -14,6 +14,7 @@ class ParserResult:
     title: Optional[str] = None
     description_text: Optional[str] = None
     specs: Dict[str, str] = field(default_factory=dict)
+    mrp: Optional[float] = None
     image_urls: List[str] = field(default_factory=list)
     field_sources: Dict[str, str] = field(default_factory=dict)
     tier: int = 1

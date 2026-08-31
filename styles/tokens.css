@@ -35,12 +35,12 @@
 
   /* Type scale (px) */
   --fs-eyebrow:   10px;   /* "01 — STUFFCOOL SERIES" */
-  --fs-fine:      10px;   /* "MRP", "incl. GST" */
+  --fs-fine:      10px;   /* "MRP" */
   --fs-caption:   11.5px; /* footer, category pill */
-  --fs-bullet:    11.5px; /* feature bullets */
-  --fs-subtitle:  12px;   /* product subtitle */
-  --fs-price:     18px;   /* MRP price */
-  --fs-name:      28px;   /* product name */
+  --fs-bullet:    12.5px; /* feature bullets */
+  --fs-subtitle:  13px;   /* product subtitle */
+  --fs-price:     18px;   /* DP price */
+  --fs-name:      32px;   /* product name */
   --fs-name-min:  18px;   /* auto-shrink floor */
 
   --lh-tight:  1.10;
@@ -66,8 +66,8 @@
   --s-16: 64px;
 
   /* ---- Block geometry (Fixed Uniform Dimensions) ---- */
-  --prod-h:      235px;   /* fixed uniform height for all cards */
-  --prod-tile-w: 235px;   /* square tile width */
+  --prod-h:      290px;   /* fixed uniform height for all cards */
+  --prod-tile-w: 290px;   /* square tile width */
 
   /* ---- Radii ---- */
   --r-sm:   8px;

@@ -9,7 +9,7 @@ logger = setup_logger("excel_handler")
 
 # Standard flat schema defined in ARCHITECTURE.md
 EXPECTED_COLUMNS = [
-    "Product_ID", "Brand", "Model_Name", "Product_URL", "Brochure_PDF", "Marketplace_URL", "MRP_Input",
+    "Product_ID", "Brand", "Model_Name", "Display_Name", "Product_URL", "Brochure_PDF", "Marketplace_URL", "MRP_Input", "MRP_Display",
     "Source_URL", "Source_Audit",
     "Raw_Title", "Source_Title", "Tier_Title",
     "Raw_Subtitle", "Source_Subtitle", "Tier_Subtitle",
@@ -244,16 +244,26 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
         if not is_empty_value(b_val):
             bullets.append(str(b_val).strip())
 
+    display_name_val = get_effective_value(row_dict, "Display_Name")
+    effective_display_name = str(display_name_val).strip() if display_name_val and not is_empty_value(display_name_val) else model_name
+    
+    # MRP display precedence: MRP_Display (human override) -> Raw_MRP_Scraped
+    mrp_display_val = get_effective_value(row_dict, "MRP_Display")
+    raw_mrp_scraped = row_dict.get("Raw_MRP_Scraped")
+    effective_mrp = mrp_display_val if not is_empty_value(mrp_display_val) else raw_mrp_scraped if not is_empty_value(raw_mrp_scraped) else None
+
     return {
         "product_id": row_dict.get("Product_ID"),
         "brand": brand,
         "brand_slug": brand_slug,
         "model_name": model_name,
+        "display_name": effective_display_name,
         "model_slug": model_slug,
         "title": get_effective_value(row_dict, "Title") or f"{brand} {model_name}",
         "subtitle": get_effective_value(row_dict, "Subtitle") or "",
         "mrp": get_effective_value(row_dict, "MRP"),
         "mrp_raw": get_effective_value(row_dict, "MRP"),
+        "mrp_display": str(effective_mrp).strip() if effective_mrp and not is_empty_value(effective_mrp) else None,
         "specs": {
             "capacity": get_effective_value(row_dict, "Spec_Capacity") or "",
             "output": get_effective_value(row_dict, "Spec_Output") or "",
