@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 from typing import Optional, Dict, Any, List, Tuple, Set
@@ -215,28 +216,159 @@ def get_providers_from_config(llm_config: Optional[dict] = None) -> List[Dict[st
     ]
 
 
+DANGLING_STOPWORDS = {
+    "to", "in", "on", "at", "for", "with", "and", "or", "the", "a", "an",
+    "by", "of", "from", "up", "into", "as"
+}
+
+# Banned marketing adjectives that must never appear in technical catalogue bullets
+BANNED_ADJECTIVES = [
+    r"premium", r"amazing", r"ultimate", r"perfect", r"revolutionary",
+    r"cutting-?edge", r"seamless(?:ly)?", r"incredible", r"exceptional",
+    r"best", r"unbeatable", r"stunning", r"game-?changing",
+    r"top-?notch", r"state-?of-?the-?art",
+    r"superior", r"flawless", r"miraculous", r"breathtaking", r"unrivaled"
+]
+
+SHARED_SYSTEM_PROMPT = (
+    "You are an expert technical product copywriter for a corporate gifting catalogue.\n"
+    "Your single task is to write 4 concise sales bullet points and an engaging subtitle "
+    "based strictly on the provided verified product specifications and description.\n\n"
+    "STRICT COPYWRITING CONSTRAINTS:\n"
+    "1. LEAD WITH A NUMBER OR SPEC: When a spec or number exists in the source text (e.g. 10000mAh, 20W PD, 185g, 3 ports), "
+    "lead the bullet point directly with that number or specification.\n"
+    "2. NO MARKETING ADJECTIVES: Never use subjective marketing adjectives (premium, amazing, ultimate, perfect, "
+    "revolutionary, cutting-edge, seamless, incredible, exceptional, best, unbeatable, stunning).\n"
+    "3. NEVER REPEAT BRAND NAME: Never include or repeat the brand name inside any bullet point or subtitle.\n"
+    "4. CASING & PUNCTUATION: Write in clean sentence case. Every bullet point and subtitle MUST end with a terminal period ('.').\n"
+    "5. EXACT LENGTH CONSTRAINT: Every bullet point MUST be between 40 and 60 characters total.\n"
+    "6. SUBTITLE LIMIT: Subtitle must be at most 80 characters and end with a terminal period.\n"
+    "7. ZERO HALLUCINATION: Only make claims directly verified by the provided text. Never invent specs or features.\n"
+    "8. OUTPUT FORMAT: Return valid JSON strictly matching this schema:\n"
+    "{\n"
+    '  "title": "Clean model title <= 40 chars",\n'
+    '  "subtitle": "Informative capability subtitle <= 80 chars ending with a period.",\n'
+    '  "bullet_1": "Leading spec bullet point <= 60 chars.",\n'
+    '  "bullet_2": "Leading spec bullet point <= 60 chars.",\n'
+    '  "bullet_3": "Leading spec bullet point <= 60 chars.",\n'
+    '  "bullet_4": "Leading spec bullet point <= 60 chars."\n'
+    "}"
+)
+
+
+def clean_and_normalize_text(
+    text: str,
+    brand: str,
+    max_chars: int = 60,
+    min_chars: int = 20
+) -> Tuple[str, bool]:
+    """
+    Deterministic post-processor that runs on every bullet and subtitle regardless of provider:
+    1. Strip brand name if present.
+    2. Strip banned marketing adjectives.
+    3. Collapse whitespace and strip dangling punctuation.
+    4. Check if any banned adjective survived (reject if unfixable).
+    5. Sentence case normalization.
+    6. Trim to max_chars at a clean word boundary reserving room for terminal period.
+    7. Strip dangling prepositions / conjunctions resulting from word-boundary truncation.
+    8. Ensure terminal period.
+    """
+    if not text or not isinstance(text, str):
+        return "", False
+
+    cleaned = str(text).strip()
+
+    # 1. Strip brand name if present (case-insensitive word boundary)
+    if brand:
+        cleaned = re.sub(rf'\b{re.escape(brand)}\b', '', cleaned, flags=re.I)
+
+    # 2. Strip banned marketing adjectives
+    for pattern in BANNED_ADJECTIVES:
+        cleaned = re.sub(rf'\b{pattern}\b\s*', '', cleaned, flags=re.I)
+
+    # 3. Collapse whitespace and strip leading/trailing non-alphanumeric punctuation
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    cleaned = re.sub(r'^[-–—:,.\s]+', '', cleaned).strip()
+
+    if not cleaned:
+        return "", False
+
+    # 4. Check if any banned adjective survived
+    for pattern in BANNED_ADJECTIVES:
+        if re.search(rf'\b{pattern}\b', cleaned, re.I):
+            return "", False
+
+    # 5. Sentence case normalization: capitalize leading alphabetic word if it is not an acronym/unit
+    if cleaned and cleaned[0].isalpha():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    # 6. Trim to max_chars at word boundary reserving 1 char for terminal period
+    cleaned = cleaned.rstrip(". ,;:-")
+    target_len = max_chars - 1
+    if len(cleaned) > target_len:
+        truncated = cleaned[:target_len]
+        if " " in truncated:
+            cleaned = truncated.rsplit(" ", 1)[0].rstrip(". ,;:-")
+        else:
+            cleaned = truncated.rstrip(". ,;:-")
+
+    # 7. Strip dangling stop words (e.g. 'up to', 'for', 'in', 'on')
+    words = cleaned.split()
+    while words and words[-1].lower() in DANGLING_STOPWORDS:
+        words.pop()
+    cleaned = " ".join(words).rstrip(". ,;:-")
+
+    if not cleaned:
+        return "", False
+
+    # 8. Ensure terminal period
+    cleaned = cleaned.rstrip(". ") + "."
+
+    # 9. Length guarantee
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars - 1].rsplit(" ", 1)[0].rstrip(". ,;:-") + "."
+
+    is_valid = len(cleaned) >= min_chars and len(cleaned) <= max_chars
+    return cleaned, is_valid
+
+
+def post_process_copy_payload(raw_copy: Dict[str, Any], brand: str) -> Tuple[Dict[str, Any], bool]:
+    """
+    Applies deterministic post-processing across all fields of the LLM copy payload.
+    Ensures identical shape and constraints regardless of LLM provider.
+    """
+    processed = dict(raw_copy)
+    all_valid = True
+
+    # 1. Clean Title
+    title = str(raw_copy.get("title", "")).strip()
+    title = re.sub(r'\s+', ' ', title)
+    if len(title) > 40:
+        title = title[:40].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    processed["title"] = title
+
+    # 2. Clean Subtitle (max 80 chars)
+    sub_raw = str(raw_copy.get("subtitle", "")).strip()
+    sub_clean, sub_valid = clean_and_normalize_text(sub_raw, brand, max_chars=80, min_chars=15)
+    if not sub_valid and sub_clean:
+        sub_valid = True
+    processed["subtitle"] = sub_clean
+    if not sub_valid:
+        all_valid = False
+
+    # 3. Clean Bullets 1 to 4 (max 60 chars)
+    for b_key in ["bullet_1", "bullet_2", "bullet_3", "bullet_4"]:
+        b_raw = str(raw_copy.get(b_key, "")).strip()
+        b_clean, b_valid = clean_and_normalize_text(b_raw, brand, max_chars=60, min_chars=20)
+        processed[b_key] = b_clean
+        if not b_valid:
+            all_valid = False
+
+    return processed, all_valid
+
+
 def _build_copy_prompts(brand: str, model_name: str, product_description_block: str, specs: Dict[str, str]) -> Tuple[str, str]:
     """Builds identical structured copy system and user prompts across all providers."""
-    system_prompt = (
-        "You are an expert technical product copywriter for a corporate gifting catalogue. "
-        "Your single task is to write 4 concise, high-impact sales bullet points and an engaging subtitle "
-        "based strictly on the provided verified product description and specifications.\n\n"
-        "STRICT CONSTRAINTS:\n"
-        "1. ZERO HALLUCINATION: Only make claims directly supported by the provided text. Never invent features.\n"
-        "2. BULLET LENGTH LIMIT: Every bullet point (bullet_1 to bullet_4) MUST BE AT MOST 60 CHARACTERS.\n"
-        "3. SUBTITLE LIMIT: Subtitle must be at most 80 characters.\n"
-        "4. NO GENERIC BOILERPLATE: Avoid phrases like 'free shipping', 'leading brand', 'reliable and durable', 'homegrown'.\n"
-        "5. OUTPUT FORMAT: Output valid JSON strictly conforming to this schema:\n"
-        "{\n"
-        '  "title": "Crisp title <= 40 chars",\n'
-        '  "subtitle": "Engaging subtitle <= 80 chars",\n'
-        '  "bullet_1": "Sales bullet <= 60 chars",\n'
-        '  "bullet_2": "Sales bullet <= 60 chars",\n'
-        '  "bullet_3": "Sales bullet <= 60 chars",\n'
-        '  "bullet_4": "Sales bullet <= 60 chars"\n'
-        "}"
-    )
-
     user_prompt = (
         f"Brand: {brand}\n"
         f"Model: {model_name}\n"
@@ -244,19 +376,9 @@ def _build_copy_prompts(brand: str, model_name: str, product_description_block: 
         f"--- VERIFIED PRODUCT DESCRIPTION BLOCK ---\n"
         f"{product_description_block[:1500]}\n"
         f"------------------------------------------\n\n"
-        "Draft the title, subtitle, and 4 sales bullets in the required JSON schema."
+        "Draft the title, subtitle, and 4 sales bullets according to the strict copywriting constraints in JSON format."
     )
-    return system_prompt, user_prompt
-
-
-def _enforce_bullet_length(parsed_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Enforces the strict <= 60 characters constraint on all 4 bullets via word-boundary trimming."""
-    for b_key in ["bullet_1", "bullet_2", "bullet_3", "bullet_4"]:
-        val = str(parsed_data.get(b_key, "")).strip()
-        if len(val) > 60:
-            logger.warning(f"{b_key} exceeded 60 chars ({len(val)} chars). Trimming...")
-            parsed_data[b_key] = val[:60].rsplit(" ", 1)[0]
-    return parsed_data
+    return SHARED_SYSTEM_PROMPT, user_prompt
 
 
 def _draft_copy_gemini(
@@ -268,7 +390,7 @@ def _draft_copy_gemini(
     temperature: float = 0.2,
     max_retries: int = 3
 ) -> Dict[str, Any]:
-    """Executes copy drafting on Gemini with retry on transient/rate-limit errors."""
+    """Executes copy drafting on Gemini with deterministic post-processing."""
     client = get_gemini_client()
     system_prompt, user_prompt = _build_copy_prompts(brand, model_name, product_description_block, specs)
     logger.info(f"Calling Gemini ({model}) to draft copy for {brand} {model_name}...")
@@ -286,7 +408,10 @@ def _draft_copy_gemini(
                 )
             )
             parsed_data = json.loads(response.text)
-            return _enforce_bullet_length(parsed_data)
+            processed_data, is_valid = post_process_copy_payload(parsed_data, brand)
+            if is_valid or attempt == max_retries:
+                return processed_data
+            logger.warning(f"[Gemini] Copy validation failed on attempt {attempt}/{max_retries}. Re-requesting...")
 
         except Exception as e:
             last_error = e
@@ -318,7 +443,7 @@ def _draft_copy_groq(
     temperature: float = 0.2,
     max_retries: int = 3
 ) -> Dict[str, Any]:
-    """Executes copy drafting on Groq with retry on transient/rate-limit errors."""
+    """Executes copy drafting on Groq with deterministic post-processing."""
     client = get_groq_client()
     system_prompt, user_prompt = _build_copy_prompts(brand, model_name, product_description_block, specs)
     logger.info(f"Calling Groq ({model}) to draft copy for {brand} {model_name}...")
@@ -337,7 +462,10 @@ def _draft_copy_groq(
             )
             raw_content = completion.choices[0].message.content
             parsed_data = json.loads(raw_content)
-            return _enforce_bullet_length(parsed_data)
+            processed_data, is_valid = post_process_copy_payload(parsed_data, brand)
+            if is_valid or attempt == max_retries:
+                return processed_data
+            logger.warning(f"[Groq] Copy validation failed on attempt {attempt}/{max_retries}. Re-requesting...")
 
         except Exception as e:
             last_error = e
