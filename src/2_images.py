@@ -201,7 +201,7 @@ def execute_image_tier_escalation(
         return status, "local-verified", 1
 
     # Tier 1: Brand Product Page URL
-    if image_url and (image_url.startswith("http://") or image_url.startswith("https://")):
+    if image_url and isinstance(image_url, str) and (image_url.startswith("http://") or image_url.startswith("https://")):
         logger.info(f"[{product_id}] [Tier 1 Image] Downloading from brand URL: {image_url}")
         if download_image(image_url, dest_path):
             status, _, _ = validate_image_file(dest_path)

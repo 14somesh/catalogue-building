@@ -591,20 +591,16 @@ def preflight_quota_check(llm_config: Optional[dict] = None) -> Tuple[bool, List
             try:
                 client = get_gemini_client()
                 client.models.generate_content(
-                    model=p_model or "gemini-3.6-flash",
+                    model=p_model or "gemini-3.5-flash",
                     contents="ping",
                     config=types.GenerateContentConfig(max_output_tokens=5, temperature=0.0)
                 )
-                logger.info(f"  ✅ [Gemini] Model '{p_model or 'gemini-3.6-flash'}': AVAILABLE")
-                available_providers.append("gemini")
+                logger.info(f"  ✅ [Gemini] Model '{p_model or 'gemini-3.5-flash'}': AVAILABLE")
+                if "gemini" not in available_providers:
+                    available_providers.append("gemini")
             except Exception as e:
                 err_type = classify_gemini_error(e)
-                if err_type == "QUOTA_EXHAUSTED":
-                    mark_provider_exhausted("gemini")
-                    logger.warning(f"  ❌ [Gemini] Model '{p_model}': DAILY QUOTA EXHAUSTED")
-                else:
-                    mark_provider_exhausted("gemini")
-                    logger.warning(f"  ❌ [Gemini] Model '{p_model}': UNAVAILABLE ({e})")
+                logger.warning(f"  ❌ [Gemini] Model '{p_model}': UNAVAILABLE ({err_type}: {e})")
 
         elif p_name == "groq":
             try:
@@ -616,15 +612,16 @@ def preflight_quota_check(llm_config: Optional[dict] = None) -> Tuple[bool, List
                     temperature=0.0
                 )
                 logger.info(f"  ✅ [Groq] Model '{p_model or 'llama-3.3-70b-versatile'}': AVAILABLE")
-                available_providers.append("groq")
+                if "groq" not in available_providers:
+                    available_providers.append("groq")
             except Exception as e:
                 err_type = classify_groq_error(e)
-                if err_type == "QUOTA_EXHAUSTED":
-                    mark_provider_exhausted("groq")
-                    logger.warning(f"  ❌ [Groq] Model '{p_model}': QUOTA EXHAUSTED")
-                else:
-                    mark_provider_exhausted("groq")
-                    logger.warning(f"  ❌ [Groq] Model '{p_model}': UNAVAILABLE ({e})")
+                logger.warning(f"  ❌ [Groq] Model '{p_model}': UNAVAILABLE ({err_type}: {e})")
+
+    if "gemini" not in available_providers:
+        mark_provider_exhausted("gemini")
+    if "groq" not in available_providers:
+        mark_provider_exhausted("groq")
 
     if not available_providers:
         msg = "All LLM providers exhausted. Run halted. No rows were modified."
@@ -735,7 +732,7 @@ def extract_specs_via_vision(
 
     client = get_gemini_client()
     cfg = llm_config or {}
-    model = "gemini-3.6-flash"
+    candidate_models = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
 
     prompt = (
         f"You are an expert technical product specification extractor.\n"
@@ -753,16 +750,18 @@ def extract_specs_via_vision(
     )
 
     image_parts = []
-    for img_data, mime_type in image_bytes_list:
+    # Cap at 4 images max
+    for img_data, mime_type in image_bytes_list[:4]:
         image_parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
 
     contents = [prompt] + image_parts
-    logger.info(f"[Vision Fallback] Calling Gemini Vision ({model}) on {len(image_parts)} images for {brand} {model_name}...")
+    import concurrent.futures
 
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = client.models.generate_content(
+    for model in candidate_models:
+        logger.info(f"[Vision Fallback] Calling Gemini Vision ({model}) on {len(image_parts)} images for {brand} {model_name} (15s timeout)...")
+        
+        def _call_gemini():
+            return client.models.generate_content(
                 model=model,
                 contents=contents,
                 config=types.GenerateContentConfig(
@@ -772,31 +771,92 @@ def extract_specs_via_vision(
                 )
             )
 
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call_gemini)
+                response = future.result(timeout=15.0)
+
             parsed = json.loads(response.text)
-            clean_specs = {}
+            raw_specs = {}
             for k in ["capacity", "output", "ports", "weight", "warranty"]:
                 val = parsed.get(k)
                 if val and str(val).strip().lower() not in ("null", "none", ""):
-                    clean_specs[k] = str(val).strip()
+                    raw_specs[k] = str(val).strip()
+
+            # Sanity-check vision output before writing
+            clean_specs = validate_vision_specs(raw_specs)
 
             if clean_specs:
-                logger.info(f"[Vision Fallback] Successfully extracted specs for {brand} {model_name}: {clean_specs}")
+                logger.info(f"[Vision Fallback] Successfully extracted verified specs for {brand} {model_name}: {clean_specs}")
                 return clean_specs
             else:
-                logger.warning(f"[Vision Fallback] Vision API returned empty specs for {brand} {model_name}.")
+                logger.warning(f"[Vision Fallback] Vision API returned no verifiable specs for {brand} {model_name}.")
                 return None
 
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"[Vision Fallback] Gemini vision call for {model} TIMED OUT after 15s. Escalating immediately.")
+            continue
         except Exception as e:
             err_type = classify_gemini_error(e)
-            logger.warning(f"[Vision Fallback] Gemini vision attempt {attempt}/{max_retries} failed ({err_type}): {e}")
-            if err_type == "QUOTA_EXHAUSTED":
-                mark_provider_exhausted("gemini")
-                return None
-            elif err_type in ("RATE_LIMIT", "TRANSIENT") and attempt < max_retries:
-                time.sleep(2 ** attempt * 2)
+            logger.warning(f"[Vision Fallback] Gemini vision model {model} failed ({err_type}): {e}")
+            if err_type in ("QUOTA_EXHAUSTED", "RATE_LIMIT"):
+                continue
             else:
-                return None
+                continue
 
     return None
+
+
+def validate_vision_specs(specs: Dict[str, str]) -> Dict[str, str]:
+    """
+    Sanity-checks vision extraction outputs before recording:
+    - capacity: must parse as a number followed by mAh
+    - weight: must parse as a number followed by g
+    - output: must parse as a number followed by W
+    - ports: must contain standard port identifiers
+    - warranty: must contain duration identifiers
+    Anything unparseable is discarded, not written.
+    """
+    valid_specs = {}
+
+    cap = specs.get("capacity")
+    if cap:
+        m = re.search(r'\b(\d{4,6})\s*m?ah\b', str(cap), re.IGNORECASE) or re.search(r'\b(\d+,\d+)\s*m?ah\b', str(cap), re.IGNORECASE)
+        if m:
+            clean_cap = m.group(1).replace(",", "")
+            valid_specs["capacity"] = f"{clean_cap} mAh"
+        else:
+            logger.warning(f"[Vision Sanity] Discarding unparseable capacity: '{cap}'")
+
+    out = specs.get("output")
+    if out:
+        if re.search(r'\b\d+(?:\.\d+)?\s*w\b', str(out), re.IGNORECASE):
+            valid_specs["output"] = str(out).strip()
+        else:
+            logger.warning(f"[Vision Sanity] Discarding unparseable output: '{out}'")
+
+    wt = specs.get("weight")
+    if wt:
+        m = re.search(r'\b(\d{2,4}(?:\.\d+)?)\s*g\b', str(wt), re.IGNORECASE)
+        if m:
+            valid_specs["weight"] = f"{m.group(1)}g"
+        else:
+            logger.warning(f"[Vision Sanity] Discarding unparseable weight: '{wt}'")
+
+    pts = specs.get("ports")
+    if pts:
+        if any(p in str(pts).lower() for p in ["type-c", "type c", "usb-c", "usb c", "usb-a", "usb a", "wireless", "lightning", "micro", "port"]):
+            valid_specs["ports"] = str(pts).strip()
+        else:
+            logger.warning(f"[Vision Sanity] Discarding unparseable ports: '{pts}'")
+
+    war = specs.get("warranty")
+    if war:
+        if any(w in str(war).lower() for w in ["month", "year", "yr"]):
+            valid_specs["warranty"] = str(war).strip()
+        else:
+            logger.warning(f"[Vision Sanity] Discarding unparseable warranty: '{war}'")
+
+    return valid_specs
 
 

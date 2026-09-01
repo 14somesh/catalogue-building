@@ -189,15 +189,7 @@ def parse_brochure_for_model(
                         if not target_tokens.issubset(page_tokens):
                             continue
 
-                        # Validate qualifier tokens to prevent sibling mismatches
-                        is_reject, reject_reason = reject_qualifier_mismatch(model_name, raw_text, qualifier_tokens)
-                        if is_reject:
-                            logger.warning(f"[Tier 0] Page {page_num} matched model but rejected due to qualifier conflict: {reject_reason}")
-                            continue
-
-                        logger.info(f"[Tier 0] Matched '{model_name}' in brochure '{pdf_filename}' on page {page_num}.")
-
-                        # Multi-product handling: isolate section
+                        # Multi-product handling: isolate section for target model first
                         model_section_text = raw_text
                         lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
                         model_line_idx = -1
@@ -207,8 +199,22 @@ def parse_brochure_for_model(
                                 break
 
                         if model_line_idx != -1:
-                            section_lines = lines[model_line_idx:model_line_idx + 15]
+                            section_lines = []
+                            for l_idx in range(model_line_idx, min(len(lines), model_line_idx + 25)):
+                                line = lines[l_idx]
+                                # If we encounter another product header line after the start, terminate section
+                                if l_idx > model_line_idx and any(kw in line.lower() for kw in ["power bank", "powerbank", "charger", "adapter"]) and not target_tokens.issubset(normalize_model_tokens(line)):
+                                    break
+                                section_lines.append(line)
                             model_section_text = "\n".join(section_lines)
+
+                        # Validate qualifier tokens on the isolated product section to prevent sibling mismatches
+                        is_valid, reject_reason = reject_qualifier_mismatch(model_name, model_section_text, qualifier_tokens)
+                        if not is_valid:
+                            logger.warning(f"[Tier 0] Page {page_num} matched model but rejected due to qualifier conflict: {reject_reason}")
+                            continue
+
+                        logger.info(f"[Tier 0] Matched '{model_name}' in brochure '{pdf_filename}' on page {page_num}.")
 
                         text_specs = parse_specs_from_text(model_section_text)
                         source_label = f"brochure: {pdf_filename}, page {page_num}"

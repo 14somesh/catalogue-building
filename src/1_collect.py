@@ -35,6 +35,7 @@ from src.parsers.base import ParserResult
 from src.utils.logger import setup_logger
 
 logger = setup_logger("collect")
+BLOCKED_BRAND_DOMAINS: Set[str] = set()
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -163,8 +164,8 @@ def execute_vision_fallback_for_page(
         logger.warning(f"[Vision Fallback] No candidate spec images found on {url}")
         return None
 
-    # Download up to 8 candidate images at full resolution
-    image_bytes_list = []
+    # Download candidate images at full resolution and keep 4 largest
+    raw_images = []
     for img_url in candidate_img_urls[:8]:
         try:
             base_u = img_url.split("?")[0]
@@ -172,13 +173,16 @@ def execute_vision_fallback_for_page(
             ir = requests.get(dl_url, headers=DEFAULT_HEADERS, timeout=10)
             if ir.status_code == 200 and len(ir.content) > 10000:
                 mime = "image/jpeg" if any(ext in dl_url.lower() for ext in ["jpg", "jpeg"]) else "image/png"
-                image_bytes_list.append((ir.content, mime))
+                raw_images.append((ir.content, mime))
         except Exception as e:
             logger.debug(f"[Vision Fallback] Image download failed for {img_url}: {e}")
 
-    if not image_bytes_list:
+    if not raw_images:
         logger.warning(f"[Vision Fallback] Could not download any images from {url}")
         return None
+
+    # Sort by byte size descending and select at most 4 largest images
+    image_bytes_list = sorted(raw_images, key=lambda x: len(x[0]), reverse=True)[:4]
 
     vision_specs = extract_specs_via_vision(
         image_bytes_list, url, brand, model_name, llm_config=config.get("llm", {})
@@ -291,68 +295,91 @@ def execute_spec_escalation(
             return combined_res, combined_provenance
         logger.info(f"[{product_id}] Tier 0 Brochure yielded partial specs ({missing_count}/5 empty: {missing_keys}). Escalating to Tier 1 to fill gaps...")
 
-    # ==================== TIER 1: Brand Product Page (Direct JSON API) ====================
-    tier1_url = manual_url if manual_url and manual_url.startswith("http") else None
-    if not tier1_url:
-        tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls)
-
-    if tier1_url:
-        logger.info(f"[{product_id}] Executing Tier 1 (Brand Product Page): {tier1_url}")
-        res = fetch_and_parse_url(tier1_url, tier=1)
-        if res.success and res.specs:
-            combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-1: brand-page ({tier1_url})")
-            is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
-            if not is_thin:
-                return combined_res, combined_provenance
-            logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count}/5 empty: {missing_keys}). Checking Vision Fallback...")
-        
-        # VISION FALLBACK Tier 1: Fires if HTML returned 200 but specs are missing / thin
-        if res.status_code == 200:
-            vision_res = execute_vision_fallback_for_page(tier1_url, brand, model_name, base_tier=1, config=cfg, existing_images=res.image_urls)
-            if vision_res and vision_res.specs:
-                combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-1-vision: brand-page ({tier1_url})")
-                is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
-                if not is_thin:
-                    return combined_res, combined_provenance
-                logger.warning(f"[{product_id}] Tier 1 Vision yielded partial specs ({missing_count}/5 empty). Escalating to Tier 2...")
-            else:
-                logger.warning(f"[{product_id}] Tier 1 Vision yielded no specs. Escalating to Tier 2...")
-        else:
-            fail_type = "Blocked" if res.is_blocked else "Delisted"
-            logger.warning(f"[{product_id}] Tier 1 failed ({fail_type}): {res.error}. Escalating to Tier 2...")
+    # Check if brand domain was previously blocked by bot challenge
+    if brand_domain in BLOCKED_BRAND_DOMAINS:
+        logger.warning(f"[{product_id}] Brand domain '{brand_domain}' is flagged as BLOCKED by bot challenge. Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
     else:
-        logger.info(f"[{product_id}] Tier 1 product URL not found. Escalating to Tier 2...")
+        # ==================== TIER 1: Brand Product Page (Shopify Direct / Generic JSON-LD & Sitemap) ====================
+        tier1_url = manual_url if manual_url and manual_url.startswith("http") else None
+        if not tier1_url:
+            # 1a. Try Shopify direct index
+            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls)
+            
+            # 1b. Non-Shopify Generic Sitemap Fallback
+            if not tier1_url:
+                try:
+                    from src.parsers.generic import GenericBrandParser
+                    generic_parser = GenericBrandParser(brand_domain, brand, brand_cfg)
+                    match_info = generic_parser.find_product_url(model_name, qualifier_tokens)
+                    if match_info:
+                        tier1_url = match_info[0]
+                        logger.info(f"[{product_id}] [Generic Sitemap Match] Found '{match_info[1]}' -> {tier1_url} (score={match_info[2]:.1f})")
+                except Exception as e:
+                    logger.debug(f"[{product_id}] Generic parser search failed: {e}")
 
-    # ==================== TIER 2: Brand Collection Page ====================
-    collection_url = brand_cfg.get("collection_url")
-    if collection_url:
-        logger.info(f"[{product_id}] Executing Tier 2 (Brand Collection Page): {collection_url}")
-        tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls)
-        if tier2_prod_url:
-            res = fetch_and_parse_url(tier2_prod_url, tier=2)
-            if res.success and res.specs:
-                combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-2: brand-collection ({tier2_prod_url})")
+        if tier1_url:
+            logger.info(f"[{product_id}] Executing Tier 1 (Brand Product Page): {tier1_url}")
+            res = fetch_and_parse_url(tier1_url, tier=1)
+            if res.is_blocked:
+                BLOCKED_BRAND_DOMAINS.add(brand_domain)
+                logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned HTTP 403 / Bot Challenge. Marking brand as BLOCKED and escalating to Tier 3 Retail.")
+            elif res.success and res.specs:
+                combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-1: brand-page ({tier1_url})")
                 is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
                 if not is_thin:
                     return combined_res, combined_provenance
-                logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count}/5 empty). Checking Vision Fallback...")
+                logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count}/5 empty: {missing_keys}). Checking Vision Fallback...")
             
-            # VISION FALLBACK Tier 2
+            # VISION FALLBACK Tier 1: Fires if HTML returned 200 but specs are missing / thin
             if res.status_code == 200:
-                vision_res = execute_vision_fallback_for_page(tier2_prod_url, brand, model_name, base_tier=2, config=cfg, existing_images=res.image_urls)
+                vision_res = execute_vision_fallback_for_page(tier1_url, brand, model_name, base_tier=1, config=cfg, existing_images=res.image_urls)
                 if vision_res and vision_res.specs:
-                    combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-2-vision: brand-collection ({tier2_prod_url})")
+                    combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-1-vision: brand-page ({tier1_url})")
                     is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
                     if not is_thin:
                         return combined_res, combined_provenance
-                    logger.warning(f"[{product_id}] Tier 2 Vision yielded partial specs ({missing_count}/5 empty). Escalating to Tier 3...")
+                    logger.warning(f"[{product_id}] Tier 1 Vision yielded partial specs ({missing_count}/5 empty). Escalating to Tier 2...")
                 else:
-                    logger.warning(f"[{product_id}] Tier 2 Vision yielded no specs. Escalating to Tier 3...")
+                    logger.warning(f"[{product_id}] Tier 1 Vision yielded no specs. Escalating to Tier 2...")
+            elif not res.is_blocked:
+                fail_type = "Delisted"
+                logger.warning(f"[{product_id}] Tier 1 failed ({fail_type}): {res.error}. Escalating to Tier 2...")
         else:
-            logger.warning(f"[{product_id}] Tier 2 collection page did not yield matching product. Escalating to Tier 3...")
+            logger.info(f"[{product_id}] Tier 1 product URL not found. Escalating to Tier 2...")
 
-    # ==================== TIER 3: Direct Retail Endpoints (Reliance Digital, Croma) ====================
-    retail_order = brand_cfg.get("retail_order", ["reliance", "croma"])
+        # ==================== TIER 2: Brand Collection Page ====================
+        collection_url = brand_cfg.get("collection_url")
+        if collection_url and brand_domain not in BLOCKED_BRAND_DOMAINS:
+            logger.info(f"[{product_id}] Executing Tier 2 (Brand Collection Page): {collection_url}")
+            tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls)
+            if tier2_prod_url:
+                res = fetch_and_parse_url(tier2_prod_url, tier=2)
+                if res.is_blocked:
+                    BLOCKED_BRAND_DOMAINS.add(brand_domain)
+                    logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned HTTP 403 / Bot Challenge. Marking brand as BLOCKED.")
+                elif res.success and res.specs:
+                    combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-2: brand-collection ({tier2_prod_url})")
+                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                    if not is_thin:
+                        return combined_res, combined_provenance
+                    logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count}/5 empty). Checking Vision Fallback...")
+                
+                # VISION FALLBACK Tier 2
+                if res.status_code == 200:
+                    vision_res = execute_vision_fallback_for_page(tier2_prod_url, brand, model_name, base_tier=2, config=cfg, existing_images=res.image_urls)
+                    if vision_res and vision_res.specs:
+                        combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-2-vision: brand-collection ({tier2_prod_url})")
+                        is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                        if not is_thin:
+                            return combined_res, combined_provenance
+                        logger.warning(f"[{product_id}] Tier 2 Vision yielded partial specs ({missing_count}/5 empty). Escalating to Tier 3...")
+                    else:
+                        logger.warning(f"[{product_id}] Tier 2 Vision yielded no specs. Escalating to Tier 3...")
+            else:
+                logger.warning(f"[{product_id}] Tier 2 collection page did not yield matching product. Escalating to Tier 3...")
+
+    # ==================== TIER 3: Direct Retail Endpoints (Reliance Digital) ====================
+    retail_order = brand_cfg.get("retail_order", ["reliance"])
     for retail_store in retail_order:
         store_lower = retail_store.lower()
         retail_url = None

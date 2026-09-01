@@ -91,6 +91,42 @@ if not is_bp_clean:
 else:
     print(f"❌ FAIL: Boilerplate detector falsely flagged clean bullet '{clean_bullet}'.")
 
+# ----------------------------------------------------------------------
+# Test (d): Four Mandatory Matcher & Qualifier Regression Invariants
+# ----------------------------------------------------------------------
+print("\n--- TEST (d): Four Mandatory Matcher & Qualifier Regression Invariants ---")
+from src.utils.scraper import score_candidate_match
+
+qualifiers = ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"]
+
+# 1. "Giga Max 25000mAh" must be REJECTED for Model_Name "Giga 20000 mAH"
+score1, valid1, reason1 = score_candidate_match("Giga 20000 mAH", "Giga Max 25000mAh", "https://stuffcool.com/products/giga-max", brand="Stuffcool", qualifier_tokens=qualifiers)
+if not valid1:
+    print(f"✅ PASS Case 1: 'Giga Max 25000mAh' correctly REJECTED for 'Giga 20000 mAH'. (Reason: {reason1})")
+else:
+    print(f"❌ FAIL Case 1: 'Giga Max 25000mAh' was falsely ACCEPTED for 'Giga 20000 mAH'.")
+
+# 2. "Roam+ 20000mAh Mini wired Powerbank" must MATCH Model_Name "Roam Plus"
+score2, valid2, reason2 = score_candidate_match("Roam Plus", "Roam+ 20000mAh Mini wired Powerbank", "https://stuffcool.com/products/roam-plus", brand="Stuffcool", qualifier_tokens=qualifiers)
+if valid2 and score2 > 0:
+    print(f"✅ PASS Case 2: 'Roam+ 20000mAh Mini wired Powerbank' correctly MATCHED 'Roam Plus'. (Score: {score2:.1f})")
+else:
+    print(f"❌ FAIL Case 2: 'Roam+ 20000mAh Mini wired Powerbank' failed to match 'Roam Plus'. (Reason: {reason2})")
+
+# 3. "Luxcell Wireless Mini 10K" must be REJECTED for Model_Name "Luxcell Mini"
+score3, valid3, reason3 = score_candidate_match("Luxcell Mini", "Luxcell Wireless Mini 10K", "https://portronics.com/products/luxcell-wireless-mini", brand="Portronics", qualifier_tokens=qualifiers)
+if not valid3:
+    print(f"✅ PASS Case 3: 'Luxcell Wireless Mini 10K' correctly REJECTED for 'Luxcell Mini'. (Reason: {reason3})")
+else:
+    print(f"❌ FAIL Case 3: 'Luxcell Wireless Mini 10K' was falsely ACCEPTED for 'Luxcell Mini'.")
+
+# 4. "Luxcell Wireless Mini 10K" must MATCH Model_Name "Luxcell Wireless Mini"
+score4, valid4, reason4 = score_candidate_match("Luxcell Wireless Mini", "Luxcell Wireless Mini 10K", "https://portronics.com/products/luxcell-wireless-mini", brand="Portronics", qualifier_tokens=qualifiers)
+if valid4 and score4 > 0:
+    print(f"✅ PASS Case 4: 'Luxcell Wireless Mini 10K' correctly MATCHED 'Luxcell Wireless Mini'. (Score: {score4:.1f})")
+else:
+    print(f"❌ FAIL Case 4: 'Luxcell Wireless Mini 10K' failed to match 'Luxcell Wireless Mini'. (Reason: {reason4})")
+
 print("\n" + "=" * 80)
 print("ALL VERIFICATION TESTS COMPLETED")
 print("=" * 80)

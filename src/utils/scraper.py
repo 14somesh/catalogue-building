@@ -82,8 +82,11 @@ def load_brand_defaults(brand: str, config_path: str = "config/brand_defaults.ya
 
 
 def normalize_model_tokens(text: str) -> Set[str]:
-    """Normalizes text by treating '+' as 'plus', splitting alphanumeric boundaries (e.g. 'nova20' -> 'nova', '20'), and extracting alphanumeric tokens."""
-    t = re.sub(r'\+', ' plus ', text)
+    """Normalizes text by removing commas in numbers (e.g. '10,000' -> '10000'), treating '+' as 'plus', equating 'magtag'/'magsafe', splitting alphanumeric boundaries, and extracting alphanumeric tokens."""
+    # Strip commas between digits
+    t = re.sub(r'(\d+),(\d+)', r'\1\2', text)
+    t = re.sub(r'\+', ' plus ', t)
+    t = re.sub(r'mag\s*tag|magtag|mag\s*safe|magsafe', ' magsafe ', t, flags=re.IGNORECASE)
     t = re.sub(r'([a-zA-Z]+)(\d+)', r'\1 \2', t)
     t = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', t)
     words = re.findall(r'[a-zA-Z0-9]+', t.lower())
@@ -92,20 +95,23 @@ def normalize_model_tokens(text: str) -> Set[str]:
 
 def extract_model_name_portion(title: str, brand: str = "") -> str:
     """
-    Extracts the leading model name portion of a candidate title string before capacity,
-    wattage, or descriptive category keywords.
+    Extracts the core model name portion of a candidate title string before capacity,
+    wattage, or descriptive category keywords. Handles multiple leading capacities/wattages cleanly.
     """
     cleaned = title
     if brand:
-        cleaned = re.sub(rf'^{re.escape(brand)}\s+', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(rf'^{re.escape(brand)}(?:one|\s+one|-one)?\s*', '', cleaned, flags=re.IGNORECASE)
     
-    # Split on capacity, wattage, or generic product category keywords (powerbank/charger/with built-in)
-    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|power\s*bank|powerbank|charger|with\s+built|with\s+type|made\s+in)\b'
+    # Strip ALL leading capacities and wattages (e.g. '10000 mAh 15 W ...')
+    cleaned = re.sub(r'^(?:\s*(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b))+\s*', '', cleaned, flags=re.IGNORECASE).strip()
+    
+    # Split on capacity, wattage, or generic category keywords
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
     m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
     if m:
-        model_part = cleaned[:m.start()].strip()
-        if model_part:
-            return model_part
+        leading_part = cleaned[:m.start()].strip()
+        if leading_part:
+            return leading_part
     return cleaned
 
 
@@ -139,8 +145,15 @@ def score_candidate_match(
     cand_slug = candidate_url.split("/")[-1].split("?")[0].replace("-", " ")
     cand_all_tokens = normalize_model_tokens(candidate_title + " " + cand_slug) - stopwords
     
-    # Subset check: every target token must be in candidate tokens
-    if not target_tokens.issubset(cand_all_tokens):
+    # Subset check: every target token (or primary model name tokens without qualifiers) must be in candidate tokens
+    qualifiers_norm = set()
+    for q in (qualifier_tokens or []):
+        qualifiers_norm.update(normalize_model_tokens(q))
+    primary_target_tokens = target_tokens - qualifiers_norm
+    if not primary_target_tokens:
+        primary_target_tokens = target_tokens
+
+    if not target_tokens.issubset(cand_all_tokens) and not primary_target_tokens.issubset(cand_all_tokens):
         return -1.0, False, "Target tokens missing in candidate"
         
     # Qualifier token check
@@ -163,7 +176,7 @@ def score_candidate_match(
     
     # Extra tokens penalty in model portion (Rule 1 & Rule 3)
     # If candidate model-name segment contains extra model tokens not in target, reject as different model
-    extra_model_tokens = cand_model_tokens - target_tokens
+    extra_model_tokens = (cand_model_tokens - target_tokens) - qualifiers_norm
     if extra_model_tokens:
         reason = f"Extra model token mismatch in '{cand_model_part}': candidate has {extra_model_tokens} not in target '{target_model_name}'."
         logger.warning(f"Rejected candidate '{candidate_title}' for '{target_model_name}': {reason}")
@@ -186,6 +199,30 @@ def score_candidate_match(
     return score, True, f"Score: {score:.1f} (exact_model: {exact_model_portion})"
 
 
+def extract_leading_model_segment(title: str, brand: str = "") -> str:
+    """
+    Extracts the leading model name segment of a candidate title before capacity, wattage, or descriptor words.
+    E.g. 'Roam+ 20000mAh Mini wired Powerbank' -> 'Roam+'
+         'Stuffcool Giga Max 65W 20000mAh Powerbank' -> 'Giga Max'
+         '10000 mAh Nano Power Bank' -> 'Nano'
+         '10000 mAh 15 W Arc MagTag Power Bank with stand' -> 'Arc MagTag'
+    """
+    cleaned = title
+    if brand:
+        cleaned = re.sub(rf'^{re.escape(brand)}(?:one|\s+one|-one)?\s*', '', cleaned, flags=re.IGNORECASE)
+    
+    # Strip ALL leading capacities and wattages (e.g. '10000 mAh 15 W ...')
+    cleaned = re.sub(r'^(?:\s*(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b))+\s*', '', cleaned, flags=re.IGNORECASE).strip()
+    
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
+    m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
+    if m:
+        leading_part = cleaned[:m.start()].strip()
+        if leading_part:
+            return leading_part
+    return cleaned
+
+
 def reject_qualifier_mismatch(
     target_model_name: str,
     candidate_title: str,
@@ -195,15 +232,15 @@ def reject_qualifier_mismatch(
     """
     QUALIFIER TOKEN CHECK:
     When matching a candidate page to a row, only compares qualifier tokens in the
-    MODEL NAME PORTION of the candidate title (the leading segment before capacity,
-    wattage, or descriptor words). Also treats '+' and 'Plus' as equivalent tokens.
+    LEADING MODEL NAME SEGMENT of the candidate title (before capacity, wattage,
+    or descriptor words). Also treats '+' and 'Plus' as equivalent tokens.
     Returns (is_valid, rejection_reason).
     """
     tokens = qualifier_tokens or DEFAULT_QUALIFIER_TOKENS
     target_words = normalize_model_tokens(target_model_name)
     
-    # Extract only the model name portion of candidate title
-    model_portion = extract_model_name_portion(candidate_title, brand=brand)
+    # Extract only the leading model segment of candidate title
+    model_portion = extract_leading_model_segment(candidate_title, brand=brand)
     candidate_model_words = normalize_model_tokens(model_portion)
 
     for token in tokens:
@@ -214,6 +251,16 @@ def reject_qualifier_mismatch(
             return False, reason
 
     return True, None
+
+
+def clean_html_text(html: str) -> str:
+    """Strips noisy tags and returns clean text from HTML."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "svg"]):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=True)
 
 
 def is_boilerplate_bullet(text: str) -> Tuple[bool, Optional[str]]:

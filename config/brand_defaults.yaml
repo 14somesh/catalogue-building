@@ -6,7 +6,6 @@ brands:
     default_warranty: "6 Months (Extendable to 1 Year)"
     retail_order:
       - "reliance"
-      - "croma"
     qualifier_tokens:
       - "Max"
       - "Ultra"
@@ -27,7 +26,6 @@ brands:
     default_warranty: "6 Months"
     retail_order:
       - "reliance"
-      - "croma"
     qualifier_tokens:
       - "Max"
       - "Ultra"
@@ -48,7 +46,6 @@ brands:
     default_warranty: "1 Year"
     retail_order:
       - "reliance"
-      - "croma"
     qualifier_tokens:
       - "Max"
       - "Ultra"
@@ -63,11 +60,34 @@ brands:
       - "amazon"
       - "collection_thumb"
 
+  Urbn:
+    domain: "urbnworld.com"
+    collection_url: "https://urbnworld.com/collections/power-banks"
+    default_warranty: "1 Year"
+    retail_order:
+      - "reliance"
+    qualifier_tokens:
+      - "MagSafe"
+      - "MagTag"
+      - "Mag"
+      - "Qi2"
+      - "Tag"
+      - "Mini"
+      - "Ultra"
+      - "Volt"
+      - "Pro"
+      - "Plus"
+      - "Max"
+    image_tier_order:
+      - "brand_product"
+      - "retail"
+      - "amazon"
+      - "collection_thumb"
+
   # Standard template for future brands
   _default:
     retail_order:
       - "reliance"
-      - "croma"
     qualifier_tokens:
       - "Max"
       - "Ultra"

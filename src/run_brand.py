@@ -313,6 +313,19 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
         logger.error(f"No products found for brand '{brand_name}' in {excel_path}")
         raise ValueError(f"Brand '{brand_name}' not found in catalogue data.")
 
+    # ==================== PRE-FLIGHT DUPLICATE DETECTION ====================
+    brand_df = df[brand_mask]
+    dup_mask = brand_df.duplicated(subset=["Model_Name", "MRP_Input"], keep=False)
+    if dup_mask.any():
+        dup_rows = brand_df[dup_mask]
+        dup_groups = dup_rows.groupby(["Model_Name", "MRP_Input"])
+        for (m_name, dp_val), grp in dup_groups:
+            pids = grp["Product_ID"].tolist()
+            logger.warning(
+                f"[Pre-flight Duplicate Alert] Duplicate SKUs detected for Brand '{brand_name}': "
+                f"Model '{m_name}' with DP ₹{dp_val} appears in multiple rows: {pids}."
+            )
+
     # ==================== PRE-FLIGHT MULTI-PROVIDER QUOTA CHECK ====================
     brand_indices = df[brand_mask].index
     pending_count = sum(

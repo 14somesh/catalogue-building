@@ -167,12 +167,21 @@ PRICE SHEET CONTENT:
 
 
 def generate_onboarding_summary(inference: BrandInferenceSchema) -> str:
-    """Generates the formatted inference summary markdown table."""
+    """Generates the formatted inference summary markdown table with platform & bot-block probe."""
+    from src.parsers.generic import detect_ecommerce_platform
+    platform_detected, platform_detail = detect_ecommerce_platform(inference.domain)
+
     lines = []
     lines.append(f"### 📋 Onboarding Inference Summary for Brand '{inference.brand_name}'")
     lines.append(f"- **Brand Inferred:** `{inference.brand_name}` (Brand Code: `{inference.brand_code}`)")
     lines.append(f"- **Price Mapping:** {inference.dp_column_explanation}")
-    lines.append(f"- **Official Domain & Platform:** `{inference.domain}` (Platform: `{inference.platform}`)")
+    lines.append(f"- **Official Domain & Platform:** `{inference.domain}` (Inferred: `{inference.platform}`, Live Probe: `{platform_detected}` — {platform_detail})")
+    
+    if platform_detected == "custom":
+        lines.append(f"- **Platform Status:** ⚠️ E-commerce platform is non-standard / custom. Generic JSON-LD + Sitemap scraper will be active.")
+    if "403" in platform_detail or "error" in platform_detail.lower():
+        lines.append(f"- **Bot Challenge Status:** 🚨 Brand domain is protected or blocking requests ({platform_detail}). Brand will fall straight through to Retail Tier 3.")
+
     lines.append(f"- **Selected Qualifier Tokens & Justification:**")
     for q in inference.qualifier_tokens:
         token_name = q.get("token") or list(q.keys())[0]
