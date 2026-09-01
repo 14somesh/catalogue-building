@@ -1,5 +1,10 @@
-{% if cover_image_url %}
 <section class="page page--cover">
-  <img class="cover__img" src="{{ cover_image_url }}" alt="Catalogue Cover">
+  <div class="cover-content">
+    {% if logo_mark_url %}
+      <img class="cover__logo" src="{{ logo_mark_url }}" alt="Vianet Logo">
+    {% endif %}
+    <h1 class="cover__title">VIANET</h1>
+    <p class="cover__tagline">Corporate gifting</p>
+    <p class="cover__category">{{ (category | default("Powerbank")) | title }} Catalog</p>
+  </div>
 </section>
-{% endif %}

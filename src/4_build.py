@@ -278,7 +278,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
     os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
 
     # 2. Resolve logo
-    logo_path = "images/vianet-logo.png"
+    logo_path = "assets/vianet-logo.png" if os.path.exists("assets/vianet-logo.png") else "images/vianet-logo.png"
     logo_mark_url = image_to_base64(logo_path)
 
     category_cfg = config.get("category", {})
@@ -289,7 +289,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
     brand_groups = []
     
     for brand_name in ordered_brands:
-        brand_df = df[df["Brand"] == brand_name]
+        brand_df = df[df["Brand"] == brand_name].sort_values(by="Product_ID", ascending=True)
         if brand_df.empty:
             continue
             
