@@ -197,10 +197,11 @@ def process_row_loop(
         images_dir = config.get("paths", {}).get("images_dir", "images")
         img_path = resolve_product_image_path(current_row, images_dir=images_dir)
         img_url = current_row.get("Image_URL")
+        prod_url = current_row.get("Source_URL") or current_row.get("Product_URL")
         mp_url = current_row.get("Marketplace_URL")
         img_status, img_source, img_tier = execute_image_tier_escalation(
             pid, current_row.get("Brand", ""), current_row.get("Model_Name", ""),
-            img_url, mp_url, img_path
+            img_url, mp_url, img_path, product_page_url=prod_url
         )
         current_row["Image_Status"] = img_status
         if img_source:

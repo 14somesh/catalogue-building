@@ -3,9 +3,10 @@ import re
 import sys
 import yaml
 import requests
+import io
 import urllib.parse
 from PIL import Image
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Tuple, Optional, Dict, Any, List, Set
 import pandas as pd
 from playwright.sync_api import sync_playwright
 
@@ -21,6 +22,7 @@ from src.utils.excel_handler import (
 )
 from src.utils.scraper import load_brand_defaults, reject_qualifier_mismatch
 from src.parsers.amazon import AmazonParser
+from src.utils.llm_client import audit_collected_image_quality
 from src.utils.logger import setup_logger
 
 logger = setup_logger("images")
@@ -37,6 +39,25 @@ def load_config(config_path: str = "config.yaml") -> dict:
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def normalize_and_pad_image_square(
+    img: Image.Image,
+    bg_color: Tuple[int, int, int] = (255, 255, 255),
+    min_size: int = 1200
+) -> Image.Image:
+    """
+    Normalizes any image to a 1:1 square canvas on pure white (or specified background).
+    Prevents PDF tile crop distortions and eliminates non-square aspect ratio warnings.
+    """
+    im = img.convert("RGBA")
+    w, h = im.size
+    max_dim = max(w, h, min_size)
+
+    canvas = Image.new("RGBA", (max_dim, max_dim), bg_color + (255,))
+    offset = ((max_dim - w) // 2, (max_dim - h) // 2)
+    canvas.paste(im, offset, mask=im if im.mode == "RGBA" else None)
+    return canvas.convert("RGB")
 
 
 def validate_image_file(file_path: str, min_width: int = 800, min_height: int = 800) -> Tuple[str, Optional[Tuple[int, int]], bool]:
@@ -74,34 +95,66 @@ def upgrade_cdn_url_resolution(url: str) -> str:
     return url
 
 
-def download_image(url: str, dest_path: str, timeout: int = 15) -> bool:
+def download_and_verify_image_candidate(
+    url: str,
+    brand: str,
+    model_name: str,
+    dest_path: str,
+    timeout: int = 15,
+    audit_visual_quality: bool = True
+) -> Tuple[bool, int, Optional[str]]:
     """
-    Downloads an image from a web URL at maximum available resolution.
-    Converts and saves as a clean PNG at dest_path without upscaling.
+    Downloads candidate image URL, auto-pads to 1:1 square on pure white,
+    and runs the Visual AI Image Review Gate.
+    Returns (is_approved: bool, quality_score: int, rejection_reason: Optional[str]).
     """
     try:
-        import io
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         }
-        
         max_res_url = upgrade_cdn_url_resolution(url)
-        response = requests.get(max_res_url, headers=headers, timeout=timeout)
-        if response.status_code == 200:
-            image = Image.open(io.BytesIO(response.content))
-            if image.mode in ("P", "CMYK", "LA"):
-                image = image.convert("RGBA" if "A" in image.mode else "RGB")
-            
-            image.save(dest_path, format="PNG")
-            logger.info(f"Successfully saved image to {dest_path} ({image.width}x{image.height}px, format=PNG)")
-            return True
+        resp = requests.get(max_res_url, headers=headers, timeout=timeout)
+        if resp.status_code != 200 or not resp.content:
+            return False, 0, f"HTTP {resp.status_code}"
+
+        pil_img = Image.open(io.BytesIO(resp.content))
+        if pil_img.width < 400 or pil_img.height < 400:
+            return False, 0, f"Too low resolution: {pil_img.width}x{pil_img.height}px"
+
+        # Auto-pad to 1:1 square pure white canvas
+        sq_img = normalize_and_pad_image_square(pil_img, bg_color=(255, 255, 255), min_size=1200)
+
+        # Convert to PNG bytes for AI visual audit
+        buf = io.BytesIO()
+        sq_img.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+
+        if audit_visual_quality:
+            is_valid, score, reason = audit_collected_image_quality(png_bytes, brand, model_name, mime_type="image/png")
+            if not is_valid:
+                return False, score, reason
         else:
-            logger.warning(f"Failed to download image from {max_res_url}: HTTP {response.status_code}")
-            return False
+            score = 8
+
+        # Save approved image to disk
+        sq_img.save(dest_path, format="PNG", optimize=True)
+        logger.info(f"✅ Approved and saved image to {dest_path} ({sq_img.width}x{sq_img.height}px, score={score}/10)")
+        return True, score, None
+
     except Exception as e:
-        logger.error(f"Error downloading image from {url}: {e}")
-        return False
+        logger.warning(f"Error downloading/verifying candidate image from {url}: {e}")
+        return False, 0, str(e)
+
+
+def download_image(url: str, dest_path: str, timeout: int = 15) -> bool:
+    """
+    Downloads an image from a web URL, squares it to 1:1, and saves to dest_path.
+    """
+    approved, _, _ = download_and_verify_image_candidate(
+        url, brand="", model_name="", dest_path=dest_path, timeout=timeout, audit_visual_quality=False
+    )
+    return approved
 
 
 def resolve_product_image_path(row: dict, images_dir: str = "images") -> str:
@@ -117,6 +170,46 @@ def resolve_product_image_path(row: dict, images_dir: str = "images") -> str:
     if brand_slug and brand_slug in clean_dir.lower():
         return f"{clean_dir}/{model_slug}.png"
     return f"{clean_dir}/{brand_slug}/{model_slug}.png"
+
+
+def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:
+    """
+    Extracts all candidate image URLs from a Shopify or brand product page.
+    Prioritizes isolated packshot naming conventions (e.g. Dome01, white, 01).
+    """
+    candidates: List[str] = []
+    if not product_page_url or not product_page_url.startswith("http"):
+        return candidates
+
+    clean_url = product_page_url.split("?")[0].rstrip("/")
+    # Check Shopify product JSON endpoint
+    if "/products/" in clean_url:
+        json_url = f"{clean_url}.json"
+        try:
+            r = requests.get(json_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code == 200:
+                p_data = r.json().get("product", {})
+                imgs = p_data.get("images", [])
+                for img_obj in imgs:
+                    src = img_obj.get("src")
+                    if src and src not in candidates:
+                        candidates.append(src)
+        except Exception as e:
+            logger.debug(f"Failed fetching Shopify JSON gallery from {json_url}: {e}")
+
+    # Rank candidates: prioritize 3D packshots / dome / isolated renders
+    def _candidate_rank(u: str) -> int:
+        u_lower = u.lower()
+        if "dome" in u_lower or "hero" in u_lower or "packshot" in u_lower:
+            return 0
+        if "-01" in u_lower or "_01" in u_lower or "white" in u_lower:
+            return 1
+        if "banner" in u_lower or "infographic" in u_lower or "lifestyle" in u_lower:
+            return 9
+        return 5
+
+    candidates.sort(key=_candidate_rank)
+    return candidates
 
 
 def search_amazon_for_image(product_id: str, brand: str, model_name: str, marketplace_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
@@ -186,12 +279,15 @@ def execute_image_tier_escalation(
     model_name: str,
     image_url: Optional[str],
     marketplace_url: Optional[str],
-    dest_path: str
+    dest_path: str,
+    product_page_url: Optional[str] = None
 ) -> Tuple[str, Optional[str], Optional[int]]:
     """
-    Executes the 4-tier image resolution chain:
-    Tier 1: Brand Product Page -> Tier 2: Retail -> Tier 3: Amazon -> Tier 4: Collection Thumbnail.
-    Never overwrites a manually placed local file.
+    Executes the autonomous Image Tier Chain with integrated Visual AI Review Gate:
+    1. Preserves existing verified local file if already present.
+    2. Tier 1: Evaluates candidate image URLs from Brand Product Page & Gallery.
+    3. Tier 3: Searches Amazon India / Marketplace for high-res master packshot.
+    4. Auto-pads every saved asset to a 1:1 square canvas.
     Returns (status, image_source, image_tier).
     """
     # Check if local image already exists (Manual / Pre-existing asset)
@@ -200,30 +296,48 @@ def execute_image_tier_escalation(
         logger.info(f"[{product_id}] Preserving existing local image at {dest_path} ({dims[0]}x{dims[1]}px) -> Status: {status}")
         return status, "local-verified", 1
 
-    # Tier 1: Brand Product Page URL
+    # Tier 1: Brand Product Page & Gallery Candidates
+    candidate_urls: List[str] = []
     if image_url and isinstance(image_url, str) and (image_url.startswith("http://") or image_url.startswith("https://")):
-        logger.info(f"[{product_id}] [Tier 1 Image] Downloading from brand URL: {image_url}")
-        if download_image(image_url, dest_path):
-            status, _, _ = validate_image_file(dest_path)
-            if status == "ok":
+        candidate_urls.append(image_url)
+
+    if product_page_url:
+        gallery_urls = fetch_brand_gallery_candidate_urls(product_page_url)
+        for gu in gallery_urls:
+            if gu not in candidate_urls:
+                candidate_urls.append(gu)
+
+    if candidate_urls:
+        logger.info(f"[{product_id}] [Tier 1 Image] Evaluating {len(candidate_urls)} candidate image(s) from brand...")
+        for c_idx, c_url in enumerate(candidate_urls[:6]):
+            logger.info(f"[{product_id}] [Tier 1 Image] Testing candidate {c_idx+1}/{len(candidate_urls)}: {c_url}")
+            approved, score, rejection = download_and_verify_image_candidate(
+                c_url, brand=brand, model_name=model_name, dest_path=dest_path, audit_visual_quality=True
+            )
+            if approved:
                 return "ok", "brand-product-page", 1
+            else:
+                logger.warning(f"[{product_id}] [Tier 1 Image] Candidate {c_idx+1} rejected by AI Review Gate: {rejection}")
 
     # Tier 3: Amazon India Fallback (Images Only)
     logger.info(f"[{product_id}] [Tier 3 Image] Searching Amazon fallback for {brand} {model_name}...")
     amz_url, amz_src = search_amazon_for_image(product_id, brand, model_name, marketplace_url)
     if amz_url:
-        logger.info(f"[{product_id}] Found Amazon image: {amz_url} ({amz_src})")
-        if download_image(amz_url, dest_path):
-            status, _, _ = validate_image_file(dest_path)
-            if status == "ok":
-                return "ok", amz_src, 3
+        logger.info(f"[{product_id}] Found Amazon candidate image: {amz_url} ({amz_src})")
+        approved, score, rejection = download_and_verify_image_candidate(
+            amz_url, brand=brand, model_name=model_name, dest_path=dest_path, audit_visual_quality=True
+        )
+        if approved:
+            return "ok", amz_src, 3
+        else:
+            logger.warning(f"[{product_id}] [Tier 3 Image] Amazon image rejected by AI Review Gate: {rejection}")
 
     return "missing", None, None
 
 
 def process_images(config_path: str = "config.yaml", target_pids: Optional[list] = None) -> pd.DataFrame:
     """
-    Main image processing pipeline enforcing the Image Tier Chain and quality gates.
+    Main image processing pipeline enforcing the Image Tier Chain and Visual AI Review Gate.
     """
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
@@ -242,12 +356,13 @@ def process_images(config_path: str = "config.yaml", target_pids: Optional[list]
 
         image_path = resolve_product_image_path(row_dict)
         image_url = str(row_dict.get("Image_URL", "")).strip() if not is_empty_value(row_dict.get("Image_URL")) else None
+        prod_url = str(row_dict.get("Product_URL", "")).strip() if not is_empty_value(row_dict.get("Product_URL")) else None
         brand = str(row_dict.get("Brand", "")).strip()
         model_name = str(row_dict.get("Model_Name", "")).strip()
         marketplace_url = str(row_dict.get("Marketplace_URL", "")).strip() if not is_empty_value(row_dict.get("Marketplace_URL")) else None
 
         status, img_source, img_tier = execute_image_tier_escalation(
-            product_id, brand, model_name, image_url, marketplace_url, image_path
+            product_id, brand, model_name, image_url, marketplace_url, image_path, product_page_url=prod_url
         )
 
         df.at[idx, "Image_Status"] = status

@@ -116,6 +116,7 @@ The agent prompts once:
 > *"Do you have a brand brochure PDF for **{Brand}**?"*
 - **If Yes:** Execution pauses until you place the PDF into `brochures/{brand_slug}/`.
 - **If No / None:** The pipeline advances immediately; **Tier 0** skips silently and starts at Tier 1.
+- **Brochure Exclusivity Policy:** Brochure PDFs are strictly used for technical specifications and info text extraction (Tier 0), **never** for product images. All images are sourced from official online brand storefronts (Tier 1) and marketplace master listings (Tier 3).
 
 ---
 
@@ -138,9 +139,12 @@ The engine appends the prepared rows to `data/catalogue_data.xlsx` and launches 
 ```bash
 python src/run_brand.py --brand {Brand}
 ```
+
 **Execution Chain:**
-1. **`1_collect.py`:** Tier 0 Brochure $\rightarrow$ Tier 1 Brand Page (HTML/JSON + Vision) $\rightarrow$ Tier 2 Collection $\rightarrow$ Tier 3 Retail Endpoints $\rightarrow$ Tier 4 Auto-Skip.
-2. **`2_images.py`:** Resolves high-resolution square assets (1200×1200px+), runs aspect ratio and background consistency gates.
+1. **`1_collect.py`:** Tier 0 Brochure (Specs Only) $\rightarrow$ Tier 1 Brand Page (HTML/JSON + Vision) $\rightarrow$ Tier 2 Collection $\rightarrow$ Tier 3 Retail Endpoints $\rightarrow$ Tier 4 Auto-Skip.
+2. **`2_images.py`:** Resolves high-resolution square assets (1200×1200px+). Immediately executes:
+   - **Auto-Square Normalization:** Pads images to a 1:1 square canvas on pure white (`#ffffff`).
+   - **Visual AI Image Review Gate:** Audits candidate images via Gemini Vision for correct brand matching, standalone studio packshot quality, and zero promotional banners/hand-held shots before saving. Automatically evaluates multi-candidate gallery photos to pick the cleanest studio packshot on the first run.
 3. **`3_review.py`:** Self-correction loop, deterministic validation, partial specs verification ($\ge 3$ of 5 specs), and comprehensive run report generation.
 
 ---

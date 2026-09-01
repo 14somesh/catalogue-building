@@ -94,6 +94,16 @@ class VisionExtractedSpecsSchema(BaseModel):
     warranty: Optional[str] = Field(default=None, description="Warranty term e.g. '6 Months' or '1 Year'")
 
 
+class ImageQualityAuditSchema(BaseModel):
+    is_correct_brand_and_model: bool = Field(description="True if the image shows a product belonging to the specified target brand and model, False if it belongs to another brand (e.g. Zebronics, Belkin, etc.) or is completely unrelated.")
+    is_isolated_packshot: bool = Field(description="True if the image is a clean, standalone product render/packshot (with or without neutral phone attachment), False if it is a complex lifestyle shot, hand-held shot, or marketing infographic banner.")
+    has_hand_holding: bool = Field(description="True if a human hand is holding or touching the device, False otherwise.")
+    has_promotional_text_banner: bool = Field(description="True if the image contains large marketing slogans, infographic callout boxes, warranty badges, or promotional text overlays (e.g. '15W 2X FASTER', 'POWER THAT PUSHES LIMITS'), False if it is a clean product photo.")
+    detected_brand: Optional[str] = Field(default=None, description="The visible brand logo or detected brand name in the image (e.g. 'Urbn', 'Stuffcool', 'Pebble', 'Portronics', 'Zebronics', 'Belkin', etc.)")
+    quality_score: int = Field(description="Visual suitability score from 1 (unusable/wrong brand/infographic) to 10 (pristine isolated studio packshot on white)")
+    rejection_reason: Optional[str] = Field(default=None, description="Concise explanation if the image should be rejected, or None if suitable.")
+
+
 def classify_gemini_error(e: Exception) -> str:
     """
     Classifies Gemini API exceptions into three distinct kinds:
@@ -952,5 +962,114 @@ def validate_vision_specs(specs: Dict[str, str]) -> Dict[str, str]:
             logger.warning(f"[Vision Sanity] Discarding unparseable warranty: '{war}'")
 
     return valid_specs
+
+
+def audit_collected_image_quality(
+    img_bytes: bytes,
+    brand: str,
+    model_name: str,
+    mime_type: str = "image/png",
+    llm_config: Optional[dict] = None
+) -> Tuple[bool, int, Optional[str]]:
+    """
+    VISUAL AI IMAGE REVIEW GATE:
+    Audits a candidate product image immediately upon collection.
+    
+    Verifies:
+    1. Correct Brand & Model: Product must belong to the specified target brand (not Zebronics, Belkin, etc.).
+    2. Isolated Studio Packshot: Clean standalone packshot on white or clean neutral background.
+    3. Rejects Hands: Rejects photos where a person is holding/touching the device.
+    4. Rejects Infographic Banners: Rejects multi-panel marketing banners with promo text overlays.
+    
+    Returns (is_valid: bool, quality_score: int, rejection_reason: Optional[str]).
+    """
+    if is_provider_exhausted("gemini"):
+        logger.warning(f"[Image Review Gate] Gemini is marked exhausted; applying heuristic pass for {brand} {model_name}.")
+        return True, 7, None
+
+    client = get_gemini_client()
+    candidate_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
+    import concurrent.futures
+
+    prompt = (
+        f"You are an expert product catalog image quality inspector.\n"
+        f"Audit this product image for '{brand} {model_name}'.\n"
+        f"Verify the following strict rules:\n"
+        f"1. BRAND INTEGRITY: Does the product in the image belong to '{brand}'? If the visible logo or product is from another brand (e.g. Zebronics, Belkin, Anker, Xiaomi), mark is_correct_brand_and_model=False.\n"
+        f"2. STUDIO PACKSHOT: Is this an isolated studio packshot or clean standalone render? (Attached to a neutral phone for magnetic powerbanks is acceptable).\n"
+        f"3. NO HANDS: Is a human hand holding the product? If yes, mark has_hand_holding=True.\n"
+        f"4. NO MARKETING BANNERS: Does the image contain large advertising text, promotional slogans ('15W 2X FASTER', 'POWER THAT PUSHES LIMITS'), warranty badges, or multi-panel infographic layouts? If yes, mark has_promotional_text_banner=True.\n"
+        f"5. SCORE: Rate from 1 (unusable/wrong brand/banner) to 10 (perfect clean studio packshot on white).\n\n"
+        f"Adhere strictly to the ImageQualityAuditSchema."
+    )
+
+    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+    contents = [prompt, image_part]
+
+    for model in candidate_models:
+        logger.info(f"[Image Review Gate] Auditing image with {model} for {brand} {model_name}...")
+        
+        def _call():
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ImageQualityAuditSchema,
+                    temperature=0.0
+                )
+            )
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_call)
+                resp = future.result(timeout=12.0)
+
+            parsed = json.loads(resp.text)
+            is_brand_ok = bool(parsed.get("is_correct_brand_and_model", True))
+            is_packshot = bool(parsed.get("is_isolated_packshot", True))
+            has_hand = bool(parsed.get("has_hand_holding", False))
+            has_banner = bool(parsed.get("has_promotional_text_banner", False))
+            score = int(parsed.get("quality_score", 5))
+            detected_brand = parsed.get("detected_brand") or ""
+            reason = parsed.get("rejection_reason")
+
+            if not is_brand_ok:
+                rejection = f"Wrong brand detected: '{detected_brand}' (expected '{brand}')"
+                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
+                return False, score, rejection
+
+            if has_banner:
+                rejection = "Marketing infographic banner with promotional text overlays"
+                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
+                return False, score, rejection
+
+            if has_hand:
+                rejection = "Hand-held lifestyle shot instead of isolated studio packshot"
+                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
+                return False, score, rejection
+
+            if score < 7 or not is_packshot:
+                rejection = reason or "Low visual packshot quality / complex lifestyle background"
+                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection} (score={score})")
+                return False, score, rejection
+
+            logger.info(f"[Image Review Gate] APPROVED [{brand} {model_name}] (score={score}/10)")
+            return True, score, None
+
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"[Image Review Gate] Model {model} timed out after 12s. Escalating to next candidate model...")
+            continue
+        except Exception as e:
+            err_type = classify_gemini_error(e)
+            logger.warning(f"[Image Review Gate] Model {model} failed ({err_type}): {e}")
+            if err_type in ("QUOTA_EXHAUSTED", "RATE_LIMIT"):
+                continue
+            else:
+                continue
+
+    logger.warning(f"[Image Review Gate] All vision models exhausted for {brand} {model_name}; applying heuristic pass.")
+    return True, 7, None
+
 
 

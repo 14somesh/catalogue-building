@@ -162,6 +162,7 @@ def parse_brochure_for_model(
     3. If text layer is thin / image-based, falls back to Vision Extraction on the rendered PDF page.
     4. Handles multi-product pages by isolating the target model region.
     5. Returns ParserResult with Tier 0 / Tier 0-vision provenance, or None if no brochure exists.
+    POLICY: Brochure PDFs are strictly used for technical specifications and info text extraction only, NEVER for product packshot images.
     """
     pdf_paths = find_brochure_pdfs(brand, brochure_override=brochure_override)
     if not pdf_paths:

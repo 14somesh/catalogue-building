@@ -126,18 +126,18 @@ The collector escalates autonomously through defined tiers before giving up. **T
 ---
 
 ### B. Image Source Tiers (Independent Chain)
-Images are binary assets—they do not require cross-corroboration, but they must satisfy strict visual quality gates before acceptance:
+Images are binary assets sourced exclusively from online brand storefronts and verified marketplaces. **Brochure PDFs (Tier 0 & Tier 4) are strictly for text/spec extraction and are NEVER used as image sources.**
 
 ```
 +-----------------------------------------------------------------------------------+
-| Tier 1: Official Brand Product Page (High-Res Master Asset, 1200×1200px+)         |
+| Tier 1: Official Brand Product Page & Gallery (High-Res Master Asset, 1200×1200px+)|
 +-----------------------------------------------------------------------------------+
-                                         | (If Missing / Low-Res)
+                                         | (If Missing / Rejected by Visual Gate)
                                          v
 +-----------------------------------------------------------------------------------+
 | Tier 2: Major Retail Product Listings (Reliance Digital, Croma, Flipkart, Tata)   |
 +-----------------------------------------------------------------------------------+
-                                         | (If Retail Missing)
+                                         | (If Retail Missing / Rejected)
                                          v
 +-----------------------------------------------------------------------------------+
 | Tier 3: Amazon India Product Listings (High-Res Media CDN via Playwright)         |
@@ -145,15 +145,21 @@ Images are binary assets—they do not require cross-corroboration, but they mus
                                          | (If Direct Listing Missing)
                                          v
 +-----------------------------------------------------------------------------------+
-| Tier 4: Official Brand Collection Page Thumbnail / Catalog Master Asset           |
+| Tier 4: Official Brand Collection Page Thumbnail / Master Asset                   |
 +-----------------------------------------------------------------------------------+
 ```
 
-#### Image Quality Gates:
-1. **Resolution Gate:** Minimum $800 \times 800\text{ px}$ (Target $1200 \times 1200\text{ px}+$ master resolution).
-2. **Aspect Ratio Gate:** Strictly 1:1 square ($\le 1\%$ variance).
-3. **Unique Hash Gate:** Perceptual/MD5 image hash check across the brand to prevent duplicate images assigned to different sibling SKUs.
-4. **Background Consistency Gate:** Corner pixel sampling across brand images to identify background tone divergence.
+#### Image Quality Gates & Autonomous Review:
+1. **Visual AI Image Review Gate:** Immediately evaluates every downloaded candidate via Gemini Vision:
+   - **Brand Integrity Check:** Confirms the product belongs to the specified brand (rejects cross-brand scraping mistakes like Zebronics/Belkin).
+   - **Isolated Studio Packshot:** Requires a clean standalone render or packshot (rejects complex lifestyle scenes).
+   - **No Hands Policy:** Rejects photos where human hands are holding or touching the device.
+   - **No Marketing Banners:** Rejects multi-panel infographic banners with promotional text overlays ("15W 2X FASTER", "POWER THAT PUSHES LIMITS").
+   - **Multi-Candidate Evaluation:** Iterates through all available gallery photos (`Dome01`, `01`, `02`, etc.) to pick the highest-scoring studio packshot on the first run.
+2. **Auto-Square Normalization Gate:** Automatically centers every image on a pure white (`#ffffff`) 1:1 square canvas (min $1200 \times 1200\text{ px}$), eliminating PDF tile crop distortion and aspect ratio warnings.
+3. **Resolution Gate:** Minimum $800 \times 800\text{ px}$ (Target $1200 \times 1200\text{ px}+$ master resolution).
+4. **Unique Hash Gate:** Perceptual/MD5 image hash check across the brand to prevent duplicate images assigned to different sibling SKUs.
+5. **Background Consistency Gate:** Corner pixel sampling across brand images to identify background tone divergence.
 
 ---
 
