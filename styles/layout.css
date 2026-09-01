@@ -64,18 +64,24 @@ html, body {
   display: block;
 }
 
-/* Brand Divider Page (Full A4, Vertically Centered, Left-Aligned to Card Margin, Massive Title) */
+/* Brand Divider Page (Full A4, Centered Horizontally & Vertically, Massive Title) */
 .page--brand {
-  padding: var(--page-pad-y) var(--page-pad-x) !important;
+  padding: 0 !important;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  align-items: flex-start;
+  align-items: center;
+  text-align: center;
   background-color: #1B3A47 !important;
   background: #1B3A47 !important;
 }
 .brand-divider {
   width: 100%;
+  padding: 0 var(--page-pad-x);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
   overflow: hidden;
 }
 .brand-divider__title {
@@ -89,6 +95,7 @@ html, body {
   white-space: nowrap;
   margin: 0;
   padding: 0;
+  text-align: center;
 }
 
 /* ---- Header ---- */

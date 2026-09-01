@@ -65,9 +65,11 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def resolve_output_pdf_path(config: dict) -> str:
+def resolve_output_pdf_path(config: dict, brand: Optional[str] = None) -> str:
     """
     Resolves the output PDF file path using category name and current timestamp.
+    Writes to dist/{brand_slug}/ when brand is provided.
+    Writes to dist/combined/ when building multiple brands (combined build).
     Configurable via paths.output_filename_pattern in config.yaml.
     """
     paths_cfg = config.get("paths", {})
@@ -79,7 +81,10 @@ def resolve_output_pdf_path(config: dict) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     
     filename = pattern.format(category=category_slug, timestamp=timestamp)
-    return os.path.join(output_dir, filename)
+    if brand:
+        brand_slug = slugify(brand)
+        return os.path.join(output_dir, brand_slug, filename)
+    return os.path.join(output_dir, "combined", filename)
 
 
 def format_name_html(model_name: str) -> str:
@@ -231,7 +236,7 @@ def validate_product_data(prod: dict, raw_row: dict) -> None:
     validate_image_aspect_ratio(raw_img_path, pid)
 
 
-def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
+def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] = None) -> str:
     """
     Main PDF builder: reads Excel, validates data against Section A rules,
     arranges 2-products-per-page with 1-up odd remainder, renders Jinja2 templates,
@@ -239,13 +244,21 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
     """
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
-    output_pdf = resolve_output_pdf_path(config)
-    
-    os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
     check_file_lock(excel_path)
     
     logger.info(f"Reading master dataset from {excel_path}...")
     df = load_catalogue_data(excel_path)
+
+    # Filter to brand if specified, and filter to approved/ready rows
+    if brand:
+        df = df[df["Brand"].astype(str).str.lower() == brand.lower()]
+        if df.empty:
+            raise ValueError(f"No products found for brand '{brand}' in {excel_path}")
+    
+    # Build only ready/approved rows (exclude Skipped, Blocked, Pending, Deferred)
+    df = df[df["Status"].isin(["Ready_For_Review", "Approved"])]
+    if df.empty:
+        raise ValueError(f"No approved or ready products to build in {excel_path}")
     
     # 1. Determine brand sequence
     config_brand_order = config.get("brand_order") or []
@@ -259,6 +272,10 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         ordered_brands = sheet_brands
 
     logger.info(f"Brand ordering sequence: {ordered_brands}")
+
+    brand_for_output = ordered_brands[0] if len(ordered_brands) == 1 else (brand or None)
+    output_pdf = resolve_output_pdf_path(config, brand=brand_for_output)
+    os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
 
     # 2. Resolve logo
     logo_path = "images/vianet-logo.png"
@@ -391,7 +408,7 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
         cover_image_url=cover_image_url
     )
 
-    preview_html_path = os.path.abspath("dist/catalogue_preview.html")
+    preview_html_path = os.path.join(os.path.dirname(output_pdf), "catalogue_preview.html")
     with open(preview_html_path, "w", encoding="utf-8") as f:
         f.write(rendered_html)
     logger.info(f"Saved HTML preview to {preview_html_path}")
@@ -488,4 +505,9 @@ def build_catalogue_pdf(config_path: str = "config.yaml") -> str:
 
 
 if __name__ == "__main__":
-    build_catalogue_pdf()
+    import argparse
+    parser = argparse.ArgumentParser(description="Compile print-ready A4 PDF catalogue")
+    parser.add_argument("--brand", "-b", type=str, default=None, help="Brand name to build PDF for")
+    parser.add_argument("--config", "-c", type=str, default="config.yaml", help="Path to config.yaml")
+    args = parser.parse_args()
+    build_catalogue_pdf(config_path=args.config, brand=args.brand)

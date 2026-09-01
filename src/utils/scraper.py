@@ -82,8 +82,10 @@ def load_brand_defaults(brand: str, config_path: str = "config/brand_defaults.ya
 
 
 def normalize_model_tokens(text: str) -> Set[str]:
-    """Normalizes text by treating '+' as 'plus' and extracting alphanumeric tokens."""
+    """Normalizes text by treating '+' as 'plus', splitting alphanumeric boundaries (e.g. 'nova20' -> 'nova', '20'), and extracting alphanumeric tokens."""
     t = re.sub(r'\+', ' plus ', text)
+    t = re.sub(r'([a-zA-Z]+)(\d+)', r'\1 \2', t)
+    t = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', t)
     words = re.findall(r'[a-zA-Z0-9]+', t.lower())
     return set(words)
 
@@ -91,20 +93,97 @@ def normalize_model_tokens(text: str) -> Set[str]:
 def extract_model_name_portion(title: str, brand: str = "") -> str:
     """
     Extracts the leading model name portion of a candidate title string before capacity,
-    wattage, or descriptive category keywords (powerbank, wired, wireless, portable, etc.).
+    wattage, or descriptive category keywords.
     """
     cleaned = title
     if brand:
         cleaned = re.sub(rf'^{re.escape(brand)}\s+', '', cleaned, flags=re.IGNORECASE)
     
-    # Split on first occurrence of capacity, wattage, or descriptor keywords
-    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+(?:\.\d+)?\s*w|power\s*bank|powerbank|charger|wireless|wired|magnetic|magsafe|fast\s+charging|super\s+fast|smallest|slimmest|slim|pocket|portable|with|for)\b'
+    # Split on capacity, wattage, or generic product category keywords (powerbank/charger/with built-in)
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|power\s*bank|powerbank|charger|with\s+built|with\s+type|made\s+in)\b'
     m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
     if m:
         model_part = cleaned[:m.start()].strip()
         if model_part:
             return model_part
     return cleaned
+
+
+def score_candidate_match(
+    target_model_name: str,
+    candidate_title: str,
+    candidate_url: str,
+    brand: str = "",
+    qualifier_tokens: Optional[List[str]] = None
+) -> Tuple[float, bool, str]:
+    """
+    BIDIRECTIONAL CANDIDATE MATCHER & SCORER:
+    1. Requires all target model tokens to be present in candidate (subset check).
+    2. Enforces qualifier token mismatch checks.
+    3. Rewards exact title / model portion / slug match.
+    4. Strongly penalizes candidates with extra model-name tokens not in target.
+    Returns (score, is_valid, diagnostic_reason).
+    """
+    brand_lower = brand.lower() if brand else ""
+    stopwords = {"pb", brand_lower, "powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and", "in", "for"}
+    
+    # 1. Target tokens
+    target_model_part = extract_model_name_portion(target_model_name, brand=brand)
+    target_tokens = normalize_model_tokens(target_model_part) - stopwords
+    if not target_tokens:
+        target_tokens = normalize_model_tokens(target_model_name) - stopwords
+        
+    # 2. Candidate tokens
+    cand_model_part = extract_model_name_portion(candidate_title, brand=brand)
+    cand_model_tokens = normalize_model_tokens(cand_model_part) - stopwords
+    cand_slug = candidate_url.split("/")[-1].split("?")[0].replace("-", " ")
+    cand_all_tokens = normalize_model_tokens(candidate_title + " " + cand_slug) - stopwords
+    
+    # Subset check: every target token must be in candidate tokens
+    if not target_tokens.issubset(cand_all_tokens):
+        return -1.0, False, "Target tokens missing in candidate"
+        
+    # Qualifier token check
+    is_valid_q, reason_q = reject_qualifier_mismatch(target_model_name, candidate_title, qualifier_tokens, brand=brand)
+    if not is_valid_q:
+        return -1.0, False, reason_q or "Qualifier mismatch"
+
+    # Exact matches
+    target_clean = target_model_name.strip().lower()
+    cand_title_clean = candidate_title.strip().lower()
+    exact_title_match = (target_clean == cand_title_clean)
+    
+    target_part_clean = target_model_part.strip().lower()
+    cand_part_clean = cand_model_part.strip().lower()
+    exact_model_portion = (target_part_clean == cand_part_clean) or (target_tokens == cand_model_tokens)
+    
+    target_slug_clean = target_clean.replace(" ", "")
+    cand_slug_clean = cand_slug.strip().lower().replace(" ", "")
+    exact_slug_match = (target_slug_clean == cand_slug_clean)
+    
+    # Extra tokens penalty in model portion (Rule 1 & Rule 3)
+    # If candidate model-name segment contains extra model tokens not in target, reject as different model
+    extra_model_tokens = cand_model_tokens - target_tokens
+    if extra_model_tokens:
+        reason = f"Extra model token mismatch in '{cand_model_part}': candidate has {extra_model_tokens} not in target '{target_model_name}'."
+        logger.warning(f"Rejected candidate '{candidate_title}' for '{target_model_name}': {reason}")
+        return -1.0, False, reason
+
+    score = 100.0
+    if exact_title_match:
+        score += 150.0
+    elif exact_model_portion:
+        score += 100.0
+        
+    if exact_slug_match:
+        score += 50.0
+        
+    # Minor penalty for general descriptive words not in target (-5 pts each)
+    cand_all_norm = normalize_model_tokens(candidate_title) - stopwords
+    extra_title_tokens = cand_all_norm - target_tokens
+    score -= len(extra_title_tokens) * 5.0
+
+    return score, True, f"Score: {score:.1f} (exact_model: {exact_model_portion})"
 
 
 def reject_qualifier_mismatch(
@@ -180,17 +259,17 @@ def search_shopify_brand_store(
     model_name: str,
     domain: str,
     qualifier_tokens: List[str],
+    exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15
 ) -> Optional[str]:
     """
     Tier 1 & Tier 2 Shopify Discovery:
-    1. Direct suggest API: /search/suggest.json?q=<model>&resources[type]=product
-    2. Fallback / Catalogue Match: /products.json?limit=250
-    Resolves full URLs and handles tricky single-character names (e.g. '1#').
+    Scores all candidates from suggest API and full catalogue against Model_Name.
+    Prefers exact title matches, penalizes extra tokens, and ignores exclude_urls.
     """
-    target_clean = model_name.strip().lower()
-    stopwords = {"powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and"}
-    model_tokens = normalize_model_tokens(extract_model_name_portion(model_name, brand=brand)) - stopwords
+    exclude = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
+    candidates = []
+    seen_urls = set()
 
     # 1. Direct Suggest API
     suggest_cache_key = f"shopify_sug_{domain}_{model_name}"
@@ -209,42 +288,40 @@ def search_shopify_brand_store(
     for p in suggest_products:
         p_title = p.get("title", "")
         p_url = p.get("url", "").split("?")[0]
-        is_valid, _ = reject_qualifier_mismatch(model_name, p_title, qualifier_tokens, brand=brand)
-        if not is_valid:
+        full_url = urljoin(f"https://www.{domain}", p_url)
+        clean_full = full_url.rstrip("/").lower()
+        if clean_full in exclude or clean_full in seen_urls:
             continue
 
-        cand_tokens = normalize_model_tokens(p_title + " " + p_url.replace("-", " "))
-        if model_tokens and model_tokens.issubset(cand_tokens):
-            full_url = urljoin(f"https://www.{domain}", p_url)
-            logger.info(f"[Shopify Direct] Verified suggest match for '{model_name}': {p_title} -> {full_url}")
-            return full_url
+        score, is_valid, diag = score_candidate_match(
+            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+        )
+        if is_valid and score > 0:
+            candidates.append({"url": full_url, "title": p_title, "score": score, "source": "suggest"})
+            seen_urls.add(clean_full)
 
     # 2. Local matching against full catalogue
     catalogue = fetch_shopify_catalogue(domain, timeout=timeout)
-    candidates = []
     for p in catalogue:
         title = p.get("title", "")
         handle = p.get("handle", "")
-        is_valid, _ = reject_qualifier_mismatch(model_name, title, qualifier_tokens, brand=brand)
-        if not is_valid:
+        full_url = f"https://www.{domain}/products/{handle}"
+        clean_full = full_url.rstrip("/").lower()
+        if clean_full in exclude or clean_full in seen_urls:
             continue
 
-        title_lower = title.lower()
-        # Exact match or prefix match (e.g. '1#' matching '1# 22.5W 10000mAh Powerbank')
-        if title_lower.startswith(target_clean + " ") or title_lower == target_clean or handle.startswith(target_clean + "-"):
-            full_url = f"https://www.{domain}/products/{handle}"
-            logger.info(f"[Shopify Direct] Exact catalogue match for '{model_name}': {title} -> {full_url}")
-            return full_url
-
-        cand_tokens = normalize_model_tokens(title + " " + handle.replace("-", " "))
-        if model_tokens and model_tokens.issubset(cand_tokens):
-            candidates.append((p, len(cand_tokens & model_tokens)))
+        score, is_valid, diag = score_candidate_match(
+            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+        )
+        if is_valid and score > 0:
+            candidates.append({"url": full_url, "title": title, "score": score, "source": "catalogue"})
+            seen_urls.add(clean_full)
 
     if candidates:
-        best_p, _ = candidates[0]
-        full_url = f"https://www.{domain}/products/{best_p['handle']}"
-        logger.info(f"[Shopify Direct] Token catalogue match for '{model_name}': {best_p['title']} -> {full_url}")
-        return full_url
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        best = candidates[0]
+        logger.info(f"[Shopify Direct] Best candidate match for '{model_name}' (score={best['score']:.1f}, {best['source']}): {best['title']} -> {best['url']}")
+        return best["url"]
 
     return None
 
@@ -253,13 +330,14 @@ def search_retail_reliance(
     brand: str,
     model_name: str,
     qualifier_tokens: List[str],
+    exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15
 ) -> Optional[str]:
     """
     Tier 3 Reliance Digital Discovery:
-    Uses Reliance Digital's direct JSON autocomplete endpoint.
-    Endpoint: https://www.reliancedigital.in/ext/search/application/api/v1.0/auto-complete?q=<term>
+    Uses Reliance Digital's direct JSON autocomplete endpoint with candidate scoring.
     """
+    exclude = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
     query = f"{brand} {model_name}".strip()
     cache_key = f"reliance_sug_{query}"
 
@@ -278,8 +356,8 @@ def search_retail_reliance(
         return []
 
     items = get_cached_json(cache_key, _fetch_rd) or []
-    stopwords = {"powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and"}
-    model_tokens = normalize_model_tokens(extract_model_name_portion(model_name, brand=brand)) - stopwords
+    candidates = []
+    seen_urls = set()
 
     for it in items:
         if it.get("type") != "product":
@@ -290,16 +368,23 @@ def search_retail_reliance(
         if not slug:
             continue
 
-        # Qualifier token check
-        is_valid, _ = reject_qualifier_mismatch(model_name, display, qualifier_tokens, brand=brand)
-        if not is_valid:
+        product_url = f"https://www.reliancedigital.in/product/{slug}"
+        clean_full = product_url.rstrip("/").lower()
+        if clean_full in exclude or clean_full in seen_urls:
             continue
 
-        cand_tokens = normalize_model_tokens(display + " " + slug.replace("-", " "))
-        if model_tokens and model_tokens.issubset(cand_tokens):
-            product_url = f"https://www.reliancedigital.in/product/{slug}"
-            logger.info(f"[Reliance Direct] Found product match for '{model_name}': {display} -> {product_url}")
-            return product_url
+        score, is_valid, diag = score_candidate_match(
+            model_name, display, product_url, brand=brand, qualifier_tokens=qualifier_tokens
+        )
+        if is_valid and score > 0:
+            candidates.append({"url": product_url, "title": display, "score": score})
+            seen_urls.add(clean_full)
+
+    if candidates:
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        best = candidates[0]
+        logger.info(f"[Reliance Direct] Best candidate match for '{model_name}' (score={best['score']:.1f}): {best['title']} -> {best['url']}")
+        return best["url"]
 
     return None
 
@@ -308,13 +393,14 @@ def search_retail_croma(
     brand: str,
     model_name: str,
     qualifier_tokens: List[str],
+    exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15
 ) -> Optional[str]:
     """
     Tier 3 Croma Discovery:
-    Uses Croma's OCC product search REST endpoint.
-    Endpoint: https://www.croma.com/rest/v2/croma/products/search?query=<term>&fields=FULL&pageSize=10
+    Uses Croma's OCC product search REST endpoint with candidate scoring.
     """
+    exclude = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
     query = f"{brand} {model_name}".strip()
     cache_key = f"croma_occ_{query}"
 
@@ -335,22 +421,31 @@ def search_retail_croma(
         return []
 
     products = get_cached_json(cache_key, _fetch_croma) or []
-    stopwords = {"powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and"}
-    model_tokens = normalize_model_tokens(extract_model_name_portion(model_name, brand=brand)) - stopwords
+    candidates = []
+    seen_urls = set()
 
     for p in products:
         name = p.get("name", "")
-        code = p.get("code", "")
         url_path = p.get("url", "")
-        is_valid, _ = reject_qualifier_mismatch(model_name, name, qualifier_tokens, brand=brand)
-        if not is_valid:
+        if not url_path:
+            continue
+        full_url = urljoin("https://www.croma.com", url_path)
+        clean_full = full_url.rstrip("/").lower()
+        if clean_full in exclude or clean_full in seen_urls:
             continue
 
-        cand_tokens = normalize_model_tokens(name + " " + url_path.replace("-", " "))
-        if model_tokens and model_tokens.issubset(cand_tokens):
-            full_url = urljoin("https://www.croma.com", url_path)
-            logger.info(f"[Croma Direct] Found OCC product match for '{model_name}': {name} -> {full_url}")
-            return full_url
+        score, is_valid, diag = score_candidate_match(
+            model_name, name, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+        )
+        if is_valid and score > 0:
+            candidates.append({"url": full_url, "title": name, "score": score})
+            seen_urls.add(clean_full)
+
+    if candidates:
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        best = candidates[0]
+        logger.info(f"[Croma Direct] Best candidate match for '{model_name}' (score={best['score']:.1f}): {best['title']} -> {best['url']}")
+        return best["url"]
 
     return None
 

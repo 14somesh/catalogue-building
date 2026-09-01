@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 from datetime import datetime
+from typing import Dict, List, Optional, Set, Tuple
 from PIL import Image
 import pandas as pd
 
@@ -35,20 +36,23 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
     - Blocked and Deferred rows grouped with diagnostic fix logs
     - Full breakdown per product row with field sources, tiers, attempts, image metrics, and LLM Provider.
     """
-    os.makedirs(output_dir, exist_ok=True)
+    brand_slug = slugify(brand)
+    brand_output_dir = os.path.join(output_dir, brand_slug) if brand_slug not in output_dir else output_dir
+    os.makedirs(brand_output_dir, exist_ok=True)
     timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M")
-    report_filename = f"RUN_REPORT_{slugify(brand)}_{timestamp_str}.md"
-    report_path = os.path.join(output_dir, report_filename)
+    report_filename = f"RUN_REPORT_{brand_slug}_{timestamp_str}.md"
+    report_path = os.path.join(brand_output_dir, report_filename)
 
     ready_rows = [r for r in brand_rows if r.get("Status") in ("Ready_For_Review", "Approved")]
     blocked_rows = [r for r in brand_rows if r.get("Status") == "Blocked"]
+    skipped_rows = [r for r in brand_rows if r.get("Status") == "Skipped"]
     deferred_rows = [r for r in brand_rows if r.get("Status") == "Deferred"]
-    warn_rows = [r for r in brand_rows if not is_empty_value(r.get("Flags")) and r.get("Status") not in ("Blocked", "Deferred")]
+    warn_rows = [r for r in brand_rows if not is_empty_value(r.get("Flags")) and r.get("Status") not in ("Blocked", "Skipped", "Deferred")]
 
     report_lines = [
         f"# Pipeline Run Report: Brand '{brand}'",
         f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ",
-        f"**Total Products:** {len(brand_rows)} | **Ready for Review:** {len(ready_rows)} | **Blocked:** {len(blocked_rows)} | **Deferred:** {len(deferred_rows)} | **Warnings:** {len(warn_rows)}",
+        f"**Total Products:** {len(brand_rows)} | **Ready for Review:** {len(ready_rows)} | **Blocked (Needs Human):** {len(blocked_rows)} | **Skipped (Exhausted):** {len(skipped_rows)} | **Deferred:** {len(deferred_rows)} | **Warnings:** {len(warn_rows)}",
         "",
         "---",
         ""
@@ -57,12 +61,12 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
     # ==================== BLOCKED ROWS SECTION (Grouped at top) ====================
     if blocked_rows:
         report_lines.append("## ⛔ BLOCKED ROWS (Requires Human Resolution)")
-        report_lines.append("The following products could not be collected or failed hard validation. Zero unverified data was written.")
+        report_lines.append("The following products failed due to active data contradictions (qualifier token mismatch, capacity conflict, duplicate image). Zero unverified data was written.")
         report_lines.append("")
         for b_row in blocked_rows:
             pid = b_row.get("Product_ID")
             model = b_row.get("Model_Name")
-            flags = b_row.get("Flags") or "All source tiers exhausted"
+            flags = b_row.get("Flags") or "Contradiction detected"
             attempts = b_row.get("Attempts", 0)
             fix_log = b_row.get("Fix_Log") or "No attempts logged"
 
@@ -78,7 +82,31 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
         report_lines.append("---")
         report_lines.append("")
     else:
-        report_lines.append("## ✅ No Blocked Rows! All products collected and validated cleanly.")
+        report_lines.append("## ✅ No Blocked Rows! No contradictory data detected.")
+        report_lines.append("")
+
+    # ==================== SKIPPED ROWS SECTION ====================
+    if skipped_rows:
+        report_lines.append("## ⏭️ SKIPPED ROWS (Data Exhausted / Insufficient Specs)")
+        report_lines.append("The following products were skipped after exhausting all collection tiers (including Vision) and retry attempts. These rows do not stop the pipeline run.")
+        report_lines.append("")
+        for s_row in skipped_rows:
+            pid = s_row.get("Product_ID")
+            model = s_row.get("Model_Name")
+            flags = s_row.get("Flags") or "All source tiers exhausted"
+            attempts = s_row.get("Attempts", 0)
+            fix_log = s_row.get("Fix_Log") or "No attempts logged"
+
+            report_lines.append(f"### ⚪ [{pid}] {brand} {model}")
+            report_lines.append(f"- **Status:** `Skipped`")
+            report_lines.append(f"- **Reason / Flags:** {flags}")
+            report_lines.append(f"- **Attempts Used:** {attempts} / 3")
+            report_lines.append(f"- **What Was Tried & Fix Log:**")
+            for entry in fix_log.split("\n"):
+                if entry.strip():
+                    report_lines.append(f"  - {entry.strip()}")
+            report_lines.append("")
+        report_lines.append("---")
         report_lines.append("")
 
     # ==================== DEFERRED ROWS SECTION ====================
@@ -115,6 +143,8 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
         status = row.get("Status", "Pending")
         if status in ("Ready_For_Review", "Approved"):
             status_icon = "🟢"
+        elif status == "Skipped":
+            status_icon = "⚪"
         elif status == "Deferred":
             status_icon = "🟡"
         else:
@@ -183,6 +213,90 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
     return report_path
 
 
+def resolve_brand_url_collisions(
+    df: pd.DataFrame,
+    brand_name: str,
+    config: dict,
+    brand_defaults: dict,
+    enable_semantic_audit: bool = False
+) -> pd.DataFrame:
+    """
+    Rule 2 Collision Resolver:
+    When two rows of the same brand resolve to the same Source_URL:
+    1. Score both rows against the Source_URL using score_candidate_match.
+    2. Keep the higher-scoring row (closer match).
+    3. Clear the lower-scoring row and re-collect it with exclude_urls = {colliding_url}.
+    4. Repeat until no duplicate Source_URLs exist within the brand.
+    """
+    from src.utils.scraper import score_candidate_match
+    import importlib
+    collect_mod = importlib.import_module("src.1_collect")
+
+    brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
+    
+    max_passes = 5
+    for pass_num in range(max_passes):
+        url_map: Dict[str, List[int]] = {}
+        for idx in df[brand_mask].index:
+            src_url = df.loc[idx, "Source_URL"]
+            status = df.loc[idx, "Status"]
+            if not is_empty_value(src_url) and status not in ("Skipped", "Deferred"):
+                clean_url = str(src_url).strip().rstrip("/").lower()
+                url_map.setdefault(clean_url, []).append(idx)
+
+        collisions = {u: idxs for u, idxs in url_map.items() if len(idxs) > 1}
+        if not collisions:
+            break
+
+        logger.warning(f"[Collision Resolver] Found {len(collisions)} colliding URLs in brand '{brand_name}' (Pass {pass_num+1}): {list(collisions.keys())}")
+
+        for coll_url, colliding_indices in collisions.items():
+            scored_rows = []
+            for idx in colliding_indices:
+                r_dict = df.loc[idx].to_dict()
+                m_name = r_dict.get("Model_Name", "")
+                title = r_dict.get("Raw_Title") or r_dict.get("Override_Title") or m_name
+                score, _, diag = score_candidate_match(m_name, title, coll_url, brand=brand_name)
+                scored_rows.append((score, idx, r_dict))
+
+            scored_rows.sort(key=lambda x: x[0], reverse=True)
+            winner_score, winner_idx, winner_dict = scored_rows[0]
+            logger.info(f"[Collision Resolver] Winner for '{coll_url}': [{winner_dict.get('Product_ID')}] '{winner_dict.get('Model_Name')}' (score={winner_score:.1f})")
+
+            # Losers must be re-collected excluding coll_url
+            for loser_score, loser_idx, loser_dict in scored_rows[1:]:
+                loser_pid = loser_dict.get("Product_ID")
+                loser_model = loser_dict.get("Model_Name")
+                logger.info(f"[Collision Resolver] Re-collecting loser [{loser_pid}] '{loser_model}' (score={loser_score:.1f}) excluding '{coll_url}'...")
+                
+                # Clear raw fields for loser row
+                raw_cols = [c for c in df.columns if c.startswith("Raw_") or c.startswith("Source_") or c.startswith("Tier_")]
+                for rc in raw_cols:
+                    df.at[loser_idx, rc] = None
+                df.at[loser_idx, "Source_URL"] = None
+                df.at[loser_idx, "Source_Audit"] = None
+                df.at[loser_idx, "Image_URL"] = None
+                df.at[loser_idx, "Image_Status"] = "missing"
+                df.at[loser_idx, "Status"] = "Pending"
+                df.at[loser_idx, "Attempts"] = 0
+                df.at[loser_idx, "Flags"] = None
+
+                # Re-run collection with exclude_urls
+                all_rows = [row.to_dict() for _, row in df.iterrows()]
+                cleared_row = df.loc[loser_idx].to_dict()
+                
+                collect_updates, success, c_log = collect_mod.collect_data_for_row(cleared_row, config, exclude_urls={coll_url})
+                cleared_row.update(collect_updates)
+                
+                processed_loser = process_row_loop(
+                    cleared_row, all_rows, config, brand_defaults, enable_semantic_audit=enable_semantic_audit, exclude_urls={coll_url}
+                )
+                for k, v in processed_loser.items():
+                    df.at[loser_idx, k] = v
+
+    return df
+
+
 def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic_audit: bool = False) -> str:
     """
     Main unattended orchestrator for a specific brand:
@@ -236,12 +350,20 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
             print(f"\n[HALT] {e}\n")
             return ""
 
+    # Resolve any URL collisions across the brand (Rule 2)
+    df = resolve_brand_url_collisions(df, brand_name, config, brand_defaults, enable_semantic_audit=enable_semantic_audit)
+
     save_catalogue_data(df, excel_path)
     
     brand_rows = [df.loc[idx].to_dict() for idx in df[brand_mask].index]
     report_path = generate_run_report(brand_name, brand_rows)
     
-    logger.info(f"Brand run complete for '{brand_name}'. Review report at: {report_path}")
+    ready_count = sum(1 for r in brand_rows if r.get("Status") in ("Ready_For_Review", "Approved"))
+    blocked_count = sum(1 for r in brand_rows if r.get("Status") == "Blocked")
+    skipped_count = sum(1 for r in brand_rows if r.get("Status") == "Skipped")
+    deferred_count = sum(1 for r in brand_rows if r.get("Status") == "Deferred")
+
+    logger.info(f"Brand run complete for '{brand_name}': {ready_count} Ready for Review | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
     return report_path
 
 

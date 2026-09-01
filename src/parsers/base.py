@@ -17,6 +17,7 @@ class ParserResult:
     mrp: Optional[float] = None
     image_urls: List[str] = field(default_factory=list)
     field_sources: Dict[str, str] = field(default_factory=dict)
+    field_tiers: Dict[str, int] = field(default_factory=dict)
     tier: int = 1
     error: Optional[str] = None
 

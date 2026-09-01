@@ -79,34 +79,49 @@ This architecture redesign replaces the linear, open-loop process with a **const
 ## 3. Tiered Source Escalation Models
 
 ### A. Spec & Bullet Source Tiers
-A 404 or missing product page on the brand's primary site does not mean the product is unknowable; it simply means *that specific page* is delisted. The collector must autonomously escalate through the defined tiers before giving up:
+The collector escalates autonomously through defined tiers before giving up. **Tier 0 (Brand Brochure PDF)** outranks all web tiers, allowing manually supplied PDFs to establish authoritative product specs:
 
 ```
 +-----------------------------------------------------------------------------------+
-| Tier 1: Official Brand Product Page (e.g. stuffcool.com/products/aura-10000mah)   |
+| Tier 0: Official Brand Brochure PDF (brochures/{brand}/ -> Text layer / Vision)   |
 +-----------------------------------------------------------------------------------+
-                                         | (If 404 / Blocked / Missing Specs)
+                                         | (If Delisted / Missing Specs / No Brochure)
                                          v
 +-----------------------------------------------------------------------------------+
-| Tier 2: Official Brand Collection Page (e.g. stuffcool.com/collections/powerbanks)|
+| Tier 1: Official Brand Product Page (HTML -> Vision Fallback if specs in images)  |
 +-----------------------------------------------------------------------------------+
                                          | (If Delisted / Missing Specs)
                                          v
 +-----------------------------------------------------------------------------------+
-| Tier 3: Major Retail Listings (Croma, Reliance Digital, Tata CLiQ, Vijay Sales)   |
+| Tier 2: Official Brand Collection Page (HTML -> Vision Fallback if specs in images)|
 +-----------------------------------------------------------------------------------+
-                                         | (If Retail Missing)
+                                         | (If Delisted / Missing Specs)
                                          v
 +-----------------------------------------------------------------------------------+
-| Tier 4: Authoritative Tech Press / Product Launch Coverage / Specification Portals|
+| Tier 3: Major Retail Listings (Reliance Digital, Croma, Tata CLiQ, Flipkart)      |
 +-----------------------------------------------------------------------------------+
                                          | (If All Tiers Exhausted)
                                          v
-                                   [HARD BLOCK]
+                                    [AUTO-SKIP]
 ```
 
+> [!NOTE]
+> **Tier 0 (Brand Brochure PDF):**
+> - **Folder:** `brochures/{brand}/` (for manually supplied brand catalog PDFs).
+> - **Precedence Invariant:** Brochure data outranks web data. Later tiers only fill missing gaps and **never overwrite** Tier 0 fields.
+> - **Multi-Product Page Isolation:** When a brochure page carries multiple products in a grid, the parser isolates the specific bounding region/section for `Model_Name` before extracting, preventing neighbouring specs from bleeding across products.
+> - **Extraction Order:** Evaluates the PDF text stream first. If the page is image-based or text is thin, falls back to Gemini Vision on the rendered high-res PDF page (`scale=2.5`).
+> - **Provenance:** Records `Source_<field>` as `"brochure: {filename}, page {n}"` and `Tier_<field>` as `0` (text) or `0-vision` (vision).
+> - **Silent Skip:** If no brochure PDF exists for a brand, Tier 0 skips silently and begins directly at Tier 1.
+
+> [!NOTE]
+> **Vision Fallback (All Tiers):** When a tier returns HTTP 200 (or opens a brochure page) but specs are missing because they sit inside infographic images / spec banners, the pipeline feeds the infographic images / rendered page to Gemini Vision to extract structured specs.
+> - `Source_<field>` is recorded as the page URL or brochure page reference.
+> - `Tier_<field>` is tagged with a `"-vision"` suffix (e.g. `0-vision`, `1-vision`, `2-vision`, `3-vision`).
+> - Vision Fallback only fires after HTML/text parsing has failed or returned insufficient specs for that tier.
+
 > [!IMPORTANT]
-> **Amazon Policy for Specs:** Amazon.in is **never** used as a source for specifications or bullet copy because of aggressive anti-scraping bot barriers and inconsistent product descriptions.
+> **Partial Data Rule:** A product with **3 or more of 5 specs** (capacity, output, ports, weight, warranty) is accepted as `Ready_For_Review` with a non-blocking warning. Only fewer than 3 populated specs gets skipped upon tier exhaustion.
 
 ---
 
@@ -120,7 +135,7 @@ Images are binary assets—they do not require cross-corroboration, but they mus
                                          | (If Missing / Low-Res)
                                          v
 +-----------------------------------------------------------------------------------+
-| Tier 2: Major Retail Product Listings (Croma, Reliance Digital, Tata CLiQ)        |
+| Tier 2: Major Retail Product Listings (Reliance Digital, Croma, Flipkart, Tata)   |
 +-----------------------------------------------------------------------------------+
                                          | (If Retail Missing)
                                          v
@@ -142,27 +157,29 @@ Images are binary assets—they do not require cross-corroboration, but they mus
 
 ---
 
-## 4. Fix vs. Block Taxonomy
+## 4. Fix, Skip, vs. Block Taxonomy
 
-When validation detects an anomaly, the agent categorizes it strictly into either an **Auto-Fix** (autonomous retry) or a **Hard Block** (immediate halt on that row):
+When validation detects an anomaly, the agent categorizes it strictly into an **Auto-Fix** (autonomous retry), an **Auto-Skip** (exhausted data / insufficient specs without stopping the run), or a **Hard Block** (contradictions / wrong data requiring human resolution):
 
 | Category | Issue Type | Autonomous Action |
 | :--- | :--- | :--- |
 | **Auto-Fix** | Sibling SKU Mismatch *(e.g. Giga vs Giga Max)* | Clear raw fields, refine search query to exclude sibling tokens, re-fetch. |
-| **Auto-Fix** | Capacity / Spec Mismatch | Reject candidate URL, search next source tier for exact model match. |
 | **Auto-Fix** | Boilerplate Bullets *(Site footer text)* | Reject LLM output, extract clean accordion/spec text block, re-prompt LLM. |
-| **Auto-Fix** | Low-Res Image ($< 800\text{ px}$) | Query CDN with max resolution parameter (`width=2048` or `_SL1500_`) or escalate to next image tier. |
+| **Auto-Fix** | Bullet Exceeds 60 Chars | Truncate deterministically at word boundary ($\le 60\text{ chars}$). |
+| **Auto-Fix** | Low-Res Image ($< 800\text{ px}$) | Query CDN with max resolution parameter (`width=2048` or `_SL1500_`) or escalate image tier. |
 | **Auto-Fix** | Filename Slug Mismatch | Re-slugify filename according to canonical convention `images/{brand_slug}/{model_slug}.png`. |
 | **Auto-Fix** | Missing Warranty Spec | Check brand-wide policy in collection/footer schema and apply brand baseline. |
-| **Hard Block** | All Spec Tiers Exhausted | Stop. Set `Status = "Blocked"`, log diagnostic in `Flags`, write NOTHING to `Raw_*`. |
-| **Hard Block** | No Image Found in Any Tier | Stop. Set `Image_Status = "missing"`, `Status = "Blocked"`. |
-| **Hard Block** | Most Specs Empty / No Tech Specs | Stop. Refuse LLM drafting, write NOTHING to `Raw_*`. |
+| **Auto-Skip** | All Spec Tiers Exhausted (incl. Vision) | Set `Status = "Skipped"`, log reason in `Flags`, list in report, continue pipeline run. |
+| **Auto-Skip** | Insufficient Specs ($< 3$ of 5 after retries) | Set `Status = "Skipped"`, log reason in `Flags`, list in report, continue pipeline run. |
+| **Auto-Skip** | No Image Found in Any Tier | Set `Status = "Skipped"`, log in `Flags`, list in report, continue pipeline run. |
+| **Hard Block** | Qualifier Token Sibling Mismatch | Active wrong product match. Set `Status = "Blocked"` (needs human). |
+| **Hard Block** | Capacity Conflict *(Model vs Collected)* | Active data contradiction. Set `Status = "Blocked"` (needs human). |
+| **Hard Block** | Duplicate Image Hash Detected | Identical image on different SKUs. Set `Status = "Blocked"` (needs human). |
 | **Hard Block** | Field Lacks Verified Source URL | Data-layer invariant violation. Immediate block. |
-| **Hard Block** | Duplicate Image Hash Detected | Stop. Block both rows until human confirms distinct product images. |
-| **Hard Block** | Max Retry Budget Exhausted ($\ge 3$ tries)| Stop. Mark row `Blocked` and present diagnostic log in the run report. |
+| **Hard Block** | Corrupted Image File on Disk | Unreadable image asset. Set `Status = "Blocked"` (needs human). |
 
-> [!CAUTION]
-> A blocked row **always waits for the human reviewer**. It is never populated with hallucinated data, fallback boilerplate, or unverified approximations.
+> [!NOTE]
+> Skipped rows are clearly summarized in the Run Report under `## ⏭️ SKIPPED ROWS` with what was tried and why, allowing unattended pipeline completion. Blocked rows are reserved strictly for genuine data contradictions that require human judgment.
 
 ---
 
@@ -226,14 +243,25 @@ Vianet Catalogue/
 ├── requirements.txt           # Python dependencies
 ├── data/
 │   └── catalogue_data.xlsx    # Master Excel Single Source of Truth
+├── brochures/                 # Tier 0 Manual brand brochure PDFs
+│   └── {brand_slug}/
+│       └── *.pdf
 ├── images/                    # Master image repository (convention: {brand_slug}/{model_slug}.png)
 │   └── {brand_slug}/
 │       └── {model_slug}.png
 ├── src/
+│   ├── parsers/               # Source-specific parsers
+│   │   ├── base.py            # BaseParser & standardized ParserResult
+│   │   ├── brochure.py        # Tier 0: Brochure PDF text & vision parser
+│   │   ├── shopify.py         # Tier 1/2: Shopify JSON API parser
+│   │   ├── reliance.py        # Tier 3: Reliance Digital parser
+│   │   ├── croma.py           # Tier 3: Croma parser
+│   │   └── amazon.py          # Tier 3 image CDN scraper
 │   ├── utils/
 │   │   ├── excel_handler.py   # Data layer invariants & safe Excel I/O
-│   │   ├── llm_client.py      # LLM drafting interface (bullets/subtitles only)
+│   │   ├── llm_client.py      # LLM drafting interface & Vision Extractor
 │   │   ├── scraper.py         # Tiered HTML/PDF scraper & accordion parser
+│   │   ├── validators.py      # Deterministic validation & invariant checks
 │   │   └── logger.py          # Structured logging utility
 │   ├── 1_collect.py           # Pipeline Step 1: Tiered Data Collector
 │   ├── 2_images.py            # Pipeline Step 2: Tiered Image Resolver & Quality Validator

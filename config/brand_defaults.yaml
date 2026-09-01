@@ -21,6 +21,48 @@ brands:
       - "amazon"
       - "collection_thumb"
 
+  Pebble:
+    domain: "pebblecart.com"
+    collection_url: "https://www.pebblecart.com/collections/powerbanks"
+    default_warranty: "6 Months"
+    retail_order:
+      - "reliance"
+      - "croma"
+    qualifier_tokens:
+      - "Max"
+      - "Ultra"
+      - "Plus"
+      - "Pro"
+      - "Mini"
+      - "Lite"
+      - "Go"
+    image_tier_order:
+      - "brand_product"
+      - "retail"
+      - "amazon"
+      - "collection_thumb"
+
+  Portronics:
+    domain: "portronics.com"
+    collection_url: "https://www.portronics.com/collections/powerbanks"
+    default_warranty: "1 Year"
+    retail_order:
+      - "reliance"
+      - "croma"
+    qualifier_tokens:
+      - "Max"
+      - "Ultra"
+      - "Plus"
+      - "Pro"
+      - "Mini"
+      - "Lite"
+      - "Go"
+    image_tier_order:
+      - "brand_product"
+      - "retail"
+      - "amazon"
+      - "collection_thumb"
+
   # Standard template for future brands
   _default:
     retail_order:

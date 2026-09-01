@@ -109,12 +109,15 @@ def validate_row_deterministic(
                 hard_flags.append(f"Boilerplate detected in Bullet_{b_idx}: '{bp_phrase}'")
 
     # --------------------------------------------------------------------------
-    # HARD CHECK e: More than 2 of 5 spec fields empty
+    # HARD CHECK e: Fewer than 3 of 5 spec fields populated (Hard Fail), 3-4 populated (WARN)
     # --------------------------------------------------------------------------
     spec_fields = ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight", "Spec_Warranty"]
     empty_spec_count = sum(1 for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf)))
     if empty_spec_count > 2:
-        hard_flags.append(f"Insufficient specifications: {empty_spec_count} of 5 required specs are empty")
+        hard_flags.append(f"Insufficient specifications: {empty_spec_count} of 5 required specs are empty (fewer than 3 populated)")
+    elif empty_spec_count > 0:
+        missing_sf = [sf.replace("Spec_", "").lower() for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf))]
+        warnings.append(f"Partial specifications: {empty_spec_count} of 5 specs empty ({', '.join(missing_sf)})")
 
     # --------------------------------------------------------------------------
     # HARD CHECK f: Any populated field with an empty Source_ (Write Guard Integrity)
@@ -151,15 +154,15 @@ def validate_row_deterministic(
             if actual_filename != expected_filename:
                 hard_flags.append(f"Image filename mismatch: expected '{expected_filename}', got '{actual_filename}'")
 
-        # Check h: Duplicate image hash across rows
+        # Check h: Duplicate image hash across active rows
         img_hash = get_image_file_hash(expected_img_path)
         if img_hash and all_rows:
             for other_row in all_rows:
                 other_pid = str(other_row.get("Product_ID", "")).strip()
-                if other_pid != pid:
+                if other_pid != pid and other_row.get("Status") != "Skipped":
                     other_override = other_row.get("Override_Image_Path")
                     other_path = str(other_override).strip() if not is_empty_value(other_override) else f"images/{slugify(other_row.get('Brand', ''))}/{slugify(other_row.get('Model_Name', ''))}.png"
-                    if os.path.exists(other_path) and os.path.isfile(other_path):
+                    if os.path.abspath(other_path) != os.path.abspath(expected_img_path) and os.path.exists(other_path) and os.path.isfile(other_path):
                         other_hash = get_image_file_hash(other_path)
                         if other_hash == img_hash:
                             hard_flags.append(f"Duplicate image asset: identical file hash to product [{other_pid}]")
@@ -217,6 +220,30 @@ def validate_row_deterministic(
             dp_num = float(dp_price)
             if mrp_num < dp_num:
                 warnings.append(f"Scraped MRP (₹{mrp_num:,.0f}) is lower than DP (₹{dp_num:,.0f}) — potential product mismatch or bad parse")
+        except Exception:
+            pass
+
+    # --------------------------------------------------------------------------
+    # WARN q: URL slug numeric tokens disagree with scraped title or model name
+    # --------------------------------------------------------------------------
+    source_url_val = row_dict.get("Source_URL")
+    if not is_empty_value(source_url_val) and str(source_url_val).startswith("http"):
+        try:
+            url_slug = str(source_url_val).rstrip("/").split("/")[-1].split("?")[0]
+            slug_num_text = re.sub(r'([a-zA-Z]+)(\d+)', r'\1 \2', url_slug)
+            slug_num_text = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', slug_num_text)
+            slug_nums = set(re.findall(r'\b\d+\b', slug_num_text))
+
+            title_text = str(get_effective_value(row_dict, "Title") or row_dict.get("Model_Name", ""))
+            title_num_text = re.sub(r'([a-zA-Z]+)(\d+)', r'\1 \2', title_text)
+            title_num_text = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', title_num_text)
+            title_nums = set(re.findall(r'\b\d+\b', title_num_text))
+
+            if slug_nums and title_nums and slug_nums != title_nums:
+                if not slug_nums.issubset(title_nums) and not title_nums.issubset(slug_nums):
+                    warnings.append(
+                        f"URL slug numeric token mismatch: slug '{url_slug}' contains numbers {sorted(list(slug_nums))} but title/model contains {sorted(list(title_nums))} (potential reused URL handle)"
+                    )
         except Exception:
             pass
 

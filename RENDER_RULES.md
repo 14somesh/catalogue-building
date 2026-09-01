@@ -50,8 +50,12 @@ These rules are programmatically enforced during every execution of `4_build.py`
    - *Failure behavior:* Warning logged listing inconsistent image assets and sampled RGB values.
 
 8. **Image Aspect Ratio (Strict Square 1:1 Framing):**
-   - Every product image must have a square aspect ratio (`width == height`, tolerance < 1%), matching the square `235px × 235px` ivory media tile. Non-square images will crop or distort inside the square container.
+   - Every product image must have a square aspect ratio (`width == height`, tolerance < 1%), matching the square `290px × 290px` ivory media tile. Non-square images will crop or distort inside the square container.
    - *Failure behavior:* Warning/error logged specifying non-square image dimensions and offending filenames.
+
+9. **URL-Title Numeric Consistency Warning:**
+   - Emits a non-blocking `WARN` when numeric tokens in the URL slug conflict with numeric tokens in the scraped title or Model_Name (e.g. slug `pebble-electra10` matching title `Rapid Electra20`), detecting reused URL handles across product generations.
+   - *Failure behavior:* Non-blocking warning logged in review report.
 
 ---
 
@@ -79,4 +83,4 @@ These visual quality standards must be verified by a human reviewer inspecting t
    - Raster images and product cutouts must remain crisp and sharp at fit-to-page zoom, rendered from high-resolution source masters (`1200×1200px+`) with `deviceScaleFactor: 2`.
 
 7. **Brand Divider Page Impact:**
-   - Brand divider pages must feature the brand name in massive, bold white uppercase typography filling nearly the full width of the page, vertically centered and left-aligned to the card margin.
+   - Brand divider pages must feature the brand name in massive, bold white uppercase typography filling nearly the full width of the page, centered both horizontally and vertically on the full A4 canvas.

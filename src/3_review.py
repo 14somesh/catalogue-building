@@ -126,25 +126,48 @@ def attempt_auto_fix(
     return updated, False, f"Attempt {attempt_num}: No automated fix available for flags: {hard_flags}"
 
 
+def is_contradiction_flag(flag: str) -> bool:
+    """
+    Returns True if a hard flag represents an active contradiction or wrong product match
+    that strictly requires human judgment and must be BLOCKED.
+    Returns False if it is pure data exhaustion / insufficient specs, which should be SKIPPED.
+    """
+    f_lower = flag.lower()
+    contradiction_keywords = [
+        "qualifier token mismatch",
+        "capacity mismatch",
+        "duplicate image asset",
+        "image filename mismatch",
+        "fatal bug",
+        "corrupted image"
+    ]
+    return any(ck in f_lower for ck in contradiction_keywords)
+
+
 def process_row_loop(
     row_dict: Dict[str, Any],
     all_rows: List[Dict[str, Any]],
     config: dict,
     brand_defaults: dict,
-    enable_semantic_audit: bool = False
+    enable_semantic_audit: bool = False,
+    exclude_urls: Optional[Set[str]] = None
 ) -> Dict[str, Any]:
     """
     Executes the autonomous loop for a single row:
-    collect -> images -> validate -> fix loop (max 3 attempts) -> PASS, DEFER, or BLOCK.
+    1_collect -> 2_images -> 3_validate -> auto-fix / retry (up to MAX_LOOP_ATTEMPTS).
     """
     current_row = dict(row_dict)
-    pid = str(current_row.get("Product_ID", "UNKNOWN")).strip()
-    
-    # If row is already manually Approved by human with overrides, keep approved status
-    if current_row.get("Status") == "Approved":
+    pid = current_row.get("Product_ID", "Unknown")
+
+    # If row is already Approved or Skipped, preserve it and do not re-process
+    if current_row.get("Status") in ("Approved", "Skipped"):
         return current_row
 
-    initial_attempts = int(current_row.get("Attempts") or 0)
+    attempts_val = current_row.get("Attempts")
+    try:
+        initial_attempts = int(attempts_val) if not is_empty_value(attempts_val) else 0
+    except Exception:
+        initial_attempts = 0
     attempts = initial_attempts
     fix_logs: List[str] = [str(current_row.get("Fix_Log"))] if not is_empty_value(current_row.get("Fix_Log")) else []
     hard_flags: List[str] = [str(current_row.get("Flags"))] if not is_empty_value(current_row.get("Flags")) else ["Initial validation required"]
@@ -155,14 +178,13 @@ def process_row_loop(
 
         # Step 1: Collect (if not already collected)
         if is_empty_value(current_row.get("Raw_Title")) and is_empty_value(current_row.get("Override_Title")):
-            collect_updates, success, c_log = collect_mod.collect_data_for_row(current_row, config)
+            collect_updates, success, c_log = collect_mod.collect_data_for_row(current_row, config, exclude_urls=exclude_urls)
             current_row.update(collect_updates)
             fix_logs.append(f"Attempt {attempts}: {c_log}")
 
             # Check if collection was deferred due to infrastructure/LLM failure
             if current_row.get("Status") == "Deferred":
                 logger.warning(f"[{pid}] Row deferred due to infrastructure failure during collection.")
-                # Infrastructure failure does NOT consume a loop attempt
                 current_row["Attempts"] = initial_attempts
                 current_row["Fix_Log"] = "\n".join(fix_logs)
                 return current_row
@@ -229,14 +251,25 @@ def process_row_loop(
         current_row["Fix_Log"] = "\n".join(fix_logs)
         return current_row
 
-    # If loop finishes without clean pass -> HARD BLOCK
-    logger.error(f"[{pid}] BLOCKED after {attempts} attempts. Clearing raw fields.")
-    blocked_row = clear_raw_fields(current_row)
-    blocked_row["Status"] = "Blocked"
-    blocked_row["Flags"] = "Hard Block: " + ", ".join(hard_flags)
-    blocked_row["Attempts"] = attempts
-    blocked_row["Fix_Log"] = "\n".join(fix_logs)
-    return blocked_row
+    # Distinguish Contradiction (Blocked) vs Data Exhaustion (Skipped)
+    has_contradiction = any(is_contradiction_flag(f) for f in hard_flags)
+
+    if has_contradiction:
+        logger.error(f"[{pid}] BLOCKED after {attempts} attempts due to contradiction / mismatch: {hard_flags}. Clearing raw fields.")
+        blocked_row = clear_raw_fields(current_row)
+        blocked_row["Status"] = "Blocked"
+        blocked_row["Flags"] = "Hard Block: " + ", ".join(hard_flags)
+        blocked_row["Attempts"] = attempts
+        blocked_row["Fix_Log"] = "\n".join(fix_logs)
+        return blocked_row
+    else:
+        logger.warning(f"[{pid}] SKIPPED after {attempts} attempts due to data exhaustion / insufficient specs: {hard_flags}.")
+        skipped_row = clear_raw_fields(current_row)
+        skipped_row["Status"] = "Skipped"
+        skipped_row["Flags"] = "Skipped: " + ", ".join(hard_flags)
+        skipped_row["Attempts"] = attempts
+        skipped_row["Fix_Log"] = "\n".join(fix_logs)
+        return skipped_row
 
 
 def run_review_loop(

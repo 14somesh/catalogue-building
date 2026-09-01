@@ -78,6 +78,14 @@ class SemanticAuditSchema(BaseModel):
     summary_flags: List[str] = Field(default_factory=list, description="Concise error/warning flags to record in the Excel Flags column")
 
 
+class VisionExtractedSpecsSchema(BaseModel):
+    capacity: Optional[str] = Field(default=None, description="Battery capacity e.g. '10000 mAh' or '20000 mAh'")
+    output: Optional[str] = Field(default=None, description="Max power output e.g. '22.5W Fast Charging' or '15W Wireless'")
+    ports: Optional[str] = Field(default=None, description="Input/output port configuration e.g. 'Type-C, USB-A'")
+    weight: Optional[str] = Field(default=None, description="Weight of the product e.g. '195g' or '220g'")
+    warranty: Optional[str] = Field(default=None, description="Warranty term e.g. '6 Months' or '1 Year'")
+
+
 def classify_gemini_error(e: Exception) -> str:
     """
     Classifies Gemini API exceptions into three distinct kinds:
@@ -701,4 +709,94 @@ def audit_product_semantics(
             continue
 
     return [], False
+
+
+def extract_specs_via_vision(
+    image_bytes_list: List[Tuple[bytes, str]],
+    page_url: str,
+    brand: str,
+    model_name: str,
+    llm_config: Optional[dict] = None
+) -> Optional[Dict[str, str]]:
+    """
+    VISION FALLBACK:
+    When a tier returns HTTP 200 but specs are missing from the HTML because they sit
+    inside infographic images / spec banners, this function feeds the image assets to
+    Gemini Vision to extract the structured specifications table.
+    
+    Returns a dict of non-empty specs (capacity, output, ports, weight, warranty) or None.
+    """
+    if not image_bytes_list:
+        return None
+
+    if is_provider_exhausted("gemini"):
+        logger.warning(f"[Vision Fallback] Gemini is marked exhausted; cannot run vision extraction for {brand} {model_name}.")
+        return None
+
+    client = get_gemini_client()
+    cfg = llm_config or {}
+    model = "gemini-3.6-flash"
+
+    prompt = (
+        f"You are an expert technical product specification extractor.\n"
+        f"Examine these product infographic and specification images for '{brand} {model_name}' from the page '{page_url}'.\n"
+        f"Extract the exact technical specifications into the JSON schema:\n"
+        f"- capacity: battery capacity in mAh (e.g. '10000 mAh', '20000 mAh')\n"
+        f"- output: maximum output power / fast charging wattage (e.g. '22.5W Fast Charging', '15W Wireless', '35W PD')\n"
+        f"- ports: port types and configuration (e.g. 'Type-C, USB-A', 'Dual Type-C')\n"
+        f"- weight: product weight in grams (e.g. '195g')\n"
+        f"- warranty: warranty duration (e.g. '6 Months', '1 Year')\n\n"
+        f"STRICT CONSTRAINTS:\n"
+        f"1. ZERO HALLUCINATION: Only extract specs that are clearly visible or stated in the images.\n"
+        f"2. If a spec is not visible or not mentioned, return null for that field.\n"
+        f"3. Return valid JSON adhering to VisionExtractedSpecsSchema."
+    )
+
+    image_parts = []
+    for img_data, mime_type in image_bytes_list:
+        image_parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+
+    contents = [prompt] + image_parts
+    logger.info(f"[Vision Fallback] Calling Gemini Vision ({model}) on {len(image_parts)} images for {brand} {model_name}...")
+
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=VisionExtractedSpecsSchema,
+                    temperature=0.1
+                )
+            )
+
+            parsed = json.loads(response.text)
+            clean_specs = {}
+            for k in ["capacity", "output", "ports", "weight", "warranty"]:
+                val = parsed.get(k)
+                if val and str(val).strip().lower() not in ("null", "none", ""):
+                    clean_specs[k] = str(val).strip()
+
+            if clean_specs:
+                logger.info(f"[Vision Fallback] Successfully extracted specs for {brand} {model_name}: {clean_specs}")
+                return clean_specs
+            else:
+                logger.warning(f"[Vision Fallback] Vision API returned empty specs for {brand} {model_name}.")
+                return None
+
+        except Exception as e:
+            err_type = classify_gemini_error(e)
+            logger.warning(f"[Vision Fallback] Gemini vision attempt {attempt}/{max_retries} failed ({err_type}): {e}")
+            if err_type == "QUOTA_EXHAUSTED":
+                mark_provider_exhausted("gemini")
+                return None
+            elif err_type in ("RATE_LIMIT", "TRANSIENT") and attempt < max_retries:
+                time.sleep(2 ** attempt * 2)
+            else:
+                return None
+
+    return None
+
 

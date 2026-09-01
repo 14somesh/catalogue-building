@@ -4,7 +4,10 @@ category:
 
 # Explicit brand rendering order in catalogue (leave empty to follow sheet appearance order)
 # The real brand order will be supplied when the product sheet is populated in Phase 5
-brand_order: []
+brand_order:
+  - "Stuffcool"
+  - "Pebble"
+  - "Portronics"
 
 page_setup:
   paper_size: "A4"
@@ -27,7 +30,7 @@ validation_rules:
 llm:
   providers:
     - name: "gemini"
-      model: "gemini-3.6-flash"
+      model: "gemini-3.5-flash-lite"
       temperature: 0.2
     - name: "groq"
       model: "llama-3.3-70b-versatile"
