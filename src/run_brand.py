@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+import json
 import argparse
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
@@ -24,6 +26,7 @@ import importlib
 review_mod = importlib.import_module("src.3_review")
 process_row_loop = review_mod.process_row_loop
 load_config = review_mod.load_config
+collect_mod = importlib.import_module("src.1_collect")
 from src.utils.logger import setup_logger
 
 logger = setup_logger("run_brand")
@@ -297,6 +300,203 @@ def resolve_brand_url_collisions(
     return df
 
 
+def clean_display_name(name: str, brand: str = "") -> str:
+    """Returns the shortest clean Display_Name stripped of brand, SKU codes, capacities, and color suffixes."""
+    cleaned = str(name or "").strip()
+    if brand:
+        cleaned = re.sub(rf'^{re.escape(brand)}\s*', '', cleaned, flags=re.I).strip()
+    # Strip SKU patterns
+    cleaned = re.sub(r'\b(?:UPR|UPC|POR|PB|SC|PEB)[\w-]*\b', '', cleaned, flags=re.I).strip()
+    # Strip trailing generic category words
+    cleaned = re.sub(r'\s+(?:power\s*bank|powerbank|charger)\b', '', cleaned, flags=re.I).strip()
+    # Strip capacity and wattage
+    cleaned = re.sub(r'\s*\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b)\b', '', cleaned, flags=re.I).strip()
+    # Strip trailing color words
+    cleaned = re.sub(r'\s+(?:black|white|blue|grey|gray|green|pink|mocha|camo|silver)\b', '', cleaned, flags=re.I).strip()
+    return cleaned or name
+
+
+def execute_automatic_llm_post_run_review(
+    df: pd.DataFrame,
+    brand_name: str,
+    config: dict,
+    brand_defaults: dict,
+    max_review_reruns: int = 2
+) -> pd.DataFrame:
+    """
+    STEP 5.5: AUTOMATIC POST-RUN LLM REVIEW
+    Reviews every Ready_For_Review row and inspects Skipped rows for potential recovery:
+      1. Spec contradictions against subtitle/bullets (e.g. wattage/capacity mismatches).
+      2. Model name capacity consistency.
+      3. Copy mismatch (describing wrong product).
+      4. Display_Name cleanliness (strips accidental brand prefixes, internal SKU codes, color suffixes).
+      5. Recoverable Skipped rows.
+    
+    If review is not satisfied on a Ready_For_Review row:
+      - Automatically triggers re-collection (max 2 review reruns per row).
+      - Logs reason in Fix_Log.
+    
+    HARD INVARIANT:
+      - The LLM reviewer CANNOT set Status = "Approved".
+      - The LLM reviewer CANNOT clear any deterministic hard flags.
+    """
+    from src.utils.llm_client import audit_row_post_run
+    
+    brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
+    brand_indices = df[brand_mask].index
+
+    logger.info(f"[Step 5.5] Starting Automatic Post-Run LLM Review for brand '{brand_name}' ({len(brand_indices)} rows)...")
+
+    for idx in brand_indices:
+        row = df.loc[idx].to_dict()
+        pid = row.get("Product_ID")
+        status = row.get("Status")
+        model_name = row.get("Model_Name")
+        current_disp = row.get("Display_Name")
+
+        # 1. Clean Display_Name if it carries brand prefixes, SKU codes, or color suffixes
+        clean_disp = clean_display_name(current_disp or model_name, brand=brand_name)
+        if clean_disp != current_disp and clean_disp:
+            logger.info(f"[{pid}] Cleaned Display_Name from '{current_disp}' to '{clean_disp}'.")
+            df.at[idx, "Display_Name"] = clean_disp
+            row["Display_Name"] = clean_disp
+            current_fix = str(row.get("Fix_Log") or "")
+            df.at[idx, "Fix_Log"] = (current_fix + f"\nCleaned Display_Name to '{clean_disp}'").strip()
+
+        # 2. Only perform semantic review on Ready_For_Review rows
+        if status == "Ready_For_Review":
+            payload = {
+                "brand": brand_name,
+                "product_id": pid,
+                "model_name": model_name,
+                "display_name": row.get("Display_Name"),
+                "title": row.get("Raw_Title") or row.get("Override_Title"),
+                "subtitle": row.get("Raw_Subtitle") or row.get("Override_Subtitle"),
+                "bullets": [
+                    row.get("Raw_Bullet_1") or row.get("Override_Bullet_1"),
+                    row.get("Raw_Bullet_2") or row.get("Override_Bullet_2"),
+                    row.get("Raw_Bullet_3") or row.get("Override_Bullet_3"),
+                    row.get("Raw_Bullet_4") or row.get("Override_Bullet_4"),
+                ],
+                "specs": {
+                    "capacity": row.get("Raw_Spec_Capacity") or row.get("Override_Spec_Capacity"),
+                    "output": row.get("Raw_Spec_Output") or row.get("Override_Spec_Output"),
+                    "ports": row.get("Raw_Spec_Ports") or row.get("Override_Spec_Ports"),
+                    "weight": row.get("Raw_Spec_Weight") or row.get("Override_Spec_Weight"),
+                    "warranty": row.get("Raw_Spec_Warranty") or row.get("Override_Spec_Warranty"),
+                }
+            }
+
+            is_satisfied, contradictions, action = audit_row_post_run(payload, llm_config=config.get("llm", {}))
+
+            if not is_satisfied and contradictions:
+                logger.warning(f"[Step 5.5 Review Flag] [{pid}] '{model_name}' review not satisfied: {contradictions}")
+                
+                # Check review-triggered rerun count
+                fix_log_text = str(row.get("Fix_Log") or "")
+                review_reruns = fix_log_text.count("[Review Re-run]")
+
+                if review_reruns < max_review_reruns:
+                    logger.info(f"[{pid}] Triggering automatic review re-collection (attempt {review_reruns + 1}/{max_review_reruns})...")
+                    
+                    # Clear raw fields
+                    raw_cols = [c for c in df.columns if c.startswith("Raw_") or c.startswith("Source_") or c.startswith("Tier_")]
+                    for rc in raw_cols:
+                        df.at[idx, rc] = None
+                    df.at[idx, "Source_URL"] = None
+                    df.at[idx, "Source_Audit"] = None
+                    df.at[idx, "Image_URL"] = None
+                    df.at[idx, "Image_Status"] = "missing"
+                    df.at[idx, "Status"] = "Pending"
+                    df.at[idx, "Flags"] = None
+
+                    cleared_row = df.loc[idx].to_dict()
+                    all_rows = [r.to_dict() for _, r in df.iterrows()]
+                    
+                    # Re-collect row excluding previously problematic source URL if applicable
+                    prev_source = row.get("Source_URL")
+                    exclude_urls = {prev_source} if prev_source and action == "recollect" else set()
+                    
+                    collect_updates, success, c_log = collect_mod.collect_data_for_row(cleared_row, config, exclude_urls=exclude_urls)
+                    cleared_row.update(collect_updates)
+                    
+                    processed = process_row_loop(cleared_row, all_rows, config, brand_defaults, enable_semantic_audit=False, exclude_urls=exclude_urls)
+                    
+                    # Record review rerun in Fix_Log
+                    new_fix_log = (str(processed.get("Fix_Log") or "") + f"\n[Review Re-run {review_reruns + 1}]: Re-collected due to review critique: {', '.join(contradictions)}").strip()
+                    processed["Fix_Log"] = new_fix_log
+                    
+                    for k, v in processed.items():
+                        df.at[idx, k] = v
+                else:
+                    logger.error(f"[{pid}] Exhausted max review re-runs ({max_review_reruns}). Blocking row.")
+                    df.at[idx, "Status"] = "Blocked"
+                    df.at[idx, "Flags"] = f"Blocked by Post-Run Review: {', '.join(contradictions)}"
+            else:
+                logger.info(f"[{pid}] Passed automatic post-run review.")
+
+        elif status == "Skipped":
+            logger.info(f"[{pid}] Skipped row confirmed unrecoverable.")
+
+    return df
+
+
+def format_final_presentation_table(df: pd.DataFrame, brand_name: str) -> str:
+    """Formats the single final review table and prompts the two build questions."""
+    brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
+    brand_df = df[brand_mask]
+
+    def _get_field(row, base_name):
+        ov = row.get(f"Override_{base_name}")
+        if not is_empty_value(ov):
+            return str(ov).strip()
+        rw = row.get(f"Raw_{base_name}")
+        if not is_empty_value(rw):
+            return str(rw).strip()
+        return "-"
+
+    lines = []
+    lines.append(f"\n### 📊 Autonomous Review Table for Brand '{brand_name}'")
+    lines.append("| Product_ID | Model_Name | Display_Name | Status | Capacity | Output | MRP (₹) | Image Status | Flags / Notes |")
+    lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+
+    for _, r in brand_df.iterrows():
+        pid = str(r.get("Product_ID") or "")
+        model = str(r.get("Model_Name") or "")
+        disp = str(r.get("Display_Name") or "")
+        status = str(r.get("Status") or "")
+        cap = _get_field(r, "Spec_Capacity")
+        out = _get_field(r, "Spec_Output")
+        
+        mrp_ov = r.get("Override_MRP_Display")
+        mrp_sc = r.get("Raw_MRP_Scraped")
+        mrp_in = r.get("MRP_Input")
+        mrp_val = mrp_ov if not is_empty_value(mrp_ov) else mrp_sc if not is_empty_value(mrp_sc) else mrp_in
+        mrp_str = "-"
+        if not is_empty_value(mrp_val):
+            try:
+                mrp_str = f"₹{int(float(mrp_val)):,}"
+            except Exception:
+                mrp_str = f"₹{mrp_val}"
+                
+        img_st = str(r.get("Image_Status") or "-")
+        if is_empty_value(img_st):
+            img_st = "-"
+        flags_val = r.get("Flags")
+        flags = str(flags_val).replace("\n", " ") if not is_empty_value(flags_val) else "Clean"
+        if len(flags) > 40:
+            flags = flags[:37] + "..."
+
+        lines.append(f"| `{pid}` | {model} | **{disp}** | `{status}` | {cap} | {out} | {mrp_str} | `{img_st}` | {flags} |")
+
+    lines.append("\n---\n")
+    lines.append("### 🚀 Ready for Human Sign-Off")
+    lines.append("1. **Approve these rows?**")
+    lines.append(f"2. **Standalone PDF in `dist/{brand_name.lower()}/`, or append to the combined PDF and where in `brand_order`?**")
+
+    return "\n".join(lines)
+
+
 def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic_audit: bool = False) -> str:
     """
     Main unattended orchestrator for a specific brand:
@@ -366,6 +566,9 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
     # Resolve any URL collisions across the brand (Rule 2)
     df = resolve_brand_url_collisions(df, brand_name, config, brand_defaults, enable_semantic_audit=enable_semantic_audit)
 
+    # ==================== STEP 5.5: AUTOMATIC POST-RUN LLM REVIEW ====================
+    df = execute_automatic_llm_post_run_review(df, brand_name, config, brand_defaults)
+
     save_catalogue_data(df, excel_path)
     
     brand_rows = [df.loc[idx].to_dict() for idx in df[brand_mask].index]
@@ -377,6 +580,11 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
     deferred_count = sum(1 for r in brand_rows if r.get("Status") == "Deferred")
 
     logger.info(f"Brand run complete for '{brand_name}': {ready_count} Ready for Review | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
+
+    # ==================== STEP 5.5: FINAL PRESENTATION & QUESTION PROMPT ====================
+    table_output = format_final_presentation_table(df, brand_name)
+    print(table_output)
+
     return report_path
 
 

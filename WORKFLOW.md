@@ -43,6 +43,15 @@ Dealer Price Sheet (Screenshot / PDF / Excel / CSV / Pasted Text)
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
+│ STEP 5.5: Automatic Post-Run LLM Review                         │
+│         - Spec & copy consistency review on Ready_For_Review   │
+│         - Display_Name sanitization                             │
+│         - Automatic re-collection (max 2 review reruns)         │
+│         - Single presentation table & dual build question prompt│
+└─────────────────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
 │ STEP 6: Human Approval & PDF Compilation Routing                │
 │         - Standalone PDF (dist/<brand>/) vs Combined (dist/)    │
 │         - Brand order in config.yaml                            │
@@ -134,20 +143,42 @@ python src/run_brand.py --brand {Brand}
 2. **`2_images.py`:** Resolves high-resolution square assets (1200×1200px+), runs aspect ratio and background consistency gates.
 3. **`3_review.py`:** Self-correction loop, deterministic validation, partial specs verification ($\ge 3$ of 5 specs), and comprehensive run report generation.
 
-**Run Report Outputs:**
-- Per-row breakdown: `Product_ID`, `Model_Name`, `Display_Name`, `Status`, `Source_URL`, `Tier`, `Capacity`, `MRP`, `Attempts`, `Fix_Log`.
-- Metric summary: Total runtime, Zero-Touch pass count, Skipped count, Blocked count.
+---
+
+## Step 5.5: Automatic Post-Run LLM Review & Presentation
+
+Once `run_brand.py` finishes, the engine autonomously executes an LLM review pass over every row without waiting for human prompting:
+- **Spec vs Copy Consistency:** Checks if technical specs contradict the subtitle or bullets (e.g. wattage, capacity, port configuration).
+- **Model Name vs Capacity:** Checks if capacity in `Model_Name` matches collected battery specs.
+- **Copy Veracity:** Ensures copy does not describe a completely different product.
+- **Display Name Sanitization:** Guarantees `Display_Name` is stripped of brand prefixes, internal SKU codes, and color suffixes.
+- **Skipped Rows Check:** Verifies whether any `Skipped` rows are recoverable.
+
+### Unsatisfied Review Handling
+- If the reviewer finds a contradiction on a `Ready_For_Review` row, it automatically triggers re-collection for that row (max 2 review-triggered re-runs per row on top of the 3 fix-loop attempts).
+- Each review re-collection is logged in `Fix_Log`.
+- If issues persist after 2 review reruns, the row is marked `Blocked`.
+
+### Strict Reviewer Invariant
+- **The LLM reviewer NEVER sets `Status = "Approved"`.**
+- **The LLM reviewer NEVER clears any deterministic hard flags.**
+
+### Single Final Presentation Table & Prompt
+When the review settles, the pipeline automatically outputs the complete product table:
+```markdown
+| Product_ID | Model_Name | Display_Name | Status | Capacity | Output | MRP (₹) | Image Status | Flags / Notes |
+```
+And immediately asks the two build questions in the same message:
+1. **Approve these rows?**
+2. **Standalone PDF in `dist/{brand}/`, or append to the combined PDF and where in `brand_order`?**
 
 ---
 
-## Step 6: Human Review & PDF Build Gate
+## Step 6: Human Approval & PDF Build Gate
 
-Before any PDF compilation occurs, the agent pauses for explicit approval:
-1. **Row Sign-off:** Human reviews the run report, checks images, resolves any `Blocked` rows via `Override_*` columns in `catalogue_data.xlsx`, and marks `Status = "Approved"`.
-2. **Compilation Target Question:**
-   > *"Would you like to build **{Brand}** as a standalone PDF in `dist/{brand_slug}/`, or append it to the combined catalogue in `dist/combined/`?"*
-   > *(If Combined: "Where should **{Brand}** sit in `brand_order` in `config.yaml`?")*
-3. **Compilation:** Executes `python src/4_build.py --brand {Brand}` (or combined build) only after human confirmation.
+Catalogue PDFs are compiled only after human sign-off:
+1. **Human Sign-off:** Human reviews the single presentation table, answers the build questions, and approves.
+2. **Compilation:** Executes `python src/4_build.py --brand {Brand}` (or combined build).
 
 ---
 

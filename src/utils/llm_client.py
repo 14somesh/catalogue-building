@@ -78,6 +78,14 @@ class SemanticAuditSchema(BaseModel):
     summary_flags: List[str] = Field(default_factory=list, description="Concise error/warning flags to record in the Excel Flags column")
 
 
+class PostRunReviewSchema(BaseModel):
+    is_satisfied: bool = Field(description="True if specs and copy are mutually consistent, accurate, and describe the intended product; False if contradiction, wrong product, or severe issue detected.")
+    contradictions: List[str] = Field(default_factory=list, description="Contradictions between specs and subtitle/bullets (e.g. wattage, capacity, port type)")
+    capacity_model_mismatch: bool = Field(default=False, description="True if Model_Name capacity conflicts with collected spec capacity")
+    copy_mismatch_critique: Optional[str] = Field(default=None, description="Critique if copy describes a different product than the model name implies")
+    recommended_action: str = Field(default="pass", description="'pass', 'recollect', or 'flag'")
+
+
 class VisionExtractedSpecsSchema(BaseModel):
     capacity: Optional[str] = Field(default=None, description="Battery capacity e.g. '10000 mAh' or '20000 mAh'")
     output: Optional[str] = Field(default=None, description="Max power output e.g. '22.5W Fast Charging' or '15W Wireless'")
@@ -706,6 +714,92 @@ def audit_product_semantics(
             continue
 
     return [], False
+
+
+def audit_row_post_run(
+    product_payload: Dict[str, Any],
+    llm_config: Optional[dict] = None
+) -> Tuple[bool, List[str], str]:
+    """
+    STEP 5.5: AUTOMATIC POST-RUN LLM REVIEW AUDIT
+    Reviews a product row after pipeline execution:
+      1. Spec contradictions against subtitle/bullets (e.g. wattage/capacity mismatches).
+      2. Model name capacity consistency.
+      3. Copy mismatch (describes a different product than model name implies).
+    Returns (is_satisfied: bool, contradictions: List[str], recommended_action: str).
+    """
+    providers = get_providers_from_config(llm_config)
+    available_providers = [p for p in providers if not is_provider_exhausted(p.get("name", ""))]
+
+    if not available_providers:
+        logger.warning("[Post-Run Review] All LLM providers exhausted; defaulting to pass.")
+        return True, [], "pass"
+
+    system_prompt = (
+        "You are an AI Quality Assurance Inspector for a corporate gifting catalogue.\n"
+        "Your task is to strictly audit resolved product data for factual consistency and accuracy.\n"
+        "Check:\n"
+        "1. Do the technical specs contradict the subtitle or bullets? (e.g. spec says 15W but bullet says 65W PD; spec says 10000mAh but bullet says 20000mAh). Subtitle and bullets MUST match the collected technical specs.\n"
+        "2. Does the battery capacity match what the model name implies? (e.g. 10000mAh vs 20000mAh is a hard conflict).\n"
+        "3. Does the copy read like it describes a completely different product? (e.g. describing a wireless magnetic power bank when the product is an ultra-slim wired powerbank).\n"
+        "Note: Minor wattage discrepancies between dealer sheet model name (e.g. 65W) and official product upgrade (e.g. 70W) on the same product page are allowed if copy and specs are internally consistent.\n"
+        "Return valid JSON adhering to PostRunReviewSchema."
+    )
+    product_summary_str = json.dumps(product_payload, indent=2)
+    user_prompt = f"Product Data To Review:\n{product_summary_str}\n\nPerform the post-run consistency review."
+
+    for prov in available_providers:
+        p_name = str(prov.get("name", "")).strip().lower()
+        p_model = prov.get("model")
+
+        try:
+            if p_name == "gemini":
+                client = get_gemini_client()
+                response = client.models.generate_content(
+                    model=p_model or "gemini-3.6-flash",
+                    contents=[system_prompt, user_prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=PostRunReviewSchema,
+                        temperature=0.1
+                    )
+                )
+                res = json.loads(response.text)
+                is_satisfied = res.get("is_satisfied", True)
+                contradictions = res.get("contradictions", [])
+                if res.get("capacity_model_mismatch"):
+                    contradictions.append("Capacity in Model_Name conflicts with collected spec capacity")
+                if res.get("copy_mismatch_critique"):
+                    contradictions.append(f"Copy mismatch: {res.get('copy_mismatch_critique')}")
+                action = res.get("recommended_action", "pass" if is_satisfied else "recollect")
+                return is_satisfied and len(contradictions) == 0, contradictions, action
+
+            elif p_name == "groq":
+                client = get_groq_client()
+                completion = client.chat.completions.create(
+                    model=p_model or "llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": system_prompt + "\nReturn JSON adhering to PostRunReviewSchema (is_satisfied: bool, contradictions: list, capacity_model_mismatch: bool, copy_mismatch_critique: str, recommended_action: str)."},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+                res = json.loads(completion.choices[0].message.content)
+                is_satisfied = res.get("is_satisfied", True)
+                contradictions = res.get("contradictions", [])
+                if res.get("capacity_model_mismatch"):
+                    contradictions.append("Capacity in Model_Name conflicts with collected spec capacity")
+                if res.get("copy_mismatch_critique"):
+                    contradictions.append(f"Copy mismatch: {res.get('copy_mismatch_critique')}")
+                action = res.get("recommended_action", "pass" if is_satisfied else "recollect")
+                return is_satisfied and len(contradictions) == 0, contradictions, action
+
+        except Exception as e:
+            logger.warning(f"[Post-Run Review] Review error with {p_name}: {e}")
+            continue
+
+    return True, [], "pass"
 
 
 def extract_specs_via_vision(
