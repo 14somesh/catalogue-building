@@ -247,15 +247,31 @@ def append_products_to_catalogue(
     """Appends the newly onboarded product rows to the master Excel catalogue."""
     df = load_catalogue_data(excel_path)
     
-    # Check if brand rows already exist
+    # Determine the starting sequence number using max + 1 across existing rows for this brand
     existing_brand_mask = df["Brand"].astype(str).str.lower() == inference.brand_name.lower()
-    existing_count = existing_brand_mask.sum()
-    start_seq = existing_count + 1
+    brand_df = df[existing_brand_mask]
+
+    existing_seqs = []
+    for raw_pid in brand_df["Product_ID"].dropna():
+        match = re.search(r"(\d+)$", str(raw_pid).strip())
+        if match:
+            try:
+                existing_seqs.append(int(match.group(1)))
+            except ValueError:
+                continue
+
+    start_seq = max(existing_seqs) + 1 if existing_seqs else 1
+
+    all_existing_pids = set(df["Product_ID"].dropna().astype(str).str.strip())
 
     new_rows = []
     for offset, p in enumerate(inference.products):
         seq = start_seq + offset
         pid = f"PB-{inference.brand_code}-{seq:03d}"
+        
+        # Guard: Fail-fast if generated Product_ID already exists anywhere in the sheet
+        if pid in all_existing_pids:
+            raise ValueError(f"Product_ID collision detected: '{pid}' already exists in {excel_path}")
         
         row_dict = {
             "Product_ID": pid,
