@@ -1,0 +1,366 @@
+:root {
+  /* Design Tokens - Exact UI_SPEC.md values */
+  --amber: #EF9F27;
+  --amber-dark: #BA7517;
+  --amber-deep: #412402;
+  --amber-mid: #633806;
+  --amber-pale: #FAC775;
+  --cream: #FAEEDA;
+  --teal: #0F6E56;
+  --teal-light: #E1F5EE;
+  --teal-pale: #9FE1CB;
+  --red: #A32D2D;
+  --grey-50: #F1EFE8;
+  --grey-400: #888780;
+
+  /* Shell background (outer desktop surround) */
+  --surround-bg: #141413;
+  --panel-radius: 8px;
+  --shell-radius: 12px;
+
+  /* Typography */
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --fs-h1: 22px;
+  --fs-card-title: 15px;
+  --fs-body: 14px;
+  --fs-label: 13px;
+  --fs-table: 12px;
+  --fs-meta: 11px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--surround-bg);
+  color: var(--amber-deep);
+  font-family: var(--font-family);
+  font-size: var(--fs-body);
+  font-weight: 400;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  margin: 0;
+  padding: 24px 16px;
+}
+
+#root {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* Page shell */
+.app-shell {
+  width: 100%;
+  max-width: 960px;
+  border-radius: var(--shell-radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Landing shell has full amber background */
+.app-shell--landing {
+  background-color: var(--amber);
+}
+
+/* Build shell has dark surround background with amber top nav & stepper */
+.app-shell--flow {
+  background-color: transparent;
+}
+
+/* Top Nav */
+.top-nav {
+  background-color: var(--amber);
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  border-top-left-radius: var(--shell-radius);
+  border-top-right-radius: var(--shell-radius);
+  user-select: none;
+}
+
+.top-nav__logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--amber-deep);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.top-nav__logo:hover {
+  opacity: 0.95;
+}
+
+.top-nav__links {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.top-nav__link {
+  color: var(--amber-deep);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  transition: background-color 0.15s ease;
+  cursor: pointer;
+}
+
+.top-nav__link--active {
+  background-color: var(--cream);
+  color: var(--amber-deep);
+}
+
+.top-nav__link:hover:not(.top-nav__link--active) {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Stepper (Sits below top nav in build flow) */
+.stepper-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 24px;
+  color: var(--grey-400);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.stepper-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+
+.stepper-item--current {
+  background-color: var(--amber);
+  color: var(--amber-deep);
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 9999px;
+}
+
+.stepper-item--completed {
+  color: var(--teal);
+  font-weight: 500;
+}
+
+.stepper-item--future {
+  color: var(--grey-400);
+}
+
+.stepper-separator {
+  color: var(--grey-400);
+  font-size: 13px;
+  user-select: none;
+}
+
+/* Landing Page Styles */
+.landing-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px 36px 24px;
+  text-align: center;
+}
+
+.landing-glyphs {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 28px;
+}
+
+.landing-heading {
+  font-size: var(--fs-h1);
+  font-weight: 500;
+  color: var(--amber-deep);
+  margin-bottom: 8px;
+}
+
+.landing-subline {
+  font-size: var(--fs-body);
+  font-weight: 400;
+  color: var(--amber-mid);
+  margin-bottom: 28px;
+  max-width: 440px;
+}
+
+.btn-primary {
+  background-color: var(--teal);
+  color: var(--teal-light);
+  border: none;
+  border-radius: var(--panel-radius);
+  font-family: var(--font-family);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  padding: 10px 24px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: opacity 0.15s ease;
+  text-decoration: none;
+}
+
+.btn-primary:hover {
+  opacity: 0.93;
+}
+
+.btn-primary:active {
+  opacity: 0.85;
+}
+
+.landing-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  width: 100%;
+  max-width: 860px;
+  margin-top: 48px;
+}
+
+.stat-tile {
+  background-color: var(--cream);
+  border-radius: var(--panel-radius);
+  padding: 18px 20px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.stat-tile__number {
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--amber-deep);
+  margin-bottom: 4px;
+  line-height: 1.1;
+}
+
+.stat-tile__label {
+  font-size: var(--fs-label);
+  font-weight: 400;
+  color: var(--amber-deep);
+}
+
+/* How to use page */
+.how-to-use-page {
+  background-color: var(--amber);
+  flex: 1;
+  padding: 32px 36px 48px 36px;
+  display: flex;
+  flex-direction: column;
+  border-bottom-left-radius: var(--shell-radius);
+  border-bottom-right-radius: var(--shell-radius);
+}
+
+.how-to-use-header {
+  font-size: var(--fs-h1);
+  font-weight: 500;
+  color: var(--amber-deep);
+  margin-bottom: 8px;
+}
+
+.how-to-use-intro {
+  font-size: var(--fs-body);
+  color: var(--amber-mid);
+  margin-bottom: 32px;
+}
+
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-bottom: 36px;
+}
+
+.step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.step-circle {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.step-circle--active {
+  background-color: var(--amber-pale);
+  color: var(--amber-deep);
+}
+
+.step-circle--auto {
+  background-color: var(--grey-400);
+  color: var(--grey-50);
+}
+
+.step-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.step-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--amber-deep);
+  margin-bottom: 2px;
+}
+
+.step-desc {
+  font-size: 13px;
+  color: var(--amber-mid);
+}
+
+.callout-box {
+  background-color: var(--cream);
+  border-radius: var(--panel-radius);
+  padding: 16px 20px;
+  font-size: 14px;
+  color: var(--amber-deep);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Stage Flow Placeholder Content for Step 1 */
+.flow-container {
+  padding: 0 0 24px 0;
+}
+
+.stage-panel {
+  background-color: var(--cream);
+  border-radius: var(--panel-radius);
+  padding: 48px 32px;
+  margin: 0 24px;
+  text-align: center;
+  color: var(--amber-deep);
+}
