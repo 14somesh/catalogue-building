@@ -31,11 +31,9 @@ export default function App() {
     }
   };
 
-  const isLanding = route === '/';
-
   return (
-    <div className={`app-shell ${isLanding ? 'app-shell--landing' : 'app-shell--flow'}`}>
-      {/* Persistent Top Nav */}
+    <div className="app-shell">
+      {/* Persistent Full-Width Top Nav */}
       <TopNav currentRoute={route} onNavigate={navigate} />
 
       {/* Screen Routing */}

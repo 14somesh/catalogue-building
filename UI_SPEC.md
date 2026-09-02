@@ -12,6 +12,7 @@ Use these exact values. No other colours.
 
 | Token | Hex | Used for |
 |---|---|---|
+| Page background | `#FDFBF7` | Warm off-white filling entire viewport |
 | Amber | `#EF9F27` | Top nav, stage banners, primary surface |
 | Amber dark | `#BA7517` | Icons and borders on amber |
 | Amber deep | `#412402` | Text on amber |
@@ -26,11 +27,12 @@ Use these exact values. No other colours.
 | Grey 400 | `#888780` | Muted text |
 
 Rules:
+- The page background is `#FDFBF7` (warm off-white), filling the entire viewport. Never dark. App is light only.
 - Amber is the site's identity. Teal is the action colour — every "go forward" button is teal.
 - Text on a coloured background uses the darkest shade of that same colour family. Never black or grey.
 - Two font weights only: 400 and 500. Never 600 or 700.
 - Sentence case everywhere. Never Title Case, never ALL CAPS.
-- Border radius: 8px on panels and buttons, 12px on the outer page container.
+- Border radius: 8px on panels, buttons, tables, and cards. There is no rounded outer page container.
 - No gradients, no drop shadows, no blur.
 - Font sizes: 22px page heading, 15px card title, 14px body, 13px labels, 12px table text, 11px meta. Nothing below 11px.
 
@@ -38,9 +40,13 @@ Rules:
 
 ## 2. Shell
 
-A persistent top nav on every screen, amber background:
-- Left: a small powerbank glyph plus the text `Catalog builder`. Clicking it returns to the landing page.
-- Right: two links only — `Build catalogue` and `How to use`. The active one gets a cream pill background.
+- The app fills the browser window edge to edge. No outer floating card, no outer border radius, no margins.
+- Persistent top nav on every screen, amber background, spanning the full window width edge to edge with no rounded corners and no gap above or beside it:
+  - Left: a small powerbank glyph plus the text `Catalog builder`. Clicking it returns to the landing page.
+  - Right: two links only — `Build catalogue` and `How to use`. The active one gets a cream pill background.
+- Inside the nav and inside each page, centre the content in a container with max-width 1100px and 32px horizontal padding. The background stays full width; only the content is constrained.
+- Content starts 28px below the nav. Pages do not leave a large empty void below the content — the `#FDFBF7` page background fills it naturally.
+- Default route: opening the app lands on `/` (the landing page), not `/build`.
 
 There is no "Welcome" nav link. The landing page is reached via the logo.
 
@@ -60,12 +66,13 @@ Within `/build`, the stage is app state, not a URL. Refreshing returns to the cu
 
 ## 4. Landing page
 
-Full amber background. Centred:
-- Three powerbank glyphs, the middle one teal and taller, the outer two smaller and pale.
-- Heading: `Welcome to catalogue builder`
-- Subline: `Hand over a price sheet. Get back a print-ready catalogue.`
-- One teal button: `Start building` → routes to `/build`
-- Below, three cream stat tiles: brands live, products, pages built. Pull real numbers from `GET /brands` and `GET /builds`.
+- The amber landing section spans the full window width, edge to edge, directly below the nav. Vertical padding 64px top and 72px bottom.
+- Centred within the 1100px container:
+  - Three powerbank glyphs, the middle one teal and taller, the outer two smaller and pale.
+  - Heading: `Welcome to catalogue builder`
+  - Subline: `Hand over a price sheet. Get back a print-ready catalogue.`
+  - One teal button: `Start building` → routes to `/build`
+  - Below, three cream stat tiles: brands live, products, pages built. Pull real numbers from `GET /brands` and `GET /builds`.
 
 ---
 

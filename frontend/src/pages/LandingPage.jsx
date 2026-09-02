@@ -31,7 +31,7 @@ export function LandingPage({ onStartBuilding }) {
 
         if (isMounted) {
           const brandsLive = brandsData.length;
-          // Count approved products across brands (or total if none approved)
+          // Count approved products across brands
           const approvedProducts = brandsData.reduce(
             (sum, b) => sum + (b.status_counts?.Approved || 0),
             0
@@ -68,48 +68,52 @@ export function LandingPage({ onStartBuilding }) {
   }, []);
 
   return (
-    <main className="landing-content">
-      {/* Centered Trio of Powerbank Glyphs */}
-      <LandingPowerbankTrio />
+    <section className="landing-section">
+      <div className="content-container">
+        <main className="landing-content">
+          {/* Centered Trio of Powerbank Glyphs */}
+          <LandingPowerbankTrio />
 
-      {/* Heading & Subline */}
-      <h1 className="landing-heading">Welcome to catalogue builder</h1>
-      <p className="landing-subline">
-        Hand over a price sheet. Get back a print-ready catalogue.
-      </p>
+          {/* Heading & Subline */}
+          <h1 className="landing-heading">Welcome to catalogue builder</h1>
+          <p className="landing-subline">
+            Hand over a price sheet. Get back a print-ready catalogue.
+          </p>
 
-      {/* One Teal Action Button */}
-      <button
-        type="button"
-        className="btn-primary"
-        onClick={onStartBuilding}
-      >
-        Start building
-      </button>
+          {/* One Teal Action Button */}
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={onStartBuilding}
+          >
+            Start building
+          </button>
 
-      {/* Three Cream Stat Tiles */}
-      <div className="landing-stats">
-        <div className="stat-tile">
-          <div className="stat-tile__number">
-            {stats.loading ? '—' : stats.brandsLive}
+          {/* Three Cream Stat Tiles */}
+          <div className="landing-stats">
+            <div className="stat-tile">
+              <div className="stat-tile__number">
+                {stats.loading ? '—' : stats.brandsLive}
+              </div>
+              <div className="stat-tile__label">brands live</div>
+            </div>
+
+            <div className="stat-tile">
+              <div className="stat-tile__number">
+                {stats.loading ? '—' : stats.products}
+              </div>
+              <div className="stat-tile__label">products</div>
+            </div>
+
+            <div className="stat-tile">
+              <div className="stat-tile__number">
+                {stats.loading ? '—' : stats.pagesBuilt}
+              </div>
+              <div className="stat-tile__label">pages built</div>
+            </div>
           </div>
-          <div className="stat-tile__label">brands live</div>
-        </div>
-
-        <div className="stat-tile">
-          <div className="stat-tile__number">
-            {stats.loading ? '—' : stats.products}
-          </div>
-          <div className="stat-tile__label">products</div>
-        </div>
-
-        <div className="stat-tile">
-          <div className="stat-tile__number">
-            {stats.loading ? '—' : stats.pagesBuilt}
-          </div>
-          <div className="stat-tile__label">pages built</div>
-        </div>
+        </main>
       </div>
-    </main>
+    </section>
   );
 }
