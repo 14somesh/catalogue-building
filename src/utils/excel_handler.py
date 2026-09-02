@@ -252,8 +252,15 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
         if not is_empty_value(b_val):
             bullets.append(str(b_val).strip())
 
-    display_name_val = get_effective_value(row_dict, "Display_Name")
-    effective_display_name = str(display_name_val).strip() if display_name_val and not is_empty_value(display_name_val) else model_name
+    # Card title resolution chain: Override_Title > Display_Name > Model_Name
+    override_title = row_dict.get("Override_Title")
+    display_name_val = row_dict.get("Display_Name")
+    if not is_empty_value(override_title):
+        effective_display_name = str(override_title).strip()
+    elif not is_empty_value(display_name_val):
+        effective_display_name = str(display_name_val).strip()
+    else:
+        effective_display_name = model_name
     
     # MRP display precedence: MRP_Display (human override) -> Raw_MRP_Scraped
     mrp_display_val = get_effective_value(row_dict, "MRP_Display")
