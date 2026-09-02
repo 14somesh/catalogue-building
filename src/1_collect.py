@@ -412,13 +412,6 @@ def execute_spec_escalation(
             else:
                 logger.warning(f"[{product_id}] Tier 3 {retail_store} failed. Trying next retail...")
 
-    # ==================== TIER 4: Local PDF / Direct Specs Fallback ====================
-    pdf_path = brand_cfg.get("brochure_path") or f"data/brochures/{brand.lower()}.pdf"
-    if os.path.exists(pdf_path):
-        logger.info(f"[{product_id}] Executing Tier 4 (Local PDF Brochure): {pdf_path}")
-        pdf_res = extract_text_from_pdf(pdf_path)
-        if pdf_res.get("text"):
-            pass
 
     if combined_res is not None and combined_res.specs:
         logger.warning(f"[{product_id}] All spec tiers exhausted. Returning partial specs collected via {combined_provenance}.")
