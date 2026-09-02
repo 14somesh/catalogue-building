@@ -551,7 +551,6 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         "Source_Bullet_4": source_url,
         "Tier_Bullet_4": tier,
         "LLM_Provider": provider_used,
-        "Status": "Collected",
         "Flags": None,
         "Fix_Log": f"Collected via {provenance}"
     }
@@ -581,8 +580,8 @@ def run_collection(config_path: str = "config.yaml", target_pids: Optional[list]
         if target_pids and pid not in target_pids:
             continue
 
-        # Skip approved or collected rows
-        if status in ("Approved", "Collected", "Ready_For_Review") and not target_pids:
+        # Skip approved or ready-for-review rows
+        if status in ("Approved", "Ready_For_Review") and not target_pids:
             continue
 
         updates, success, msg = collect_data_for_row(row.to_dict(), config)

@@ -184,6 +184,15 @@ Catalogue PDFs are compiled only after human sign-off:
 1. **Human Sign-off:** Human reviews the single presentation table, answers the build questions, and approves.
 2. **Compilation:** Executes `python src/4_build.py --brand {Brand}` (or combined build).
 
+### Canonical Lifecycle Statuses
+The workflow strictly recognizes 6 canonical statuses:
+- `Pending`: Freshly ingested or manually reset row awaiting collection.
+- `Ready_For_Review`: Passed deterministic checks and studio image audit; ready for human sign-off.
+- `Approved`: Human sign-off granted. **Only rows in this status are compiled into PDFs.**
+- `Blocked`: Unresolved contradiction (qualifier mismatch, duplicate image hash). Needs human attention.
+- `Skipped`: Data exhausted (fewer than 3 specs across all tiers). Excluded from PDF build.
+- `Deferred`: Temporary quota / rate-limit 429 block. Preserves raw fields for retry on next run.
+
 ---
 
 ## Unchanged Core Invariants

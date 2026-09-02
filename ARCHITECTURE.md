@@ -233,11 +233,20 @@ The master workbook contains a single worksheet named `CatalogueData` with a str
 | `Override_Bullet_4` | String | Human Reviewer | Manual override for Bullet 4 |
 | `Override_Image_Path` | String | Human Reviewer | Escape hatch path for non-standard local image |
 | `Flags` | String | Script (`3_validate`) | Comma-separated diagnostic and validation flags |
-| `Status` | Enum | System / Human | `Pending` \| `Collected` \| `Blocked` \| `Ready_For_Review` \| `Approved` |
+| `Status` | Enum | System / Human | `Pending` \| `Ready_For_Review` \| `Approved` \| `Blocked` \| `Skipped` \| `Deferred` |
 
----
+### Canonical Row Statuses & Lifecycle Transitions
 
-## 6. Directory Structure
+The catalogue state machine supports exactly 6 canonical statuses. Legacy transitional statuses (such as `Collected`) are strictly forbidden.
+
+| Status | Set By | Description | Valid Transitions To |
+|---|---|---|---|
+| `Pending` | Ingestion (`onboard_brand.py`) / Human reset | Freshly ingested row awaiting collection, or row manually reset for re-scraping. | `Ready_For_Review`, `Blocked`, `Skipped`, `Deferred` |
+| `Ready_For_Review` | Review loop (`3_review.py`) | All deterministic hard checks passed, partial-data policy satisfied ($\ge 3/5$ specs), studio packshot audited ($\ge 8/10$). | `Approved`, `Pending`, `Blocked` |
+| `Approved` | **Human Operator Only** | Verified by human review. **Only rows in `Approved` status are compiled into PDFs.** | `Pending` (if manually reverted) |
+| `Blocked` | Review loop (`3_review.py`) | Contradiction detected (qualifier mismatch, duplicate image hash, SKU part mismatch). Raw fields wiped. | `Pending` (after human fixes URL/data) |
+| `Skipped` | Tier 4 auto-skip (`1_collect.py` / `3_review.py`) | Data exhausted (fewer than 3 specs across all tiers). Excluded from PDF build. | `Pending` (if URL/override provided) |
+| `Deferred` | Collector (`1_collect.py`) / LLM chain | Transient infrastructure failure (API rate limit 429). Specs preserved for automatic retry. | `Pending` (on next run) |
 
 ```
 Vianet Catalogue/
