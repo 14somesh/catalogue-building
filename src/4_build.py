@@ -350,6 +350,11 @@ def build_catalogue_pdf(
             else:
                 mrp_display_str = None
 
+            raw_model = prod.get("model_name", "")
+            display_name = prod.get("display_name") or raw_model
+            subtitle_val = prod.get("subtitle", "")
+            bullets_list = prod.get("bullets", [])
+
             prod_ctx = {
                 "product_id": prod.get("product_id") or row.get("Product_ID"),
                 "index": f"{idx_in_brand:02d}",
