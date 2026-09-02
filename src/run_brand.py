@@ -513,12 +513,58 @@ def format_final_presentation_table(df: pd.DataFrame, brand_name: str, category:
     return "\n".join(lines)
 
 
+def derive_failure_reason(row: Dict[str, Any]) -> Optional[str]:
+    """
+    Derives a plain-language human-readable reason for a row that ended Blocked, Skipped, or Deferred.
+    Returns None for Approved or Ready_For_Review rows.
+    """
+    status = str(row.get("Status", "")).strip()
+    if status in ("Approved", "Ready_For_Review"):
+        return None
+
+    flags = str(row.get("Flags", "")).strip().lower()
+    fix_log = str(row.get("Fix_Log", "")).strip().lower()
+    combined = f"{flags} {fix_log}"
+
+    if "bot challenge" in combined or "403" in combined or "blocked by bot" in combined:
+        return "Site blocked the request"
+    if "exceeded maximum retry" in combined or "attempts exhausted" in combined:
+        return "Exceeded maximum retry attempts"
+    if "insufficient specs" in combined or "specs incomplete" in combined or "partial specs" in combined:
+        return "Specs incomplete after all sources"
+    if "all spec tiers exhausted" in combined or "no verified technical specs" in combined:
+        return "No technical specifications found across available sources"
+    if "no standalone listing" in combined or "bundled" in combined or "accessory" in combined:
+        return "No standalone listing found"
+    if "delisted" in combined or "404" in combined or "not found" in combined:
+        return "Product page delisted or not found"
+    if "duplicate" in combined:
+        return "Duplicate product model"
+    if "image missing" in combined or "no image found" in combined:
+        return "Product image not found after all tiers"
+    if "deferred" in status.lower() or "manual review" in combined:
+        return "Deferred for manual verification"
+    if "semantic audit" in combined or "hallucination" in combined:
+        return "Failed automated semantic consistency check"
+
+    clean_flag = str(row.get("Flags", "")).strip()
+    if clean_flag and clean_flag.lower() not in ("nan", "none", "clean", "-"):
+        clean_flag = re.sub(r"^(Skipped|Blocked|Hard Block|Deferred)\s*:\s*", "", clean_flag, flags=re.IGNORECASE)
+        sentence = clean_flag.split(".")[0].strip()
+        if len(sentence) > 80:
+            sentence = sentence[:77] + "..."
+        return sentence
+
+    return "Collection incomplete"
+
+
 def run_brand(
     brand_name: str,
     config_path: str = "config.yaml",
     enable_semantic_audit: bool = False,
     return_summary: bool = False,
-    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    check_cancellation: Optional[Callable[[], bool]] = None
 ) -> Union[str, Dict[str, Any]]:
     """
     Main unattended orchestrator for a specific brand:
@@ -592,7 +638,7 @@ def run_brand(
     logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products, semantic audit={enable_semantic_audit})...")
     brand_defaults = load_brand_defaults(brand_name)
     all_rows = [row.to_dict() for _, row in df.iterrows()]
-
+    cancelled_early = False
     for i, idx in enumerate(brand_indices, 1):
         row_dict = df.loc[idx].to_dict()
         pid = row_dict.get("Product_ID")
@@ -615,6 +661,10 @@ def run_brand(
             )
             for k, v in processed_row.items():
                 df.at[idx, k] = v
+            
+            # Incremental save so completed rows keep their data
+            save_catalogue_data(df, excel_path)
+
             if progress_callback:
                 progress_callback({
                     "stage": "row_done",
@@ -623,6 +673,12 @@ def run_brand(
                     "total": total_brand_rows,
                     "message": f"Finished product {i}/{total_brand_rows}: {pid} -> {processed_row.get('Status')}"
                 })
+
+            if check_cancellation and check_cancellation():
+                logger.info(f"Cancellation detected for brand '{brand_name}'. Halting collection after row {pid}.")
+                cancelled_early = True
+                break
+
         except AllLLMProvidersExhaustedError as e:
             logger.error(f"[Pipeline HALT] {e}")
             if not return_summary:
@@ -637,6 +693,56 @@ def run_brand(
                 "table_markdown": "",
                 "halt_reason": str(e)
             }
+
+    if cancelled_early:
+        logger.info(f"Collection gracefully stopped for brand '{brand_name}' due to cancellation request.")
+        brand_rows = [df.loc[b_idx].to_dict() for b_idx in df[brand_mask].index]
+        per_row_results = []
+        for r in brand_rows:
+            tier_val = r.get("Tier_Title") or r.get("Tier_Spec_Capacity") or 1
+            per_row_results.append({
+                "Product_ID": r.get("Product_ID"),
+                "Model_Name": r.get("Model_Name"),
+                "Display_Name": r.get("Display_Name"),
+                "Status": r.get("Status"),
+                "Source_URL": r.get("Source_URL"),
+                "Tier": tier_val,
+                "Image_Status": r.get("Image_Status", "missing"),
+                "Attempts": r.get("Attempts", 0),
+                "Fix_Log": r.get("Fix_Log"),
+                "Flags": r.get("Flags"),
+                "Failure_Reason": derive_failure_reason(r)
+            })
+
+        counts = {
+            "ready_count": sum(1 for r in brand_rows if r.get("Status") == "Ready_For_Review"),
+            "approved_count": sum(1 for r in brand_rows if r.get("Status") == "Approved"),
+            "blocked_count": sum(1 for r in brand_rows if r.get("Status") == "Blocked"),
+            "skipped_count": sum(1 for r in brand_rows if r.get("Status") == "Skipped"),
+            "deferred_count": sum(1 for r in brand_rows if r.get("Status") == "Deferred"),
+            "pending_count": sum(1 for r in brand_rows if r.get("Status") == "Pending"),
+            "total_count": len(brand_rows)
+        }
+
+        if progress_callback:
+            progress_callback({
+                "stage": "cancelled",
+                "product_id": None,
+                "current": i,
+                "total": total_brand_rows,
+                "message": f"Job cancelled. Completed {i}/{total_brand_rows} rows. Remaining rows stay Pending."
+            })
+
+        return {
+            "brand": brand_name,
+            "report_path": "",
+            "runtime": round(time.time() - start_time, 2),
+            "status_counts": counts,
+            "rows": per_row_results,
+            "table_markdown": "",
+            "cancelled": True,
+            "halt_reason": f"Job cancelled by user after row {i}/{total_brand_rows}"
+        }
 
     # Resolve any URL collisions across the brand (Rule 2)
     if progress_callback:
@@ -702,9 +808,11 @@ def run_brand(
             "Status": r.get("Status"),
             "Source_URL": r.get("Source_URL"),
             "Tier": tier_val,
-            "Attempts": r.get("Attempts"),
+            "Image_Status": r.get("Image_Status", "missing"),
+            "Attempts": r.get("Attempts", 0),
             "Fix_Log": r.get("Fix_Log"),
             "Flags": r.get("Flags"),
+            "Failure_Reason": derive_failure_reason(r)
         })
 
     status_counts = {
@@ -820,6 +928,7 @@ def re_run_product(
             "message": f"Single-product re-run complete for {product_id} -> {processed_row.get('Status')}"
         })
 
+    processed_row["Failure_Reason"] = derive_failure_reason(processed_row)
     return processed_row
 
 

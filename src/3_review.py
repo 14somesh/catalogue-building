@@ -224,8 +224,14 @@ def process_row_loop(
         images_dir = config.get("paths", {}).get("images_dir", "images")
         img_path = resolve_product_image_path(current_row, images_dir=images_dir)
         img_url = current_row.get("Image_URL")
+        img_url = str(img_url).strip() if not is_empty_value(img_url) else None
+
         prod_url = current_row.get("Source_URL") or current_row.get("Product_URL")
+        prod_url = str(prod_url).strip() if not is_empty_value(prod_url) else None
+
         mp_url = current_row.get("Marketplace_URL")
+        mp_url = str(mp_url).strip() if not is_empty_value(mp_url) else None
+
         img_status, img_source, img_tier = execute_image_tier_escalation(
             pid, current_row.get("Brand", ""), current_row.get("Model_Name", ""),
             img_url, mp_url, img_path, product_page_url=prod_url

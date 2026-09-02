@@ -5,16 +5,17 @@ import uuid
 import time
 import sqlite3
 import threading
+import asyncio
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Set, Union
+from contextlib import contextmanager
 
 from src.utils.logger import setup_logger
-
-from contextlib import contextmanager
 
 logger = setup_logger("jobs")
 
 DEFAULT_DB_PATH = "data/jobs.db"
+SUPPORTED_JOB_TYPES = {"ingest", "confirm", "collect", "build", "retry", "rerun_product", "manual_source"}
 
 
 class BrandLockedError(Exception):
@@ -39,6 +40,150 @@ def get_db_connection(db_path: str = DEFAULT_DB_PATH):
             pass
 
 
+# ==================== LIVE SSE EVENT BROADCASTING ====================
+
+_job_subscribers: Dict[str, List[asyncio.Queue]] = {}
+_subscribers_lock = threading.Lock()
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def set_main_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Registers the running asyncio event loop for thread-safe event emission."""
+    global _main_loop
+    _main_loop = loop
+
+
+def register_subscriber(job_id: str) -> asyncio.Queue:
+    """Registers an async queue to receive real-time progress events for a job."""
+    q = asyncio.Queue()
+    with _subscribers_lock:
+        if job_id not in _job_subscribers:
+            _job_subscribers[job_id] = []
+        _job_subscribers[job_id].append(q)
+    return q
+
+
+def unregister_subscriber(job_id: str, q: asyncio.Queue) -> None:
+    """Unregisters an async queue."""
+    with _subscribers_lock:
+        if job_id in _job_subscribers and q in _job_subscribers[job_id]:
+            _job_subscribers[job_id].remove(q)
+            if not _job_subscribers[job_id]:
+                del _job_subscribers[job_id]
+
+
+def broadcast_job_event(job_id: str, event: Dict[str, Any]) -> None:
+    """Broadcasts a progress or terminal event to all connected SSE clients."""
+    with _subscribers_lock:
+        queues = list(_job_subscribers.get(job_id, []))
+    if not queues:
+        return
+
+    for q in queues:
+        if _main_loop and _main_loop.is_running():
+            try:
+                _main_loop.call_soon_threadsafe(q.put_nowait, event)
+            except Exception:
+                pass
+        else:
+            try:
+                q.put_nowait(event)
+            except Exception:
+                pass
+
+
+# ==================== CANCELLATION TRACKING ====================
+
+_cancelled_jobs: Set[str] = set()
+_cancelled_jobs_lock = threading.Lock()
+
+
+def is_job_cancellation_requested(job_id: str) -> bool:
+    """Checks if a cancellation request has been registered for a running job."""
+    with _cancelled_jobs_lock:
+        return job_id in _cancelled_jobs
+
+
+def request_job_cancellation(job_id: str, db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:
+    """
+    Cancels a queued job outright, or requests graceful cancellation for a running job
+    after its current row completes execution.
+    """
+    with get_db_connection(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, status, brand, job_type FROM jobs WHERE id = ?", (job_id,))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Job '{job_id}' not found.")
+
+        current_status = row["status"]
+        if current_status in ("done", "failed", "cancelled"):
+            return {
+                "job_id": job_id,
+                "status": current_status,
+                "message": f"Job '{job_id}' has already finished with status '{current_status}'."
+            }
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if current_status == "queued":
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled',
+                    error = 'Job cancelled by user before execution started.',
+                    finished_at = ?
+                WHERE id = ?
+                """,
+                (now_iso, job_id)
+            )
+            conn.commit()
+            broadcast_job_event(job_id, {
+                "stage": "terminal",
+                "status": "cancelled",
+                "product_id": None,
+                "current": 0,
+                "total": 0,
+                "message": "Job cancelled by user before execution started."
+            })
+            logger.info(f"Queued job '{job_id}' was cancelled before start.")
+            return {
+                "job_id": job_id,
+                "status": "cancelled",
+                "message": "Queued job was cancelled immediately."
+            }
+
+        elif current_status == "running":
+            with _cancelled_jobs_lock:
+                _cancelled_jobs.add(job_id)
+            conn.execute(
+                """
+                UPDATE jobs
+                SET message = 'Cancellation requested by user. Halting after current row finishes.'
+                WHERE id = ?
+                """,
+                (job_id,)
+            )
+            conn.commit()
+            broadcast_job_event(job_id, {
+                "stage": "cancel_requested",
+                "status": "running",
+                "product_id": None,
+                "current": 0,
+                "total": 0,
+                "message": "Cancellation requested. Worker will halt gracefully after current row."
+            })
+            logger.info(f"Cancellation requested for running job '{job_id}'.")
+            return {
+                "job_id": job_id,
+                "status": "cancel_requested",
+                "message": "Cancellation requested. Worker will halt after the current row completes."
+            }
+
+    return {"job_id": job_id, "status": "unknown", "message": "Unable to determine cancellation state."}
+
+
+# ==================== DATABASE INITIALIZATION ====================
+
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     """
     Initializes the SQLite schema and performs startup crash recovery:
@@ -56,6 +201,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
                 message TEXT DEFAULT '',
                 result_json TEXT,
                 error TEXT,
+                payload_json TEXT,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 finished_at TEXT
@@ -98,13 +244,13 @@ def enqueue_job(
     Enqueues a job in the SQLite store with Brand Lock enforcement.
     Rejects the job if another job is already queued or running for the same brand.
     """
-    if job_type not in ("ingest", "confirm", "collect", "build"):
-        raise ValueError(f"Unsupported job_type: '{job_type}'. Must be ingest, confirm, collect, or build.")
+    if job_type not in SUPPORTED_JOB_TYPES:
+        types_str = ", ".join(sorted(SUPPORTED_JOB_TYPES))
+        raise ValueError(f"Unsupported job_type: '{job_type}'. Allowed types: {types_str}")
 
     norm_brand = brand.strip() if brand and brand.strip() else None
 
     with get_db_connection(db_path) as conn:
-        # Atomic lock check using IMMEDIATE transaction
         conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -129,7 +275,6 @@ def enqueue_job(
             uid = uuid.uuid4().hex[:8]
             job_id = f"job_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uid}"
 
-            # Store payload in payload_json
             payload_str = json.dumps(payload) if payload else None
 
             conn.execute(
@@ -154,7 +299,7 @@ def enqueue_job(
 
 
 def get_job(job_id: str, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
-    """Fetches a job record by ID."""
+    """Returns a single job dictionary by ID, parsing result_json if present."""
     with get_db_connection(db_path) as conn:
         cur = conn.cursor()
         cur.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
@@ -197,9 +342,11 @@ def update_job_progress(
     current: int,
     total: int,
     message: str,
+    stage: str = "progress",
+    product_id: Optional[str] = None,
     db_path: str = DEFAULT_DB_PATH
 ) -> None:
-    """Updates progress fields for a running job."""
+    """Updates progress fields for a running job and broadcasts live SSE event."""
     with get_db_connection(db_path) as conn:
         conn.execute(
             """
@@ -213,6 +360,14 @@ def update_job_progress(
         )
         conn.commit()
 
+    broadcast_job_event(job_id, {
+        "stage": stage,
+        "product_id": product_id,
+        "current": current,
+        "total": total,
+        "message": message
+    })
+
 
 # ==================== SINGLE BACKGROUND WORKER ====================
 
@@ -222,7 +377,7 @@ _worker_event = threading.Event()
 
 
 def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
-    """Executes a single claimed job to completion."""
+    """Executes a single claimed job to completion with live progress and cancellation checking."""
     job_id = job["id"]
     job_type = job["job_type"]
     brand = job["brand"]
@@ -234,6 +389,8 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 current=event.get("current", 0),
                 total=event.get("total", 0),
                 message=event.get("message", ""),
+                stage=event.get("stage", "progress"),
+                product_id=event.get("product_id"),
                 db_path=db_path
             )
         except Exception as err:
@@ -245,13 +402,314 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             from src.run_brand import run_brand
             if not brand:
                 raise ValueError("Job type 'collect' requires a brand name.")
+
             result = run_brand(
                 brand_name=brand,
                 return_summary=True,
-                progress_callback=progress_cb
+                progress_callback=progress_cb,
+                check_cancellation=lambda: is_job_cancellation_requested(job_id)
             )
+
+            if isinstance(result, dict) and result.get("cancelled"):
+                now_iso = datetime.now(timezone.utc).isoformat()
+                with get_db_connection(db_path) as conn:
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET status = 'cancelled',
+                            result_json = ?,
+                            error = ?,
+                            finished_at = ?
+                        WHERE id = ?
+                        """,
+                        (json.dumps(result), result.get("halt_reason", "Job cancelled by user."), now_iso, job_id)
+                    )
+                    conn.commit()
+                with _cancelled_jobs_lock:
+                    _cancelled_jobs.discard(job_id)
+                broadcast_job_event(job_id, {
+                    "stage": "terminal",
+                    "status": "cancelled",
+                    "product_id": None,
+                    "current": result.get("status_counts", {}).get("total_count", 0),
+                    "total": result.get("status_counts", {}).get("total_count", 0),
+                    "message": result.get("halt_reason", "Job cancelled by user."),
+                    "result": result
+                })
+                logger.info(f"Job '{job_id}' gracefully cancelled.")
+                return
+
             if isinstance(result, dict) and result.get("halt_reason"):
                 raise RuntimeError(f"Collection halted: {result['halt_reason']}")
+
+        elif job_type == "retry":
+            from src.run_brand import re_run_product, derive_failure_reason
+            from src.utils.excel_handler import load_catalogue_data_readonly
+
+            if not brand:
+                raise ValueError("Job type 'retry' requires a brand name.")
+
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                try:
+                    payload = json.loads(job["payload_json"])
+                except Exception:
+                    pass
+
+            specified_pids = payload.get("product_ids") or []
+            df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+            brand_mask = df["Brand"].astype(str).str.lower() == brand.lower()
+
+            if specified_pids:
+                spec_set = set(str(p).strip().lower() for p in specified_pids)
+                target_df = df[brand_mask & df["Product_ID"].astype(str).str.lower().isin(spec_set)]
+            else:
+                target_df = df[brand_mask & df["Status"].isin(["Blocked", "Skipped", "Deferred"])]
+
+            target_pids = target_df["Product_ID"].tolist()
+            total = len(target_pids)
+            retried_rows = []
+            cancelled_early = False
+            start_time = time.time()
+
+            logger.info(f"Job '{job_id}' retrying {total} failed rows for brand '{brand}': {target_pids}")
+
+            for idx, pid in enumerate(target_pids, 1):
+                if is_job_cancellation_requested(job_id):
+                    cancelled_early = True
+                    break
+
+                progress_cb({
+                    "stage": "row_start",
+                    "product_id": pid,
+                    "current": idx,
+                    "total": total,
+                    "message": f"Retrying product {idx}/{total}: {pid}"
+                })
+
+                try:
+                    updated_row = re_run_product(
+                        product_id=pid,
+                        progress_callback=lambda evt: progress_cb({
+                            "stage": evt.get("stage", "row_progress"),
+                            "product_id": pid,
+                            "current": idx,
+                            "total": total,
+                            "message": f"[{pid}] {evt.get('message', '')}"
+                        })
+                    )
+                    tier_val = updated_row.get("Tier_Title") or updated_row.get("Tier_Spec_Capacity") or 1
+                    retried_rows.append({
+                        "Product_ID": updated_row.get("Product_ID"),
+                        "Model_Name": updated_row.get("Model_Name"),
+                        "Display_Name": updated_row.get("Display_Name"),
+                        "Status": updated_row.get("Status"),
+                        "Source_URL": updated_row.get("Source_URL"),
+                        "Tier": tier_val,
+                        "Image_Status": updated_row.get("Image_Status", "missing"),
+                        "Attempts": updated_row.get("Attempts", 0),
+                        "Fix_Log": updated_row.get("Fix_Log"),
+                        "Flags": updated_row.get("Flags"),
+                        "Failure_Reason": derive_failure_reason(updated_row)
+                    })
+                except Exception as row_err:
+                    logger.error(f"Failed to retry product '{pid}': {row_err}")
+
+                progress_cb({
+                    "stage": "row_done",
+                    "product_id": pid,
+                    "current": idx,
+                    "total": total,
+                    "message": f"Completed retry {idx}/{total}: {pid}"
+                })
+
+                if is_job_cancellation_requested(job_id):
+                    cancelled_early = True
+                    break
+
+            runtime = round(time.time() - start_time, 2)
+            counts = {
+                "ready_count": sum(1 for r in retried_rows if r.get("Status") == "Ready_For_Review"),
+                "approved_count": sum(1 for r in retried_rows if r.get("Status") == "Approved"),
+                "blocked_count": sum(1 for r in retried_rows if r.get("Status") == "Blocked"),
+                "skipped_count": sum(1 for r in retried_rows if r.get("Status") == "Skipped"),
+                "deferred_count": sum(1 for r in retried_rows if r.get("Status") == "Deferred"),
+                "total_count": len(retried_rows)
+            }
+
+            result = {
+                "brand": brand,
+                "runtime": runtime,
+                "status_counts": counts,
+                "rows": retried_rows,
+                "retried_count": len(retried_rows),
+                "total_targeted": total
+            }
+
+            if cancelled_early:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                with get_db_connection(db_path) as conn:
+                    conn.execute(
+                        """
+                        UPDATE jobs
+                        SET status = 'cancelled',
+                            result_json = ?,
+                            error = ?,
+                            finished_at = ?
+                        WHERE id = ?
+                        """,
+                        (json.dumps(result), "Job cancelled by user during retry execution.", now_iso, job_id)
+                    )
+                    conn.commit()
+                with _cancelled_jobs_lock:
+                    _cancelled_jobs.discard(job_id)
+                broadcast_job_event(job_id, {
+                    "stage": "terminal",
+                    "status": "cancelled",
+                    "product_id": None,
+                    "current": len(retried_rows),
+                    "total": total,
+                    "message": "Retry job cancelled by user.",
+                    "result": result
+                })
+                return
+
+        elif job_type == "rerun_product":
+            from src.run_brand import re_run_product, derive_failure_reason
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                try:
+                    payload = json.loads(job["payload_json"])
+                except Exception:
+                    pass
+
+            pid = payload.get("product_id")
+            if not pid:
+                raise ValueError("Job type 'rerun_product' requires 'product_id'.")
+
+            progress_cb({
+                "stage": "row_start",
+                "product_id": pid,
+                "current": 1,
+                "total": 1,
+                "message": f"Starting single product re-run for {pid}"
+            })
+
+            updated_row = re_run_product(
+                product_id=pid,
+                progress_callback=lambda evt: progress_cb({
+                    "stage": evt.get("stage", "row_progress"),
+                    "product_id": pid,
+                    "current": 1,
+                    "total": 1,
+                    "message": evt.get("message", "")
+                })
+            )
+
+            tier_val = updated_row.get("Tier_Title") or updated_row.get("Tier_Spec_Capacity") or 1
+            row_summary = {
+                "Product_ID": updated_row.get("Product_ID"),
+                "Model_Name": updated_row.get("Model_Name"),
+                "Display_Name": updated_row.get("Display_Name"),
+                "Status": updated_row.get("Status"),
+                "Source_URL": updated_row.get("Source_URL"),
+                "Tier": tier_val,
+                "Image_Status": updated_row.get("Image_Status", "missing"),
+                "Attempts": updated_row.get("Attempts", 0),
+                "Fix_Log": updated_row.get("Fix_Log"),
+                "Flags": updated_row.get("Flags"),
+                "Failure_Reason": derive_failure_reason(updated_row)
+            }
+
+            result = {
+                "product_id": pid,
+                "brand": brand,
+                "updated_row": row_summary
+            }
+
+        elif job_type == "manual_source":
+            from src.run_brand import re_run_product, derive_failure_reason
+            from src.utils.excel_handler import load_catalogue_data, save_catalogue_data
+
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                try:
+                    payload = json.loads(job["payload_json"])
+                except Exception:
+                    pass
+
+            pid = payload.get("product_id")
+            source_url = payload.get("url")
+            if not pid or not source_url:
+                raise ValueError("Job type 'manual_source' requires 'product_id' and 'url'.")
+
+            progress_cb({
+                "stage": "manual_source_set",
+                "product_id": pid,
+                "current": 1,
+                "total": 1,
+                "message": f"Setting Product_URL for {pid} to: {source_url}"
+            })
+
+            excel_path = "data/catalogue_data.xlsx"
+            df = load_catalogue_data(excel_path)
+            mask = df["Product_ID"].astype(str).str.lower() == pid.strip().lower()
+            if not mask.any():
+                raise ValueError(f"Product_ID '{pid}' not found in {excel_path}")
+            df.loc[mask, "Product_URL"] = source_url
+            save_catalogue_data(df, excel_path)
+
+            progress_cb({
+                "stage": "row_start",
+                "product_id": pid,
+                "current": 1,
+                "total": 1,
+                "message": f"Re-running product {pid} using provided manual URL"
+            })
+
+            updated_row = re_run_product(
+                product_id=pid,
+                progress_callback=lambda evt: progress_cb({
+                    "stage": evt.get("stage", "row_progress"),
+                    "product_id": pid,
+                    "current": 1,
+                    "total": 1,
+                    "message": evt.get("message", "")
+                })
+            )
+
+            tier_val = updated_row.get("Tier_Title") or updated_row.get("Tier_Spec_Capacity") or 1
+            fail_reason = derive_failure_reason(updated_row)
+            is_success = updated_row.get("Status") in ("Ready_For_Review", "Approved")
+
+            row_summary = {
+                "Product_ID": updated_row.get("Product_ID"),
+                "Model_Name": updated_row.get("Model_Name"),
+                "Display_Name": updated_row.get("Display_Name"),
+                "Status": updated_row.get("Status"),
+                "Source_URL": updated_row.get("Source_URL"),
+                "Product_URL": source_url,
+                "Tier": tier_val,
+                "Image_Status": updated_row.get("Image_Status", "missing"),
+                "Attempts": updated_row.get("Attempts", 0),
+                "Fix_Log": updated_row.get("Fix_Log"),
+                "Flags": updated_row.get("Flags"),
+                "Failure_Reason": fail_reason
+            }
+
+            if is_success:
+                msg = f"Collection succeeded with manual URL: {source_url}"
+            else:
+                msg = f"Collection attempted with manual URL '{source_url}', but failed: {fail_reason or updated_row.get('Flags')}"
+
+            result = {
+                "product_id": pid,
+                "brand": brand,
+                "manual_url": source_url,
+                "success": is_success,
+                "message": msg,
+                "updated_row": row_summary
+            }
 
         elif job_type == "build":
             import importlib
@@ -443,6 +901,19 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 (json.dumps(result), now_iso, job_id)
             )
             conn.commit()
+
+        with _cancelled_jobs_lock:
+            _cancelled_jobs.discard(job_id)
+
+        broadcast_job_event(job_id, {
+            "stage": "terminal",
+            "status": "done",
+            "product_id": None,
+            "current": 1,
+            "total": 1,
+            "message": "Job completed successfully.",
+            "result": result
+        })
         logger.info(f"Job '{job_id}' completed successfully.")
 
     except Exception as e:
@@ -460,6 +931,19 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 (str(e), now_iso, job_id)
             )
             conn.commit()
+
+        with _cancelled_jobs_lock:
+            _cancelled_jobs.discard(job_id)
+
+        broadcast_job_event(job_id, {
+            "stage": "terminal",
+            "status": "failed",
+            "product_id": None,
+            "current": 0,
+            "total": 0,
+            "message": f"Job failed: {e}",
+            "error": str(e)
+        })
 
 
 def _worker_loop(db_path: str) -> None:
@@ -499,7 +983,6 @@ def _worker_loop(db_path: str) -> None:
         if claimed_job:
             _execute_claimed_job(claimed_job, db_path)
         else:
-            # Wait for next enqueue event or timeout
             _worker_event.wait(timeout=1.0)
             _worker_event.clear()
 
@@ -509,25 +992,25 @@ def _worker_loop(db_path: str) -> None:
 def start_worker(db_path: str = DEFAULT_DB_PATH) -> None:
     """Starts the single background worker thread if not already running."""
     global _worker_thread
-    init_db(db_path)
     if _worker_thread is None or not _worker_thread.is_alive():
         _worker_stop_event.clear()
+        _worker_event.clear()
         _worker_thread = threading.Thread(
             target=_worker_loop,
             args=(db_path,),
-            daemon=True,
-            name="CatalogueSingleWorker"
+            name="CatalogueJobWorker",
+            daemon=True
         )
         _worker_thread.start()
         logger.info("Started background catalogue job worker.")
 
 
-def stop_worker(timeout: float = 5.0) -> None:
-    """Signals the worker to stop cleanly."""
+def stop_worker() -> None:
+    """Signals worker to stop and joins the worker thread."""
     global _worker_thread
-    _worker_stop_event.set()
-    _worker_event.set()
     if _worker_thread and _worker_thread.is_alive():
-        _worker_thread.join(timeout=timeout)
+        _worker_stop_event.set()
+        _worker_event.set()
+        _worker_thread.join(timeout=5.0)
         logger.info("Stopped background catalogue job worker.")
     _worker_thread = None

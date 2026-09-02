@@ -4,11 +4,12 @@ import sys
 import time
 import uuid
 import json
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Union
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -23,6 +24,11 @@ from src.jobs import (
     list_jobs,
     enqueue_job,
     BrandLockedError,
+    set_main_event_loop,
+    register_subscriber,
+    unregister_subscriber,
+    request_job_cancellation,
+    is_job_cancellation_requested,
     DEFAULT_DB_PATH
 )
 from src.utils.excel_handler import (
@@ -46,12 +52,17 @@ ALLOWED_UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".pdf", ".xlsx", ".xls", ".csv",
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initializes job store, performs crash recovery, and runs single worker thread."""
+    """Initializes job store, registers event loop, performs crash recovery, and runs single worker thread."""
     logger.info("Starting up FastAPI catalogue API...")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(BROCHURE_DIR, exist_ok=True)
     os.makedirs("images", exist_ok=True)
     os.makedirs("dist", exist_ok=True)
+    
+    # Register running asyncio loop for thread-safe worker event broadcasting
+    loop = asyncio.get_running_loop()
+    set_main_event_loop(loop)
+    
     init_db()
     start_worker()
     yield
@@ -61,8 +72,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Vianet Catalogue Engine API",
-    version="1.0.0",
-    description="API for autonomous catalogue ingestion, curation, and PDF rendering pipeline.",
+    version="2.0.0",
+    description="API for autonomous catalogue ingestion, curation, live collection, and PDF rendering pipeline.",
     lifespan=lifespan
 )
 
@@ -87,7 +98,10 @@ def health_check() -> Dict[str, str]:
 
 @app.get("/jobs/{job_id}")
 def get_job_status(job_id: str) -> Dict[str, Any]:
-    """Returns the current status, progress, and results for a specific job."""
+    """
+    Returns the current status, progress, and results for a specific job.
+    Serves as the polling fallback for clients unable to use SSE streams.
+    """
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
@@ -98,6 +112,110 @@ def get_job_status(job_id: str) -> Dict[str, Any]:
 def get_recent_jobs(limit: int = Query(50, ge=1, le=500)) -> List[Dict[str, Any]]:
     """Lists recent pipeline jobs."""
     return list_jobs(limit=limit)
+
+
+@app.get("/jobs/{job_id}/stream")
+async def stream_job_progress(job_id: str):
+    """
+    Server-Sent Events (SSE) live progress stream for a job.
+    Emits milestone events: {"stage": str, "product_id": str|None, "current": int, "total": int, "message": str}
+    Emits a final terminal event when the job completes, then closes cleanly.
+    """
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
+    async def event_generator():
+        # 1. Check if job is already finished
+        current_job = get_job(job_id)
+        if current_job and current_job["status"] in ("done", "failed", "cancelled"):
+            initial_evt = {
+                "stage": "status",
+                "status": current_job["status"],
+                "product_id": None,
+                "current": current_job.get("progress_current", 0),
+                "total": current_job.get("progress_total", 0),
+                "message": current_job.get("message", "")
+            }
+            yield f"data: {json.dumps(initial_evt)}\n\n"
+            terminal_evt = {
+                "stage": "terminal",
+                "status": current_job["status"],
+                "product_id": None,
+                "current": current_job.get("progress_current", 0),
+                "total": current_job.get("progress_total", 0),
+                "message": current_job.get("message", "Job ended."),
+                "result": current_job.get("result"),
+                "error": current_job.get("error")
+            }
+            yield f"data: {json.dumps(terminal_evt)}\n\n"
+            return
+
+        # 2. Register subscriber queue for live events
+        q = register_subscriber(job_id)
+
+        # Emit initial current status
+        if current_job:
+            init_evt = {
+                "stage": "status",
+                "status": current_job["status"],
+                "product_id": None,
+                "current": current_job.get("progress_current", 0),
+                "total": current_job.get("progress_total", 0),
+                "message": current_job.get("message", "")
+            }
+            yield f"data: {json.dumps(init_evt)}\n\n"
+
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=2.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                    if event.get("stage") == "terminal":
+                        break
+                except asyncio.TimeoutError:
+                    # Check database status on timeout
+                    j = get_job(job_id)
+                    if not j or j["status"] in ("done", "failed", "cancelled"):
+                        term_evt = {
+                            "stage": "terminal",
+                            "status": j["status"] if j else "unknown",
+                            "product_id": None,
+                            "current": j.get("progress_current", 0) if j else 0,
+                            "total": j.get("progress_total", 0) if j else 0,
+                            "message": j.get("message", "") if j else "Job ended.",
+                            "result": j.get("result") if j else None,
+                            "error": j.get("error") if j else None
+                        }
+                        yield f"data: {json.dumps(term_evt)}\n\n"
+                        break
+                    # Send SSE keep-alive comment
+                    yield ": keep-alive\n\n"
+        finally:
+            unregister_subscriber(job_id, q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job_endpoint(job_id: str) -> Dict[str, Any]:
+    """
+    Cancels a queued job outright. For a running job, signals graceful cancellation:
+    stops after the current row finishes rather than killing it mid-write.
+    Completed rows keep their data; rows not reached stay Pending.
+    """
+    try:
+        return request_job_cancellation(job_id)
+    except ValueError as err:
+        raise HTTPException(status_code=404, detail=str(err))
 
 
 # ==============================================================================
@@ -122,7 +240,6 @@ async def upload_staging_file(file: UploadFile = File(...)) -> Dict[str, Any]:
             detail=f"File extension '{ext}' is not allowed. Allowed extensions: {allowed_str}"
         )
 
-    # Read and check size limit (25 MB)
     contents = await file.read()
     file_size = len(contents)
     if file_size > MAX_UPLOAD_SIZE:
@@ -166,7 +283,6 @@ def trigger_ingest_job(body: IngestRequest) -> Dict[str, Any]:
     target_path = None
     if body.upload_id:
         clean_uid = body.upload_id.strip()
-        # Look for matching file in uploads/
         matches = [f for f in os.listdir(UPLOAD_DIR) if f.startswith(clean_uid)]
         if not matches:
             raise HTTPException(
@@ -313,7 +429,6 @@ async def attach_brand_brochure(brand: str, file: UploadFile = File(...)) -> Dic
     df = load_catalogue_data("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
     if not mask.any():
-        # Clean up uploaded brochure if brand does not exist
         try:
             os.remove(dest_path)
         except Exception:
@@ -379,7 +494,191 @@ def delete_brand_brochure(brand: str) -> Dict[str, Any]:
 
 
 # ==============================================================================
-# 5. Read Endpoints: GET /brands & GET /brands/{brand}/rows
+# 5. Stage 3 Collection Endpoints (Live Progress & Retries)
+# ==============================================================================
+
+@app.post("/brands/{brand}/collect")
+def start_brand_collection(
+    brand: str,
+    semantic_audit: bool = Query(False, description="Enable optional post-collection LLM semantic audit")
+) -> Dict[str, Any]:
+    """
+    Enqueues a 'collect' job for the specified brand. Respects Brand Lock.
+    Writes live progress to the jobs store as each row is processed.
+    Returns job_id immediately without blocking.
+    """
+    clean_brand = brand.strip()
+    df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+    mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+
+    try:
+        job_id = enqueue_job(
+            job_type="collect",
+            brand=clean_brand,
+            payload={"semantic_audit": semantic_audit}
+        )
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "brand": clean_brand,
+            "stream_url": f"/jobs/{job_id}/stream"
+        }
+    except BrandLockedError as err:
+        raise HTTPException(status_code=409, detail=str(err))
+
+
+class RetryBrandRequest(BaseModel):
+    product_ids: Optional[List[str]] = Field(
+        None,
+        description="Optional list of specific Product_IDs to retry. If omitted, retries all Blocked, Skipped, and Deferred rows for the brand."
+    )
+
+
+@app.post("/brands/{brand}/retry")
+def retry_failed_rows(brand: str, body: Optional[RetryBrandRequest] = None) -> Dict[str, Any]:
+    """
+    Enqueues a 'retry' job for failed (Blocked, Skipped, Deferred) rows of a brand.
+    Uses re_run_product from scratch for each row with Attempts reset.
+    Respects Brand Lock and reports the identical per-row result structure as collect.
+    """
+    clean_brand = brand.strip()
+    df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+    mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+
+    payload = {"product_ids": body.product_ids if body and body.product_ids else None}
+    try:
+        job_id = enqueue_job(job_type="retry", brand=clean_brand, payload=payload)
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "brand": clean_brand,
+            "stream_url": f"/jobs/{job_id}/stream"
+        }
+    except BrandLockedError as err:
+        raise HTTPException(status_code=409, detail=str(err))
+
+
+@app.post("/products/{product_id}/rerun")
+def rerun_single_product(product_id: str) -> Dict[str, Any]:
+    """
+    Re-runs collection from scratch for a single product row via re_run_product.
+    Enqueues through job queue with Brand Lock.
+    Returns the updated row dict with failure reasons if failed.
+    """
+    clean_pid = product_id.strip()
+    df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    brand = str(df.loc[mask, "Brand"].iloc[0]).strip()
+
+    try:
+        job_id = enqueue_job(
+            job_type="rerun_product",
+            brand=brand,
+            payload={"product_id": clean_pid}
+        )
+    except BrandLockedError as err:
+        raise HTTPException(status_code=409, detail=str(err))
+
+    # Await single-row completion for up to 20 seconds
+    start_t = time.time()
+    while time.time() - start_t < 20.0:
+        job = get_job(job_id)
+        if job and job["status"] == "done":
+            res = job.get("result") or {}
+            return {
+                "job_id": job_id,
+                "status": "done",
+                "product_id": clean_pid,
+                "brand": brand,
+                "updated_row": res.get("updated_row")
+            }
+        elif job and job["status"] in ("failed", "cancelled"):
+            raise HTTPException(
+                status_code=500,
+                detail=job.get("error") or f"Re-run job '{job_id}' failed."
+            )
+        time.sleep(0.1)
+
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "product_id": clean_pid,
+        "stream_url": f"/jobs/{job_id}/stream"
+    }
+
+
+class ManualSourceRequest(BaseModel):
+    url: str = Field(..., description="Direct product URL to use as the starting point for collection")
+
+
+@app.post("/products/{product_id}/source")
+def provide_manual_source_url(product_id: str, body: ManualSourceRequest) -> Dict[str, Any]:
+    """
+    Sets Product_URL for a product row and re-runs collection using that URL as the starting point.
+    Reports clearly whether collection succeeded or failed with the provided URL.
+    """
+    clean_pid = product_id.strip()
+    clean_url = body.url.strip()
+    if not clean_url or not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+        raise HTTPException(status_code=400, detail="Invalid URL. Must begin with http:// or https://")
+
+    df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    brand = str(df.loc[mask, "Brand"].iloc[0]).strip()
+
+    try:
+        job_id = enqueue_job(
+            job_type="manual_source",
+            brand=brand,
+            payload={"product_id": clean_pid, "url": clean_url}
+        )
+    except BrandLockedError as err:
+        raise HTTPException(status_code=409, detail=str(err))
+
+    # Await single-row completion for up to 25 seconds
+    start_t = time.time()
+    while time.time() - start_t < 25.0:
+        job = get_job(job_id)
+        if job and job["status"] == "done":
+            res = job.get("result") or {}
+            return {
+                "job_id": job_id,
+                "status": "done",
+                "product_id": clean_pid,
+                "brand": brand,
+                "manual_url": clean_url,
+                "success": res.get("success", False),
+                "message": res.get("message", ""),
+                "updated_row": res.get("updated_row")
+            }
+        elif job and job["status"] in ("failed", "cancelled"):
+            raise HTTPException(
+                status_code=500,
+                detail=job.get("error") or f"Manual source collection job '{job_id}' failed."
+            )
+        time.sleep(0.1)
+
+    return {
+        "job_id": job_id,
+        "status": "running",
+        "product_id": clean_pid,
+        "manual_url": clean_url,
+        "stream_url": f"/jobs/{job_id}/stream"
+    }
+
+
+# ==============================================================================
+# 6. Read Endpoints: GET /brands & GET /brands/{brand}/rows
 # ==============================================================================
 
 @app.get("/brands")
@@ -399,7 +698,6 @@ def list_brands() -> List[Dict[str, Any]]:
         brand_mask = df["Brand"].astype(str).str.lower() == str(brand_name).lower()
         b_df = df[brand_mask]
 
-        # Status counts
         status_counts = {
             "Approved": int((b_df["Status"] == "Approved").sum()),
             "Ready_For_Review": int((b_df["Status"] == "Ready_For_Review").sum()),
@@ -409,7 +707,6 @@ def list_brands() -> List[Dict[str, Any]]:
             "Deferred": int((b_df["Status"] == "Deferred").sum())
         }
 
-        # Brochure
         brochure_vals = b_df["Brochure_PDF"].dropna()
         brochure_path = str(brochure_vals.iloc[0]).strip() if not brochure_vals.empty else None
 
@@ -436,6 +733,8 @@ def get_brand_rows(brand: str) -> List[Dict[str, Any]]:
     if not mask.any():
         raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
 
+    from src.run_brand import derive_failure_reason
+
     brand_df = df[mask].sort_values(by="Product_ID", ascending=True)
     results = []
 
@@ -445,6 +744,7 @@ def get_brand_rows(brand: str) -> List[Dict[str, Any]]:
 
         dp_val = prod.get("dp_raw") if prod.get("dp_raw") is not None else prod.get("dp")
         mrp_val = prod.get("mrp")
+        failure_reason = derive_failure_reason(row_dict)
 
         results.append({
             "Product_ID": row_dict.get("Product_ID"),
@@ -456,6 +756,7 @@ def get_brand_rows(brand: str) -> List[Dict[str, Any]]:
             "Source_URL": row_dict.get("Source_URL"),
             "Image_Status": row_dict.get("Image_Status", "missing"),
             "Flags": row_dict.get("Flags"),
+            "Failure_Reason": failure_reason,
             "Attempts": row_dict.get("Attempts", 0),
             "Category": row_dict.get("Category", "Powerbank"),
             "Brochure_PDF": row_dict.get("Brochure_PDF"),

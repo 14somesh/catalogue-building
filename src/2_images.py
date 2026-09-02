@@ -190,7 +190,7 @@ def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:
     Prioritizes isolated packshot naming conventions (e.g. Dome01, white, 01).
     """
     candidates: List[str] = []
-    if not product_page_url or not product_page_url.startswith("http"):
+    if not product_page_url or not isinstance(product_page_url, str) or not product_page_url.startswith("http"):
         return candidates
 
     clean_url = product_page_url.split("?")[0].rstrip("/")
