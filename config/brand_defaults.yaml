@@ -1,125 +1,124 @@
-# Brand-specific configuration defaults and tier escalation parameters
 brands:
   Stuffcool:
-    domain: "stuffcool.com"
-    collection_url: "https://www.stuffcool.com/collections/power-bank"
-    default_warranty: "6 Months (Extendable to 1 Year)"
+    domain: stuffcool.com
+    collection_url: https://www.stuffcool.com/collections/power-bank
+    default_warranty: 6 Months (Extendable to 1 Year)
     retail_order:
-      - "reliance"
+    - reliance
     qualifier_tokens:
-      - "Max"
-      - "Ultra"
-      - "Plus"
-      - "Pro"
-      - "Mini"
-      - "Lite"
-      - "Go"
+    - Max
+    - Ultra
+    - Plus
+    - Pro
+    - Mini
+    - Lite
+    - Go
     image_tier_order:
-      - "brand_product"
-      - "retail"
-      - "amazon"
-      - "collection_thumb"
-
+    - brand_product
+    - retail
+    - amazon
+    - collection_thumb
   Pebble:
-    domain: "pebblecart.com"
-    collection_url: "https://www.pebblecart.com/collections/powerbanks"
-    default_warranty: "6 Months"
+    domain: pebblecart.com
+    collection_url: https://www.pebblecart.com/collections/powerbanks
+    default_warranty: 6 Months
     retail_order:
-      - "reliance"
+    - reliance
     qualifier_tokens:
-      - "Max"
-      - "Ultra"
-      - "Plus"
-      - "Pro"
-      - "Mini"
-      - "Lite"
-      - "Go"
+    - Max
+    - Ultra
+    - Plus
+    - Pro
+    - Mini
+    - Lite
+    - Go
     image_tier_order:
-      - "brand_product"
-      - "retail"
-      - "amazon"
-      - "collection_thumb"
-
+    - brand_product
+    - retail
+    - amazon
+    - collection_thumb
   Portronics:
-    domain: "portronics.com"
-    collection_url: "https://www.portronics.com/collections/powerbanks"
-    default_warranty: "1 Year"
+    domain: portronics.com
+    collection_url: https://www.portronics.com/collections/powerbanks
+    default_warranty: 1 Year
     retail_order:
-      - "reliance"
+    - reliance
     qualifier_tokens:
-      - "Max"
-      - "Ultra"
-      - "Plus"
-      - "Pro"
-      - "Mini"
-      - "Lite"
-      - "Go"
+    - Max
+    - Ultra
+    - Plus
+    - Pro
+    - Mini
+    - Lite
+    - Go
     image_tier_order:
-      - "brand_product"
-      - "retail"
-      - "amazon"
-      - "collection_thumb"
-
+    - brand_product
+    - retail
+    - amazon
+    - collection_thumb
   Urbn:
-    domain: "urbnworld.com"
-    collection_url: "https://urbnworld.com/collections/power-banks"
-    default_warranty: "1 Year"
+    domain: urbnworld.com
+    collection_url: https://urbnworld.com/collections/power-banks
+    default_warranty: 1 Year
     retail_order:
-      - "reliance"
+    - reliance
     qualifier_tokens:
-      - "MagSafe"
-      - "MagTag"
-      - "Mag"
-      - "Qi2"
-      - "Tag"
-      - "Mini"
-      - "Ultra"
-      - "Volt"
-      - "Pro"
-      - "Plus"
-      - "Max"
+    - MagSafe
+    - MagTag
+    - Mag
+    - Qi2
+    - Tag
+    - Mini
+    - Ultra
+    - Volt
+    - Pro
+    - Plus
+    - Max
     image_tier_order:
-      - "brand_product"
-      - "retail"
-      - "amazon"
-      - "collection_thumb"
-
+    - brand_product
+    - retail
+    - amazon
+    - collection_thumb
   EVM:
-    domain: "evmzone.com"
-    collection_url: "https://evmzone.com/evm-products/powerbank.html"
-    default_warranty: "2 Years"
+    domain: evmzone.com
+    collection_url: https://evmzone.com/evm-products/powerbank.html
+    default_warranty: 2 Years
     retail_order:
-      - "reliance"
+    - reliance
     qualifier_tokens:
-      - "Pro"
-      - "Plus"
-      - "Mini"
-      - "Neo"
-      - "Ace"
-      - "Max"
-      - "Ultra"
-      - "Lite"
-      - "Go"
+    - Pro
+    - Plus
+    - Mini
+    - Neo
+    - Ace
+    - Max
+    - Ultra
+    - Lite
+    - Go
     image_tier_order:
-      - "brand_product"
-      - "retail"
-      - "amazon"
-      - "collection_thumb"
-
-  # Standard template for future brands
+    - brand_product
+    - retail
+    - amazon
+    - collection_thumb
   _default:
     retail_order:
-      - "reliance"
+    - reliance
     qualifier_tokens:
-      - "Max"
-      - "Ultra"
-      - "Plus"
-      - "Pro"
-      - "Mini"
-      - "Lite"
-      - "Go"
+    - Max
+    - Ultra
+    - Plus
+    - Pro
+    - Mini
+    - Lite
+    - Go
     image_tier_order:
-      - "brand_product"
-      - "retail"
-      - "amazon"
-      - "collection_thumb"
+    - brand_product
+    - retail
+    - amazon
+    - collection_thumb
+  Ambrane:
+    domain: ambraneindia.com
+    platform: shopify
+    qualifier_tokens:
+    - Pro
+    - Plus

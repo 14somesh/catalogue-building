@@ -65,6 +65,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_brand ON jobs(brand);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);")
 
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN payload_json TEXT;")
+        except sqlite3.OperationalError:
+            pass
+
         # Startup crash recovery: mark stale running jobs as failed
         now_iso = datetime.now(timezone.utc).isoformat()
         cur = conn.cursor()
@@ -93,8 +98,8 @@ def enqueue_job(
     Enqueues a job in the SQLite store with Brand Lock enforcement.
     Rejects the job if another job is already queued or running for the same brand.
     """
-    if job_type not in ("ingest", "collect", "build"):
-        raise ValueError(f"Unsupported job_type: '{job_type}'. Must be ingest, collect, or build.")
+    if job_type not in ("ingest", "confirm", "collect", "build"):
+        raise ValueError(f"Unsupported job_type: '{job_type}'. Must be ingest, confirm, collect, or build.")
 
     norm_brand = brand.strip() if brand and brand.strip() else None
 
@@ -124,15 +129,15 @@ def enqueue_job(
             uid = uuid.uuid4().hex[:8]
             job_id = f"job_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uid}"
 
-            # Store payload in message or result_json if provided
-            initial_msg = json.dumps(payload) if payload else ""
+            # Store payload in payload_json
+            payload_str = json.dumps(payload) if payload else None
 
             conn.execute(
                 """
-                INSERT INTO jobs (id, job_type, brand, status, progress_current, progress_total, message, created_at)
-                VALUES (?, ?, ?, 'queued', 0, 0, ?, ?)
+                INSERT INTO jobs (id, job_type, brand, status, progress_current, progress_total, message, payload_json, created_at)
+                VALUES (?, ?, ?, 'queued', 0, 0, '', ?, ?)
                 """,
-                (job_id, job_type, norm_brand, initial_msg, now_iso)
+                (job_id, job_type, norm_brand, payload_str, now_iso)
             )
             conn.execute("COMMIT")
             logger.info(f"Enqueued job '{job_id}' (type={job_type}, brand={norm_brand})")
@@ -258,8 +263,169 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             result = {"pdf_path": out_pdf, "brand": brand}
 
         elif job_type == "ingest":
-            # Ingestion runner for Phase 1
-            result = {"status": "ingest_acknowledged", "brand": brand}
+            from src.onboard_brand import extract_text_from_file, analyze_price_sheet, generate_onboarding_summary
+            from src.run_brand import load_config
+            cfg = load_config("config.yaml")
+            llm_config = cfg.get("llm", {})
+            category_name = cfg.get("category", {}).get("name", "powerbank")
+
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                payload = json.loads(job["payload_json"])
+            elif job["message"] and job["message"].startswith("{"):
+                try:
+                    payload = json.loads(job["message"])
+                except Exception:
+                    pass
+
+            file_path = payload.get("file_path")
+            pasted_text = payload.get("pasted_text")
+
+            if file_path:
+                progress_cb({"stage": "extract_text", "message": f"Extracting content from {os.path.basename(file_path)}..."})
+                raw_content, fmt_type = extract_text_from_file(file_path, llm_config)
+            elif pasted_text:
+                raw_content = pasted_text
+                fmt_type = "pasted_text"
+            else:
+                raise ValueError("Ingest job requires either 'file_path' or 'pasted_text'.")
+
+            progress_cb({"stage": "analyze_sheet", "message": "Analyzing price sheet structure with AI..."})
+            inference = analyze_price_sheet(raw_content, category_name=category_name, llm_config=llm_config)
+
+            # Check duplicates
+            seen = {}
+            duplicates = []
+            for idx, p in enumerate(inference.products, 1):
+                key = (inference.brand_name.lower().strip(), p.model_name.lower().strip(), p.dp)
+                if key in seen:
+                    duplicates.append({
+                        "row_index": idx,
+                        "model_name": p.model_name,
+                        "dp": p.dp,
+                        "duplicates_row_index": seen[key],
+                        "message": f"Row {idx} ('{p.model_name}', DP {p.dp}) duplicates Row {seen[key]}"
+                    })
+                else:
+                    seen[key] = idx
+
+            col_map_dict = {}
+            if hasattr(inference, "column_mapping") and inference.column_mapping:
+                for item in inference.column_mapping:
+                    if hasattr(item, "column_name"):
+                        col_map_dict[item.column_name] = item.role
+                    elif isinstance(item, dict):
+                        col_map_dict[item.get("column_name", "")] = item.get("role", "")
+
+            qual_list = [
+                q.model_dump() if hasattr(q, "model_dump") else (q if isinstance(q, dict) else {"token": str(q), "rationale": ""})
+                for q in inference.qualifier_tokens
+            ]
+
+            result = {
+                "brand_name": inference.brand_name,
+                "brand_code": inference.brand_code,
+                "domain": inference.domain,
+                "platform": inference.platform,
+                "dp_column_explanation": inference.dp_column_explanation,
+                "column_mapping": col_map_dict,
+                "qualifier_tokens": qual_list,
+                "products": [p.model_dump() for p in inference.products],
+                "duplicates": duplicates,
+                "summary_markdown": generate_onboarding_summary(inference)
+            }
+
+        elif job_type == "confirm":
+            from src.onboard_brand import (
+                BrandInferenceSchema,
+                RawProductItem,
+                register_brand_config,
+                append_products_to_catalogue
+            )
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                payload = json.loads(job["payload_json"])
+            elif job["message"] and job["message"].startswith("{"):
+                try:
+                    payload = json.loads(job["message"])
+                except Exception:
+                    pass
+
+            brand_name = payload.get("brand_name") or brand
+            if not brand_name:
+                raise ValueError("Confirm job requires brand_name.")
+
+            brand_code = payload.get("brand_code")
+            if not brand_code:
+                brand_code = "".join([w[0] for w in brand_name.split() if w])[:4].upper()
+                if len(brand_code) < 2:
+                    brand_code = brand_name[:3].upper()
+
+            domain = payload.get("domain", "")
+            platform = payload.get("platform", "shopify")
+            qualifier_tokens = payload.get("qualifier_tokens", [])
+            column_mapping = payload.get("column_mapping", {})
+            raw_rows = payload.get("rows", [])
+            if not raw_rows:
+                raise ValueError(f"No accepted product rows provided to confirm for brand '{brand_name}'.")
+
+            progress_cb({"stage": "confirm", "message": f"Processing {len(raw_rows)} rows for brand '{brand_name}'..."})
+
+            products = [
+                RawProductItem(
+                    raw_text=r.get("raw_text") or r.get("model_name", ""),
+                    model_name=r.get("model_name", ""),
+                    display_name=r.get("display_name") or r.get("model_name", ""),
+                    dp=r.get("dp"),
+                    mrp=r.get("mrp"),
+                    notes=r.get("notes")
+                )
+                for r in raw_rows
+            ]
+
+            from src.onboard_brand import QualifierTokenItem, ColumnMappingItem
+            qual_objs = []
+            for q in qualifier_tokens:
+                if isinstance(q, str):
+                    qual_objs.append(QualifierTokenItem(token=q, rationale=""))
+                elif isinstance(q, dict):
+                    qual_objs.append(QualifierTokenItem(token=q.get("token", ""), rationale=q.get("rationale", "")))
+                elif hasattr(q, "token"):
+                    qual_objs.append(q)
+
+            col_objs = []
+            if isinstance(column_mapping, dict):
+                for c_name, c_role in column_mapping.items():
+                    col_objs.append(ColumnMappingItem(column_name=str(c_name), role=str(c_role)))
+            elif isinstance(column_mapping, list):
+                for c in column_mapping:
+                    if isinstance(c, dict):
+                        col_objs.append(ColumnMappingItem(column_name=c.get("column_name", ""), role=c.get("role", "")))
+                    elif hasattr(c, "column_name"):
+                        col_objs.append(c)
+
+            inference = BrandInferenceSchema(
+                brand_name=brand_name,
+                brand_code=brand_code,
+                domain=domain,
+                platform=platform,
+                qualifier_tokens=qual_objs,
+                dp_column_explanation=payload.get("dp_column_explanation", "User confirmed pricing"),
+                column_mapping=col_objs,
+                products=products
+            )
+
+            progress_cb({"stage": "register_config", "message": f"Updating brand_defaults.yaml for '{brand_name}'..."})
+            register_brand_config(inference)
+
+            progress_cb({"stage": "append_excel", "message": f"Writing {len(products)} rows to catalogue_data.xlsx..."})
+            count, created_rows = append_products_to_catalogue(inference)
+
+            result = {
+                "brand": brand_name,
+                "count": count,
+                "created_rows": created_rows
+            }
 
         else:
             raise ValueError(f"Unknown job_type '{job_type}'")

@@ -41,3 +41,7 @@ class BaseParser(ABC):
     def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1) -> ParserResult:
         """Parses HTML into a standardized ParserResult."""
         pass
+
+
+# Backward compatibility alias
+BaseBrandParser = BaseParser

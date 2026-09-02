@@ -6,6 +6,7 @@
 # Build outputs & deliverables
 dist/
 cache/
+uploads/
 
 # Python cache & bytecode
 __pycache__/

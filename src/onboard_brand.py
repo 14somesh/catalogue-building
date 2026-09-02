@@ -25,15 +25,30 @@ class RawProductItem(BaseModel):
     notes: Optional[str] = Field(None, description="Brief note on what was cleaned (e.g. 'Stripped color Black')")
 
 
+class QualifierTokenItem(BaseModel):
+    token: str = Field(description="Variant modifier token e.g. Plus, Pro, Max, Mini")
+    rationale: str = Field(description="Short rationale explaining why it is a variant modifier")
+
+
+class ColumnMappingItem(BaseModel):
+    column_name: str = Field(description="Original sheet header name")
+    role: str = Field(description="Role: 'Model_Name', 'DP', 'MRP', or 'ignored'")
+
+
 class BrandInferenceSchema(BaseModel):
     brand_name: str = Field(description="Inferred brand name (e.g. 'Stuffcool', 'Pebble', 'Portronics', 'Anker')")
     brand_code: str = Field(description="2-4 character uppercase brand code for Product_ID (e.g. 'SC', 'PEB', 'POR', 'ANK')")
     domain: str = Field(description="Official brand website domain (e.g. 'anker.com', 'ambraneindia.com')")
     platform: str = Field(description="Website platform: 'shopify' or 'custom'")
-    qualifier_tokens: List[Dict[str, str]] = Field(
+    qualifier_tokens: List[QualifierTokenItem] = Field(
+        default_factory=list,
         description="List of variant qualifier tokens appropriate for this brand with rationale. Tokens must be variant modifiers (Plus, Pro, Max, Mini) and NOT product model names.",
     )
     dp_column_explanation: str = Field(description="Explanation of how DP and MRP columns were identified")
+    column_mapping: List[ColumnMappingItem] = Field(
+        default_factory=list,
+        description="List of mapped sheet columns and their roles"
+    )
     products: List[RawProductItem] = Field(description="List of extracted product rows")
 
 
@@ -147,6 +162,8 @@ Execute these tasks autonomously:
    - Analyze the catalog's naming patterns to identify true variant/modifier suffixes (e.g. 'Plus', 'Pro', 'Max', 'Mini', 'Ultra', 'Lite', 'Go').
    - Provide a short rationale for each token explaining why it is a variant modifier.
    - DO NOT include actual product model names (e.g. 'Fuel', 'Boost', 'Nova', 'Electra', 'Giga', 'Major').
+7. Column Mapping:
+   - Provide a key-value mapping of each original column/header in the sheet to its mapped role: 'Model_Name', 'DP', 'MRP', or 'ignored'.
 
 PRICE SHEET CONTENT:
 {raw_content}
@@ -184,8 +201,8 @@ def generate_onboarding_summary(inference: BrandInferenceSchema) -> str:
 
     lines.append(f"- **Selected Qualifier Tokens & Justification:**")
     for q in inference.qualifier_tokens:
-        token_name = q.get("token") or list(q.keys())[0]
-        rationale = q.get("rationale") or list(q.values())[0]
+        token_name = q.token if hasattr(q, "token") else (q.get("token") if isinstance(q, dict) else str(q))
+        rationale = q.rationale if hasattr(q, "rationale") else (q.get("rationale") if isinstance(q, dict) else "")
         lines.append(f"  - `{token_name}`: {rationale}")
     
     # Check duplicates
@@ -224,16 +241,23 @@ def register_brand_config(inference: BrandInferenceSchema, config_path: str = "c
     brand_slug = inference.brand_name.lower().replace(" ", "_")
     token_list = []
     for q in inference.qualifier_tokens:
-        tok = q.get("token") if isinstance(q, dict) and "token" in q else (list(q.keys())[0] if isinstance(q, dict) else str(q))
+        tok = q.token if hasattr(q, "token") else (q.get("token") if isinstance(q, dict) and "token" in q else str(q))
         if tok not in token_list:
             token_list.append(tok)
 
-    brand_cfg[brand_slug] = {
-        "brand": inference.brand_name,
-        "domain": inference.domain,
-        "platform": inference.platform,
-        "qualifier_tokens": token_list
-    }
+    if "brands" in brand_cfg and isinstance(brand_cfg["brands"], dict):
+        brand_cfg["brands"][inference.brand_name] = {
+            "domain": inference.domain,
+            "platform": inference.platform,
+            "qualifier_tokens": token_list
+        }
+    else:
+        brand_cfg[brand_slug] = {
+            "brand": inference.brand_name,
+            "domain": inference.domain,
+            "platform": inference.platform,
+            "qualifier_tokens": token_list
+        }
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(brand_cfg, f, sort_keys=False, default_flow_style=False)

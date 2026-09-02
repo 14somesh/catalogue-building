@@ -160,6 +160,48 @@ def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name:
     return df
 
 
+def load_catalogue_data_readonly(
+    file_path: str = "data/catalogue_data.xlsx",
+    sheet_name: str = "CatalogueData",
+    max_retries: int = 5,
+    retry_delay: float = 0.1
+) -> pd.DataFrame:
+    """
+    Safely reads a snapshot copy of catalogue data without holding file locks.
+    Reads via in-memory bytes with retry logic so that HTTP read requests are never
+    blocked by background job writes.
+    """
+    import io
+    import time
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Catalogue data file not found at: {file_path}")
+
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
+            df = pd.read_excel(io.BytesIO(content), sheet_name=sheet_name)
+
+            missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
+            if missing_cols:
+                for col in missing_cols:
+                    df[col] = None
+
+            numeric_columns = {"MRP_Input", "Raw_MRP_Scraped", "Override_MRP", "Override_DP", "Attempts"}
+            for col in df.columns:
+                if col not in numeric_columns:
+                    df[col] = df[col].astype("object")
+
+            return df
+        except (PermissionError, IOError, OSError) as e:
+            last_err = e
+            time.sleep(retry_delay * (attempt + 1))
+
+    raise last_err or RuntimeError(f"Unable to read catalogue data from {file_path}")
+
+
 def save_catalogue_data(df: pd.DataFrame, file_path: str = "data/catalogue_data.xlsx", sheet_name: str = "CatalogueData") -> None:
     """
     Safely writes DataFrame back to Excel with lock checking and Write Guard enforcement.
