@@ -28,13 +28,24 @@ Use these exact values. No other colours.
 
 Rules:
 - The page background is `#FDFBF7` (warm off-white), filling the entire viewport. Never dark. App is light only.
+- Amber is only the top nav and the landing hero. Nowhere else. No page-level amber anywhere else.
 - Amber is the site's identity. Teal is the action colour — every "go forward" button is teal.
 - Text on a coloured background uses the darkest shade of that same colour family. Never black or grey.
 - Two font weights only: 400 and 500. Never 600 or 700.
 - Sentence case everywhere. Never Title Case, never ALL CAPS.
 - Border radius: 8px on panels, buttons, tables, and cards. There is no rounded outer page container.
 - No gradients, no drop shadows, no blur.
-- Font sizes: 22px page heading, 15px card title, 14px body, 13px labels, 12px table text, 11px meta. Nothing below 11px.
+- Desktop type scale:
+  - Landing heading: 34px, weight 500
+  - Landing subline: 17px
+  - Landing stat tile number: 30px, its label 13px
+  - Page heading on inner pages: 22px
+  - Section heading: 17px
+  - Body text: 15px
+  - Table text and labels: 13px
+  - Meta text: 12px
+  - Buttons: 14px
+  - Nothing below 12px anywhere.
 
 ---
 
@@ -66,13 +77,13 @@ Within `/build`, the stage is app state, not a URL. Refreshing returns to the cu
 
 ## 4. Landing page
 
-- The amber landing section spans the full window width, edge to edge, directly below the nav. Vertical padding 64px top and 72px bottom.
+- The amber hero fills the remaining viewport height — `min-height: calc(100vh - navHeight)` — with its content vertically centred. On a short window it grows with the content instead of clipping. Directly below the nav, edge-to-edge. No void below the hero.
 - Centred within the 1100px container:
   - Three powerbank glyphs, the middle one teal and taller, the outer two smaller and pale.
-  - Heading: `Welcome to catalogue builder`
-  - Subline: `Hand over a price sheet. Get back a print-ready catalogue.`
-  - One teal button: `Start building` → routes to `/build`
-  - Below, three cream stat tiles: brands live, products, pages built. Pull real numbers from `GET /brands` and `GET /builds`.
+  - Heading: `Welcome to catalogue builder` (34px, weight 500)
+  - Subline: `Hand over a price sheet. Get back a print-ready catalogue.` (17px)
+  - One teal button: `Start building` (14px) → routes to `/build`
+  - Below, three cream stat tiles: brands live, products, pages built. Pull real numbers from `GET /brands` and `GET /builds`. Stat tiles have 20px padding, 16px gap, 30px numbers, and 13px labels.
 
 ---
 
@@ -194,7 +205,7 @@ Endpoints: `POST /build`, `GET /builds` for the download URL and history.
 
 ## 11. How to use
 
-Static page. A one-line intro, then five numbered steps with a coloured circle each — amber for stages you act on (1, 2, 4), grey for automatic ones (3, 5).
+Static page sitting directly on the `#FDFBF7` page background. A one-line intro, then five numbered steps with a coloured circle each — amber for stages you act on (1, 2, 4), grey for automatic ones (3, 5). The steps sit directly on the background, with no coloured panel behind them.
 
 Below, a cream callout: `One brand at a time. If someone else is running a brand, you'll be told who.`
 

@@ -16,15 +16,20 @@
   /* Page background - warm off-white, light only */
   --page-bg: #FDFBF7;
   --panel-radius: 8px;
+  --nav-height: 56px;
 
-  /* Typography */
+  /* Corrected Desktop Typography */
   --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --fs-landing-h1: 34px;
+  --fs-landing-subline: 17px;
   --fs-h1: 22px;
-  --fs-card-title: 15px;
-  --fs-body: 14px;
+  --fs-section: 17px;
+  --fs-card-title: 17px;
+  --fs-body: 15px;
+  --fs-btn: 14px;
+  --fs-table: 13px;
   --fs-label: 13px;
-  --fs-table: 12px;
-  --fs-meta: 11px;
+  --fs-meta: 12px;
 }
 
 * {
@@ -52,7 +57,7 @@ html, body {
   flex-direction: column;
 }
 
-/* App shell fills window edge to edge, no outer border radius, no margins */
+/* App shell spans 100% window width edge to edge */
 .app-shell {
   width: 100%;
   min-height: 100vh;
@@ -61,7 +66,7 @@ html, body {
   background-color: var(--page-bg);
 }
 
-/* Centered content container: max-width 1100px, 32px horizontal padding */
+/* Common centered container: max-width 1100px, 32px horizontal padding */
 .content-container {
   width: 100%;
   max-width: 1100px;
@@ -69,14 +74,15 @@ html, body {
   padding: 0 32px;
 }
 
-/* Top Nav spans full window width edge-to-edge, no rounded corners */
+/* Top Nav spans full window width edge-to-edge, amber background */
 .top-nav {
   background-color: var(--amber);
   width: 100%;
-  height: 56px;
+  height: var(--nav-height);
   display: flex;
   align-items: center;
   user-select: none;
+  flex-shrink: 0;
 }
 
 .top-nav__inner {
@@ -112,7 +118,7 @@ html, body {
 
 .top-nav__link {
   color: var(--amber-deep);
-  font-size: 14px;
+  font-size: var(--fs-btn);
   font-weight: 500;
   text-decoration: none;
   padding: 6px 14px;
@@ -130,11 +136,16 @@ html, body {
   background-color: rgba(255, 255, 255, 0.2);
 }
 
-/* Landing Section: Amber background edge-to-edge directly below nav */
+/* Landing Section: Fills remaining viewport height, vertically centered, amber edge-to-edge */
 .landing-section {
   background-color: var(--amber);
   width: 100%;
-  padding: 64px 0 72px 0;
+  min-height: calc(100vh - var(--nav-height));
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 48px 0;
 }
 
 .landing-content {
@@ -148,23 +159,25 @@ html, body {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 14px;
+  gap: 16px;
   margin-bottom: 28px;
 }
 
 .landing-heading {
-  font-size: var(--fs-h1);
+  font-size: var(--fs-landing-h1);
   font-weight: 500;
   color: var(--amber-deep);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  line-height: 1.2;
 }
 
 .landing-subline {
-  font-size: var(--fs-body);
+  font-size: var(--fs-landing-subline);
   font-weight: 400;
   color: var(--amber-mid);
-  margin-bottom: 28px;
-  max-width: 480px;
+  margin-bottom: 32px;
+  max-width: 520px;
+  line-height: 1.4;
 }
 
 .btn-primary {
@@ -173,7 +186,7 @@ html, body {
   border: none;
   border-radius: var(--panel-radius);
   font-family: var(--font-family);
-  font-size: var(--fs-body);
+  font-size: var(--fs-btn);
   font-weight: 500;
   padding: 10px 24px;
   cursor: pointer;
@@ -204,7 +217,7 @@ html, body {
 .stat-tile {
   background-color: var(--cream);
   border-radius: var(--panel-radius);
-  padding: 20px 24px;
+  padding: 20px;
   text-align: left;
   display: flex;
   flex-direction: column;
@@ -212,7 +225,7 @@ html, body {
 }
 
 .stat-tile__number {
-  font-size: 24px;
+  font-size: 30px;
   font-weight: 500;
   color: var(--amber-deep);
   margin-bottom: 4px;
@@ -238,7 +251,7 @@ html, body {
   gap: 12px;
   margin-bottom: 24px;
   color: var(--grey-400);
-  font-size: 14px;
+  font-size: var(--fs-btn);
   font-weight: 400;
 }
 
@@ -280,17 +293,11 @@ html, body {
   color: var(--amber-deep);
 }
 
-/* How to use Page: Starts 28px below nav */
+/* How to use Page: Sits directly on #FDFBF7, starts 28px below nav, no amber panel */
 .how-to-use-page {
   width: 100%;
   padding-top: 28px;
   padding-bottom: 48px;
-}
-
-.how-to-use-card {
-  background-color: var(--amber);
-  border-radius: var(--panel-radius);
-  padding: 36px 40px;
 }
 
 .how-to-use-header {
@@ -309,8 +316,8 @@ html, body {
 .steps-list {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  margin-bottom: 32px;
+  gap: 20px;
+  margin-bottom: 36px;
 }
 
 .step-item {
@@ -320,13 +327,13 @@ html, body {
 }
 
 .step-circle {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: var(--fs-label);
   font-weight: 500;
   flex-shrink: 0;
   margin-top: 1px;
@@ -348,22 +355,23 @@ html, body {
 }
 
 .step-title {
-  font-size: 15px;
+  font-size: var(--fs-section);
   font-weight: 500;
   color: var(--amber-deep);
-  margin-bottom: 2px;
+  margin-bottom: 3px;
 }
 
 .step-desc {
-  font-size: 13px;
+  font-size: var(--fs-table);
   color: var(--amber-mid);
+  line-height: 1.4;
 }
 
 .callout-box {
   background-color: var(--cream);
   border-radius: var(--panel-radius);
   padding: 16px 20px;
-  font-size: 14px;
+  font-size: var(--fs-body);
   color: var(--amber-deep);
   display: flex;
   align-items: center;
