@@ -24,7 +24,7 @@ EXPECTED_COLUMNS = [
     "Raw_Bullet_3", "Source_Bullet_3", "Tier_Bullet_3",
     "Raw_Bullet_4", "Source_Bullet_4", "Tier_Bullet_4",
     "Image_URL", "Image_Status", "Image_Source", "Image_Tier",
-    "Override_Title", "Override_Subtitle", "Override_MRP", "Override_Spec_Capacity", "Override_Spec_Output", "Override_Spec_Ports", "Override_Spec_Weight", "Override_Spec_Warranty",
+    "Override_Title", "Override_Subtitle", "Override_DP", "Override_MRP", "Override_Spec_Capacity", "Override_Spec_Output", "Override_Spec_Ports", "Override_Spec_Weight", "Override_Spec_Warranty",
     "Override_Bullet_1", "Override_Bullet_2", "Override_Bullet_3", "Override_Bullet_4", "Override_Image_Path",
     "Attempts", "Fix_Log", "Flags", "LLM_Provider", "Status"
 ]
@@ -152,7 +152,7 @@ def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name:
             df[col] = None
 
     # Ensure all non-numeric columns are object dtype so string assignment is safe
-    numeric_columns = {"MRP_Input", "Raw_MRP_Scraped", "Override_MRP", "Attempts"}
+    numeric_columns = {"MRP_Input", "Raw_MRP_Scraped", "Override_MRP", "Override_DP", "Attempts"}
     for col in df.columns:
         if col not in numeric_columns:
             df[col] = df[col].astype("object")
@@ -181,7 +181,8 @@ def save_catalogue_data(df: pd.DataFrame, file_path: str = "data/catalogue_data.
 def get_effective_value(row: Union[pd.Series, Dict[str, Any]], field: str) -> Any:
     """
     Resolves effective value following ARCHITECTURE.md precedence:
-    - MRP: Override_MRP > MRP_Input > Raw_MRP_Scraped
+    - DP: Override_DP > MRP_Input
+    - MRP: Override_MRP > MRP_Display > Raw_MRP_Scraped
     - Text / Spec / Bullet: Override_{Field} > Raw_{Field}
     - Image: Override_Image_Path > Convention path images/{brand_slug}/{model_slug}.png
     """
@@ -190,11 +191,18 @@ def get_effective_value(row: Union[pd.Series, Dict[str, Any]], field: str) -> An
     else:
         row_dict = row
 
+    if field == "DP":
+        if not is_empty_value(row_dict.get("Override_DP")):
+            return row_dict.get("Override_DP")
+        if not is_empty_value(row_dict.get("MRP_Input")):
+            return row_dict.get("MRP_Input")
+        return None
+
     if field == "MRP":
         if not is_empty_value(row_dict.get("Override_MRP")):
             return row_dict.get("Override_MRP")
-        if not is_empty_value(row_dict.get("MRP_Input")):
-            return row_dict.get("MRP_Input")
+        if not is_empty_value(row_dict.get("MRP_Display")):
+            return row_dict.get("MRP_Display")
         if not is_empty_value(row_dict.get("Raw_MRP_Scraped")):
             return row_dict.get("Raw_MRP_Scraped")
         return None
@@ -262,10 +270,12 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
     else:
         effective_display_name = model_name
     
-    # MRP display precedence: MRP_Display (human override) -> Raw_MRP_Scraped
-    mrp_display_val = get_effective_value(row_dict, "MRP_Display")
-    raw_mrp_scraped = row_dict.get("Raw_MRP_Scraped")
-    effective_mrp = mrp_display_val if not is_empty_value(mrp_display_val) else raw_mrp_scraped if not is_empty_value(raw_mrp_scraped) else None
+    # Price resolution:
+    # DP (Dealer Price): Override_DP > MRP_Input
+    dp_val = get_effective_value(row_dict, "DP")
+
+    # MRP (Maximum Retail Price): Override_MRP > MRP_Display > Raw_MRP_Scraped
+    mrp_val = get_effective_value(row_dict, "MRP")
 
     category_raw = str(row_dict.get("Category") or "Powerbank").strip()
     category_slug = slugify(category_raw)
@@ -281,9 +291,12 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
         "model_slug": model_slug,
         "title": get_effective_value(row_dict, "Title") or f"{brand} {model_name}",
         "subtitle": get_effective_value(row_dict, "Subtitle") or "",
-        "mrp": get_effective_value(row_dict, "MRP"),
-        "mrp_raw": get_effective_value(row_dict, "MRP"),
-        "mrp_display": str(effective_mrp).strip() if effective_mrp and not is_empty_value(effective_mrp) else None,
+        "dp": dp_val,
+        "dp_raw": dp_val,
+        "price": dp_val,
+        "mrp": mrp_val,
+        "mrp_raw": dp_val,  # For backward-compatibility with callers reading mrp_raw as DP
+        "mrp_display": str(mrp_val).strip() if mrp_val and not is_empty_value(mrp_val) else None,
         "specs": {
             "capacity": get_effective_value(row_dict, "Spec_Capacity") or "",
             "output": get_effective_value(row_dict, "Spec_Output") or "",

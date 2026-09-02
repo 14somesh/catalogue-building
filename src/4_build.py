@@ -18,7 +18,8 @@ from src.utils.excel_handler import (
     load_catalogue_data,
     get_effective_product_dict,
     check_file_lock,
-    slugify
+    slugify,
+    is_empty_value
 )
 from src.utils.logger import setup_logger
 
@@ -324,20 +325,23 @@ def build_catalogue_pdf(
             brand_image_paths.append(raw_img_path)
             image_b64 = image_to_base64(raw_img_path) if os.path.exists(raw_img_path) else ""
             
-            # Format price
-            mrp_raw = prod.get("mrp_raw")
-            if mrp_raw is not None:
-                price_str = f"{int(mrp_raw):,}"
+            # Format price:
+            # 1. DP (Dealer Price): Override_DP > MRP_Input
+            dp_val = prod.get("dp_raw") if prod.get("dp_raw") is not None else prod.get("dp")
+            if dp_val is None and prod.get("mrp_raw") is not None:
+                dp_val = prod.get("mrp_raw")
+            if dp_val is not None and not is_empty_value(dp_val):
+                try:
+                    clean_dp = float(str(dp_val).replace("₹", "").replace("MRP", "").replace(",", "").strip())
+                    price_str = f"{int(clean_dp):,}"
+                except Exception:
+                    price_str = str(dp_val).strip()
             else:
-                mrp_val = str(prod.get("mrp", "TBD")).replace("₹", "").replace("MRP", "").strip()
-                price_str = mrp_val if mrp_val else "TBD"
+                price_str = "TBD"
 
-            raw_model = prod.get("model_name", "")
-            display_name = prod.get("display_name") or raw_model
-            subtitle_val = prod.get("subtitle", "")
-            bullets_list = prod.get("bullets", [])
-            mrp_display_val = prod.get("mrp_display")
-            if mrp_display_val is not None:
+            # 2. MRP (Maximum Retail Price): Override_MRP > MRP_Display > Raw_MRP_Scraped
+            mrp_display_val = prod.get("mrp_display") or prod.get("mrp")
+            if mrp_display_val is not None and not is_empty_value(mrp_display_val):
                 try:
                     clean_num = float(str(mrp_display_val).replace("₹", "").replace("MRP", "").replace(",", "").strip())
                     mrp_display_str = f"{int(clean_num):,}"
