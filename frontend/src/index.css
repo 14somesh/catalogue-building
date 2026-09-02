@@ -83,6 +83,11 @@ html, body {
   align-items: center;
   user-select: none;
   flex-shrink: 0;
+  border-bottom: 1px solid var(--amber-dark);
+}
+
+.top-nav--landing {
+  border-bottom: none;
 }
 
 .top-nav__inner {
@@ -136,7 +141,7 @@ html, body {
   background-color: rgba(255, 255, 255, 0.2);
 }
 
-/* Landing Section: Fills remaining viewport height, vertically centered, amber edge-to-edge */
+/* Landing Section: Fills remaining viewport height, optically centered at ~45%, amber edge-to-edge */
 .landing-section {
   background-color: var(--amber);
   width: 100%;
@@ -145,7 +150,7 @@ html, body {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  padding: 48px 0;
+  padding: 24px 0 64px 0;
 }
 
 .landing-content {
@@ -153,6 +158,7 @@ html, body {
   flex-direction: column;
   align-items: center;
   text-align: center;
+  transform: translateY(-28px);
 }
 
 .landing-glyphs {
@@ -377,3 +383,387 @@ html, body {
   align-items: center;
   gap: 12px;
 }
+
+/* ==========================================================================
+   Stage 1 — Ingest
+   ========================================================================== */
+.stage-1-container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.drop-zone {
+  background-color: var(--cream);
+  border: 2px dashed var(--amber-dark);
+  border-radius: var(--panel-radius);
+  padding: 64px 32px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+  user-select: none;
+}
+
+.drop-zone:hover,
+.drop-zone--active {
+  border-color: var(--amber);
+  background-color: #F8E6C8;
+}
+
+.drop-zone__icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.drop-zone__title {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--amber-deep);
+  margin-bottom: 8px;
+}
+
+.drop-zone__subline {
+  font-size: var(--fs-body);
+  color: var(--amber-mid);
+  margin-bottom: 24px;
+}
+
+.btn-secondary {
+  background-color: var(--amber-pale);
+  color: var(--amber-deep);
+  border: none;
+  border-radius: var(--panel-radius);
+  font-family: var(--font-family);
+  font-size: var(--fs-btn);
+  font-weight: 500;
+  padding: 8px 20px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: opacity 0.15s ease;
+}
+
+.btn-secondary:hover {
+  opacity: 0.9;
+}
+
+.btn-secondary:active {
+  opacity: 0.8;
+}
+
+.drop-zone__progress {
+  margin-top: 24px;
+  font-size: var(--fs-body);
+  color: var(--teal);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.spinner-indicator {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--teal-pale);
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.drop-zone__error {
+  margin-top: 18px;
+  font-size: 14px;
+  color: var(--red);
+  font-weight: 500;
+}
+
+.stage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 32px;
+}
+
+.stage-footer__left {
+  display: flex;
+  align-items: center;
+}
+
+.stage-footer__right {
+  display: flex;
+  align-items: center;
+}
+
+/* ==========================================================================
+   Stage 2 — Brochure & Parsed Rows
+   ========================================================================== */
+.stage-2-container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.stage-2-bar {
+  background-color: var(--amber);
+  border-radius: var(--panel-radius);
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stage-2-bar__left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.stage-2-bar__label {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--amber-deep);
+}
+
+.brand-select-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.brand-select {
+  background-color: #141413;
+  color: #FFFFFF;
+  border: none;
+  border-radius: var(--panel-radius);
+  padding: 8px 16px;
+  font-family: var(--font-family);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  appearance: auto;
+  outline: none;
+}
+
+.brand-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.brand-input {
+  background-color: #141413;
+  color: #FFFFFF;
+  border: 1px solid var(--amber-dark);
+  border-radius: var(--panel-radius);
+  padding: 7px 12px;
+  font-family: var(--font-family);
+  font-size: 15px;
+  font-weight: 500;
+  outline: none;
+}
+
+.brand-input-cancel {
+  background: none;
+  border: none;
+  color: var(--amber-deep);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.stage-2-bar__right {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.stage-2-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.stage-2-stat__number {
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--amber-deep);
+  line-height: 1.1;
+}
+
+.stage-2-stat__label {
+  font-size: 13px;
+  color: var(--amber-deep);
+}
+
+/* Parsed Rows Table */
+.parsed-rows-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.parsed-rows-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.parsed-rows-title {
+  font-size: var(--fs-section);
+  font-weight: 500;
+  color: var(--amber-deep);
+}
+
+.parsed-rows-hint {
+  font-size: 13px;
+  color: var(--grey-400);
+}
+
+.parsed-rows-table-wrap {
+  border-radius: var(--panel-radius);
+  overflow: hidden;
+  background-color: #FFFFFF;
+  border: 1px solid #E8E5DD;
+}
+
+.parsed-rows-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.parsed-rows-table thead tr {
+  background-color: #F7F5EF;
+  border-bottom: 1px solid #E8E5DD;
+}
+
+.parsed-rows-table th {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--amber-deep);
+  padding: 10px 16px;
+}
+
+.parsed-rows-table td {
+  font-size: 13px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #F0ECE1;
+  vertical-align: middle;
+}
+
+.parsed-rows-table tr:last-child td {
+  border-bottom: none;
+}
+
+.parsed-row--duplicate {
+  background-color: var(--cream);
+}
+
+.cell-flex {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dup-warning-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.cell-input {
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 5px 6px;
+  font-family: var(--font-family);
+  font-size: 13px;
+  color: var(--amber-deep);
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.cell-input:focus {
+  background: #FFFFFF;
+  border-color: var(--amber-dark);
+  outline: none;
+}
+
+.row-delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--grey-400);
+  transition: color 0.15s;
+}
+
+.row-delete-btn:hover {
+  color: var(--red);
+}
+
+/* Brochure Strip */
+.brochure-strip {
+  background-color: var(--cream);
+  border: 1.5px dashed var(--amber-dark);
+  border-radius: var(--panel-radius);
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.brochure-strip__left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brochure-strip__text {
+  display: flex;
+  flex-direction: column;
+}
+
+.brochure-strip__title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--amber-deep);
+  margin-bottom: 2px;
+}
+
+.brochure-strip__subtitle {
+  font-size: 13px;
+  color: var(--amber-mid);
+}
+
+.brochure-strip__right {
+  display: flex;
+  align-items: center;
+}
+
+.stage-error-banner {
+  background-color: #FDF3F3;
+  border: 1px solid var(--red);
+  border-radius: var(--panel-radius);
+  padding: 12px 16px;
+  color: var(--red);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+

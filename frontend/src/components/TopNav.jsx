@@ -2,8 +2,10 @@ import React from 'react';
 import { PowerbankIcon } from './PowerbankIcon';
 
 export function TopNav({ currentRoute, onNavigate }) {
+  const isLanding = currentRoute === '/';
+
   return (
-    <header className="top-nav">
+    <header className={`top-nav ${isLanding ? 'top-nav--landing' : ''}`}>
       <div className="top-nav__inner">
         <div
           className="top-nav__logo"
