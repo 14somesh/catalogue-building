@@ -261,10 +261,10 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
         if df.empty:
             raise ValueError(f"No products found for brand '{brand}' in {excel_path}")
     
-    # Build only ready/approved rows (exclude Skipped, Blocked, Pending, Deferred)
-    df = df[df["Status"].isin(["Ready_For_Review", "Approved"])]
+    # Build only approved rows (exclude Skipped, Blocked, Pending, Deferred, Ready_For_Review)
+    df = df[df["Status"] == "Approved"]
     if df.empty:
-        raise ValueError(f"No approved or ready products to build in {excel_path}")
+        raise ValueError(f"No approved products to build in {excel_path}")
     
     # 1. Determine brand sequence
     config_brand_order = config.get("brand_order") or []
