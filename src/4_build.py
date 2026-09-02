@@ -5,6 +5,7 @@ import yaml
 import base64
 import mimetypes
 from datetime import datetime
+from typing import Optional, Callable, Dict, Any
 from PIL import Image
 import numpy as np
 from jinja2 import Environment, FileSystemLoader
@@ -242,7 +243,11 @@ def validate_product_data(prod: dict, raw_row: dict) -> None:
     validate_image_aspect_ratio(raw_img_path, pid)
 
 
-def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] = None) -> str:
+def build_catalogue_pdf(
+    config_path: str = "config.yaml",
+    brand: Optional[str] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+) -> str:
     """
     Main PDF builder: reads Excel, validates data against Section A rules,
     arranges 2-products-per-page with 1-up odd remainder, renders Jinja2 templates,
@@ -252,6 +257,15 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
     check_file_lock(excel_path)
     
+    if progress_callback:
+        progress_callback({
+            "stage": "load",
+            "product_id": None,
+            "current": 1,
+            "total": 5,
+            "message": f"Reading master dataset from {excel_path}..."
+        })
+
     logger.info(f"Reading master dataset from {excel_path}...")
     df = load_catalogue_data(excel_path)
 
@@ -380,6 +394,15 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
             "total_pages": len(pages)
         })
 
+    if progress_callback:
+        progress_callback({
+            "stage": "paginate",
+            "product_id": None,
+            "current": 2,
+            "total": 5,
+            "message": f"Paginated layout constructed: {len(brand_groups)} brands, {sum(g['total_products'] for g in brand_groups)} products"
+        })
+
     # 4. Read CSS styles & self-hosted fonts
     with open("styles/tokens.css", "r", encoding="utf-8") as f:
         tokens_css = f.read()
@@ -419,8 +442,25 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
         f.write(rendered_html)
     logger.info(f"Saved HTML preview to {preview_html_path}")
 
+    if progress_callback:
+        progress_callback({
+            "stage": "render",
+            "product_id": None,
+            "current": 3,
+            "total": 5,
+            "message": f"Saved HTML preview to {preview_html_path}"
+        })
+
     # 6. Compile PDF with Playwright Chromium and Validate Rendered Dimensions
     logger.info(f"Compiling PDF via Playwright Headless Chromium to {output_pdf}...")
+    if progress_callback:
+        progress_callback({
+            "stage": "compile",
+            "product_id": None,
+            "current": 4,
+            "total": 5,
+            "message": f"Compiling PDF via Playwright Headless Chromium to {output_pdf}..."
+        })
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -507,7 +547,19 @@ def build_catalogue_pdf(config_path: str = "config.yaml", brand: Optional[str] =
         )
 
     logger.info(f"PDF build complete: {output_pdf} (verified {actual_pages}/{expected_pages} pages)")
+    if progress_callback:
+        progress_callback({
+            "stage": "complete",
+            "product_id": None,
+            "current": 5,
+            "total": 5,
+            "message": f"PDF build complete: {output_pdf} (verified {actual_pages} pages)"
+        })
     return output_pdf
+
+
+# Convenience alias for external callers
+build_catalogue = build_catalogue_pdf
 
 
 if __name__ == "__main__":

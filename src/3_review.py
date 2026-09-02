@@ -150,7 +150,10 @@ def process_row_loop(
     config: dict,
     brand_defaults: dict,
     enable_semantic_audit: bool = False,
-    exclude_urls: Optional[Set[str]] = None
+    exclude_urls: Optional[Set[str]] = None,
+    progress_callback: Optional[Any] = None,
+    current_index: int = 1,
+    total_count: int = 1
 ) -> Dict[str, Any]:
     """
     Executes the autonomous loop for a single row:
@@ -175,9 +178,25 @@ def process_row_loop(
     while attempts < MAX_LOOP_ATTEMPTS:
         attempts += 1
         logger.info(f"[{pid}] Loop execution attempt {attempts}/{MAX_LOOP_ATTEMPTS}...")
+        if progress_callback:
+            progress_callback({
+                "stage": "row_loop",
+                "product_id": pid,
+                "current": current_index,
+                "total": total_count,
+                "message": f"[{pid}] Loop attempt {attempts}/{MAX_LOOP_ATTEMPTS} started"
+            })
 
         # Step 1: Collect (if not already collected)
         if is_empty_value(current_row.get("Raw_Title")) and is_empty_value(current_row.get("Override_Title")):
+            if progress_callback:
+                progress_callback({
+                    "stage": "collect",
+                    "product_id": pid,
+                    "current": current_index,
+                    "total": total_count,
+                    "message": f"[{pid}] Executing tiered collection"
+                })
             collect_updates, success, c_log = collect_mod.collect_data_for_row(current_row, config, exclude_urls=exclude_urls)
             current_row.update(collect_updates)
             fix_logs.append(f"Attempt {attempts}: {c_log}")
@@ -194,6 +213,14 @@ def process_row_loop(
                 break
 
         # Step 2: Image Resolution
+        if progress_callback:
+            progress_callback({
+                "stage": "image",
+                "product_id": pid,
+                "current": current_index,
+                "total": total_count,
+                "message": f"[{pid}] Resolving and auditing image"
+            })
         images_dir = config.get("paths", {}).get("images_dir", "images")
         img_path = resolve_product_image_path(current_row, images_dir=images_dir)
         img_url = current_row.get("Image_URL")
@@ -211,6 +238,14 @@ def process_row_loop(
 
         # Step 3: Deterministic Validation (Hard & Warn checks)
         is_passed, hard_flags, warnings = validate_row_deterministic(current_row, all_rows, brand_defaults)
+        if progress_callback:
+            progress_callback({
+                "stage": "validate",
+                "product_id": pid,
+                "current": current_index,
+                "total": total_count,
+                "message": f"[{pid}] Deterministic validation: passed={is_passed}"
+            })
 
         if is_passed:
             # Step 4: LLM Semantic Advisory Pass (WARN-ONLY, optional behind flag, off by default)
@@ -229,6 +264,14 @@ def process_row_loop(
 
         # Step 5: Attempt Auto-Fix
         logger.warning(f"[{pid}] Validation failed with hard flags: {hard_flags}")
+        if progress_callback:
+            progress_callback({
+                "stage": "auto_fix",
+                "product_id": pid,
+                "current": current_index,
+                "total": total_count,
+                "message": f"[{pid}] Attempting auto-fix for: {', '.join(hard_flags)[:60]}"
+            })
         updated_row, fix_attempted, fix_log = attempt_auto_fix(
             current_row, hard_flags, config, brand_defaults, attempts
         )

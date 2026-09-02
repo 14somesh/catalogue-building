@@ -3,8 +3,9 @@ import sys
 import re
 import json
 import argparse
+import time
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union, Callable, Any
 from PIL import Image
 import pandas as pd
 
@@ -512,11 +513,18 @@ def format_final_presentation_table(df: pd.DataFrame, brand_name: str, category:
     return "\n".join(lines)
 
 
-def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic_audit: bool = False) -> str:
+def run_brand(
+    brand_name: str,
+    config_path: str = "config.yaml",
+    enable_semantic_audit: bool = False,
+    return_summary: bool = False,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+) -> Union[str, Dict[str, Any]]:
     """
     Main unattended orchestrator for a specific brand:
     multi-provider pre-flight check -> load -> collect -> images -> validate -> fix loop -> report.
     """
+    start_time = time.time()
     config = load_config(config_path)
     excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
     check_file_lock(excel_path)
@@ -543,6 +551,7 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
 
     # ==================== PRE-FLIGHT MULTI-PROVIDER QUOTA CHECK ====================
     brand_indices = df[brand_mask].index
+    total_brand_rows = len(brand_indices)
     pending_count = sum(
         1 for idx in brand_indices
         if is_empty_value(df.loc[idx, "Raw_Title"]) and is_empty_value(df.loc[idx, "Override_Title"])
@@ -550,38 +559,105 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
     calls_per_row = 2 if enable_semantic_audit else 1
     estimated_calls = pending_count * calls_per_row
 
-    logger.info(f"[Pre-flight] Brand '{brand_name}': {len(brand_indices)} total products, {pending_count} pending collection.")
+    logger.info(f"[Pre-flight] Brand '{brand_name}': {total_brand_rows} total products, {pending_count} pending collection.")
     logger.info(f"[Pre-flight] Estimated LLM calls needed: {estimated_calls} ({calls_per_row} per pending product).")
+
+    if progress_callback:
+        progress_callback({
+            "stage": "preflight",
+            "product_id": None,
+            "current": 0,
+            "total": total_brand_rows,
+            "message": f"Pre-flight quota and duplicate check for {brand_name} ({pending_count} pending products)"
+        })
 
     if pending_count > 0:
         try:
             preflight_quota_check(llm_config=config.get("llm", {}))
         except AllLLMProvidersExhaustedError as e:
             logger.error(f"[Pre-flight HALT] {e}")
-            print(f"\n[HALT] {e}\n")
-            return ""
+            if not return_summary:
+                print(f"\n[HALT] {e}\n")
+                return ""
+            return {
+                "brand": brand_name,
+                "report_path": "",
+                "runtime": round(time.time() - start_time, 2),
+                "status_counts": {},
+                "rows": [],
+                "table_markdown": "",
+                "halt_reason": str(e)
+            }
 
     logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products, semantic audit={enable_semantic_audit})...")
     brand_defaults = load_brand_defaults(brand_name)
     all_rows = [row.to_dict() for _, row in df.iterrows()]
 
-    for idx in df[brand_mask].index:
+    for i, idx in enumerate(brand_indices, 1):
         row_dict = df.loc[idx].to_dict()
+        pid = row_dict.get("Product_ID")
+        model = row_dict.get("Model_Name")
+        if progress_callback:
+            progress_callback({
+                "stage": "row_start",
+                "product_id": pid,
+                "current": i,
+                "total": total_brand_rows,
+                "message": f"Processing product {i}/{total_brand_rows}: {model} ({pid})"
+            })
         try:
             processed_row = process_row_loop(
-                row_dict, all_rows, config, brand_defaults, enable_semantic_audit=enable_semantic_audit
+                row_dict, all_rows, config, brand_defaults,
+                enable_semantic_audit=enable_semantic_audit,
+                progress_callback=progress_callback,
+                current_index=i,
+                total_count=total_brand_rows
             )
             for k, v in processed_row.items():
                 df.at[idx, k] = v
+            if progress_callback:
+                progress_callback({
+                    "stage": "row_done",
+                    "product_id": pid,
+                    "current": i,
+                    "total": total_brand_rows,
+                    "message": f"Finished product {i}/{total_brand_rows}: {pid} -> {processed_row.get('Status')}"
+                })
         except AllLLMProvidersExhaustedError as e:
             logger.error(f"[Pipeline HALT] {e}")
-            print(f"\n[HALT] {e}\n")
-            return ""
+            if not return_summary:
+                print(f"\n[HALT] {e}\n")
+                return ""
+            return {
+                "brand": brand_name,
+                "report_path": "",
+                "runtime": round(time.time() - start_time, 2),
+                "status_counts": {},
+                "rows": [],
+                "table_markdown": "",
+                "halt_reason": str(e)
+            }
 
     # Resolve any URL collisions across the brand (Rule 2)
+    if progress_callback:
+        progress_callback({
+            "stage": "collision_check",
+            "product_id": None,
+            "current": total_brand_rows,
+            "total": total_brand_rows,
+            "message": "Resolving URL collisions within brand"
+        })
     df = resolve_brand_url_collisions(df, brand_name, config, brand_defaults, enable_semantic_audit=enable_semantic_audit)
 
     # ==================== STEP 5.5: AUTOMATIC POST-RUN LLM REVIEW ====================
+    if progress_callback:
+        progress_callback({
+            "stage": "post_review",
+            "product_id": None,
+            "current": total_brand_rows,
+            "total": total_brand_rows,
+            "message": "Executing automatic post-run LLM review"
+        })
     df = execute_automatic_llm_post_run_review(df, brand_name, config, brand_defaults)
 
     save_catalogue_data(df, excel_path)
@@ -592,18 +668,63 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
         brand_name, brand_rows, output_dir=config.get("paths", {}).get("output_dir", "dist"), category=category_name
     )
     
-    ready_count = sum(1 for r in brand_rows if r.get("Status") in ("Ready_For_Review", "Approved"))
+    ready_count = sum(1 for r in brand_rows if r.get("Status") == "Ready_For_Review")
+    approved_count = sum(1 for r in brand_rows if r.get("Status") == "Approved")
     blocked_count = sum(1 for r in brand_rows if r.get("Status") == "Blocked")
     skipped_count = sum(1 for r in brand_rows if r.get("Status") == "Skipped")
     deferred_count = sum(1 for r in brand_rows if r.get("Status") == "Deferred")
 
-    logger.info(f"Brand run complete for '{brand_name}': {ready_count} Ready for Review | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
+    logger.info(f"Brand run complete for '{brand_name}': {ready_count} Ready for Review | {approved_count} Approved | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
 
     # ==================== STEP 5.5: FINAL PRESENTATION & QUESTION PROMPT ====================
     table_output = format_final_presentation_table(df, brand_name, category=category_name)
-    print(table_output)
+    
+    if progress_callback:
+        progress_callback({
+            "stage": "complete",
+            "product_id": None,
+            "current": total_brand_rows,
+            "total": total_brand_rows,
+            "message": f"Brand run complete for '{brand_name}': {ready_count} Ready, {approved_count} Approved, {blocked_count} Blocked, {skipped_count} Skipped"
+        })
 
-    return report_path
+    if not return_summary:
+        print(table_output)
+        return report_path
+
+    per_row_results = []
+    for r in brand_rows:
+        tier_val = r.get("Tier_Title") or r.get("Tier_Spec_Capacity") or 1
+        per_row_results.append({
+            "Product_ID": r.get("Product_ID"),
+            "Model_Name": r.get("Model_Name"),
+            "Display_Name": r.get("Display_Name"),
+            "Status": r.get("Status"),
+            "Source_URL": r.get("Source_URL"),
+            "Tier": tier_val,
+            "Attempts": r.get("Attempts"),
+            "Fix_Log": r.get("Fix_Log"),
+            "Flags": r.get("Flags"),
+        })
+
+    status_counts = {
+        "ready_count": ready_count,
+        "approved_count": approved_count,
+        "blocked_count": blocked_count,
+        "skipped_count": skipped_count,
+        "deferred_count": deferred_count,
+        "total_count": len(brand_rows)
+    }
+
+    return {
+        "brand": brand_name,
+        "report_path": report_path,
+        "runtime": round(time.time() - start_time, 2),
+        "status_counts": status_counts,
+        "rows": per_row_results,
+        "table_markdown": table_output,
+        "halt_reason": None
+    }
 
 
 if __name__ == "__main__":

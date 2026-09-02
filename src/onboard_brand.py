@@ -243,7 +243,7 @@ def register_brand_config(inference: BrandInferenceSchema, config_path: str = "c
 def append_products_to_catalogue(
     inference: BrandInferenceSchema,
     excel_path: str = "data/catalogue_data.xlsx"
-) -> int:
+) -> Tuple[int, List[Dict[str, Any]]]:
     """Appends the newly onboarded product rows to the master Excel catalogue."""
     df = load_catalogue_data(excel_path)
     
@@ -289,4 +289,4 @@ def append_products_to_catalogue(
     combined_df = pd.concat([df, new_df], ignore_index=True)
     save_catalogue_data(combined_df, excel_path)
     logger.info(f"Appended {len(new_rows)} rows for brand '{inference.brand_name}' to {excel_path}")
-    return len(new_rows)
+    return len(new_rows), new_rows
