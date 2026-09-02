@@ -727,11 +727,113 @@ def run_brand(
     }
 
 
+def re_run_product(
+    product_id: str,
+    config_path: str = "config.yaml",
+    enable_semantic_audit: bool = False,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+) -> Dict[str, Any]:
+    """
+    Re-runs the autonomous pipeline for a single product row:
+    - Clears that row's Raw_* fields and their matching Source_/Tier_ fields
+    - Preserves all Override_* fields untouched
+    - Resets Attempts to 0 and Status to 'Pending'
+    - Runs process_row_loop() for that row only
+    - Saves and returns the updated row dict
+    Works even when the row is currently Approved, Skipped, or Blocked, and when Attempts >= 3.
+    """
+    config = load_config(config_path)
+    excel_path = config.get("paths", {}).get("excel_file", "data/catalogue_data.xlsx")
+    check_file_lock(excel_path)
+
+    df = load_catalogue_data(excel_path)
+    mask = df["Product_ID"].astype(str).str.strip().str.lower() == product_id.strip().lower()
+    if not mask.any():
+        raise ValueError(f"Product_ID '{product_id}' not found in {excel_path}")
+
+    idx = df[mask].index[0]
+    row_dict = df.loc[idx].to_dict()
+
+    logger.info(f"Initiating single-product re-run for '{product_id}' (current status: {row_dict.get('Status')}, attempts: {row_dict.get('Attempts')})...")
+
+    # 1. Clear Raw_*, Source_*, Tier_* fields
+    raw_spec_keys = ["Capacity", "Output", "Ports", "Weight", "Warranty"]
+    fields_to_clear = [
+        "Raw_Title", "Source_Title", "Tier_Title",
+        "Raw_Subtitle", "Source_Subtitle", "Tier_Subtitle",
+        "Raw_MRP_Scraped", "Source_MRP_Scraped", "Tier_MRP_Scraped",
+        "Source_URL", "Source_Audit",
+        "Image_URL", "Image_Status", "Image_Source", "Image_Tier",
+        "Flags", "Fix_Log", "LLM_Provider"
+    ]
+    for k in raw_spec_keys:
+        fields_to_clear.extend([f"Raw_Spec_{k}", f"Source_Spec_{k}", f"Tier_Spec_{k}"])
+    for b_idx in range(1, 5):
+        fields_to_clear.extend([f"Raw_Bullet_{b_idx}", f"Source_Bullet_{b_idx}", f"Tier_Bullet_{b_idx}"])
+
+    for field in fields_to_clear:
+        row_dict[field] = None
+
+    # 2. Reset Attempts to 0 and Status to 'Pending'
+    row_dict["Attempts"] = 0
+    row_dict["Status"] = "Pending"
+
+    if progress_callback:
+        progress_callback({
+            "stage": "row_start",
+            "product_id": product_id,
+            "current": 1,
+            "total": 1,
+            "message": f"Reset fields and started re-run for {product_id}"
+        })
+
+    # 3. Run process_row_loop for this row only
+    brand = str(row_dict.get("Brand", "")).strip()
+    brand_defaults = load_brand_defaults(brand)
+    all_rows = [r.to_dict() for _, r in df.iterrows()]
+    for r_idx, r in enumerate(all_rows):
+        if str(r.get("Product_ID")).strip().lower() == product_id.strip().lower():
+            all_rows[r_idx] = row_dict
+            break
+
+    processed_row = process_row_loop(
+        row_dict, all_rows, config, brand_defaults,
+        enable_semantic_audit=enable_semantic_audit,
+        progress_callback=progress_callback,
+        current_index=1,
+        total_count=1
+    )
+
+    # 4. Save and return updated row dict
+    for k, v in processed_row.items():
+        df.at[idx, k] = v
+
+    save_catalogue_data(df, excel_path)
+    logger.info(f"Single-product re-run complete for '{product_id}'. Final status: {processed_row.get('Status')}")
+
+    if progress_callback:
+        progress_callback({
+            "stage": "complete",
+            "product_id": product_id,
+            "current": 1,
+            "total": 1,
+            "message": f"Single-product re-run complete for {product_id} -> {processed_row.get('Status')}"
+        })
+
+    return processed_row
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Brand Pipeline Runner")
-    parser.add_argument("--brand", required=True, help="Brand name to process (e.g. Stuffcool)")
+    parser.add_argument("--brand", default=None, help="Brand name to process (e.g. Stuffcool)")
+    parser.add_argument("--pid", default=None, help="Specific Product_ID to re-run (e.g. PB-PEB-004)")
     parser.add_argument("--config", default="config.yaml", help="Path to configuration YAML file")
     parser.add_argument("--semantic-audit", action="store_true", default=False, help="Enable optional LLM semantic audit pass")
     args = parser.parse_args()
     
-    run_brand(args.brand, config_path=args.config, enable_semantic_audit=args.semantic_audit)
+    if args.pid:
+        re_run_product(args.pid, config_path=args.config, enable_semantic_audit=args.semantic_audit)
+    elif args.brand:
+        run_brand(args.brand, config_path=args.config, enable_semantic_audit=args.semantic_audit)
+    else:
+        parser.error("Must specify either --brand or --pid")
