@@ -84,6 +84,28 @@ brands:
       - "amazon"
       - "collection_thumb"
 
+  EVM:
+    domain: "evmzone.com"
+    collection_url: "https://evmzone.com/evm-products/powerbank.html"
+    default_warranty: "2 Years"
+    retail_order:
+      - "reliance"
+    qualifier_tokens:
+      - "Pro"
+      - "Plus"
+      - "Mini"
+      - "Neo"
+      - "Ace"
+      - "Max"
+      - "Ultra"
+      - "Lite"
+      - "Go"
+    image_tier_order:
+      - "brand_product"
+      - "retail"
+      - "amazon"
+      - "collection_thumb"
+
   # Standard template for future brands
   _default:
     retail_order:

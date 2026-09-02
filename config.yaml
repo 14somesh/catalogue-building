@@ -9,6 +9,7 @@ brand_order:
   - "Pebble"
   - "Portronics"
   - "Urbn"
+  - "EVM"
 
 page_setup:
   paper_size: "A4"

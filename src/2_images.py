@@ -92,6 +92,8 @@ def upgrade_cdn_url_resolution(url: str) -> str:
             url = f"{url}{sep}width=2048"
     elif "media-amazon.com" in url or "images-amazon.com" in url:
         url = re.sub(r'\._[A-Z0-9_,]+_\.', '._SL1500_.', url)
+    elif "media/catalog/product" in url:
+        url = re.sub(r'/cache/[a-f0-9]+/', '/', url)
     return url
 
 
@@ -196,6 +198,27 @@ def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:
                         candidates.append(src)
         except Exception as e:
             logger.debug(f"Failed fetching Shopify JSON gallery from {json_url}: {e}")
+
+    # Fallback to HTML DOM image extraction (for Magento / WooCommerce / Custom brand sites)
+    if not candidates:
+        try:
+            r = requests.get(clean_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code == 200:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(r.text, "html.parser")
+                for img in soup.find_all("img"):
+                    src = img.get("src") or img.get("data-src")
+                    if src:
+                        is_prod = any(m in src for m in ["media/catalog/product", "cdn/shop", "cdn.shopify", "wp-content/uploads"])
+                        if not is_prod:
+                            continue
+                        master = re.sub(r'/cache/[a-f0-9]+/', '/', src)
+                        if master.startswith("//"):
+                            master = "https:" + master
+                        if master not in candidates and not any(ign in master.lower() for ign in ["logo", "icon", "banner", "payment", "badge"]):
+                            candidates.append(master)
+        except Exception as e:
+            logger.debug(f"Failed fetching HTML gallery from {clean_url}: {e}")
 
     # Rank candidates: prioritize 3D packshots / dome / isolated renders
     def _candidate_rank(u: str) -> int:

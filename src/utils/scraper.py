@@ -176,7 +176,10 @@ def score_candidate_match(
     
     # Extra tokens penalty in model portion (Rule 1 & Rule 3)
     # If candidate model-name segment contains extra model tokens not in target, reject as different model
-    extra_model_tokens = (cand_model_tokens - target_tokens) - qualifiers_norm
+    raw_extra_tokens = (cand_model_tokens - target_tokens) - qualifiers_norm
+    # Ignore internal SKU part numbers (e.g. 'p0109', 'p0208', 'p0301', '0109', 'p')
+    sku_tokens = {tok for tok in raw_extra_tokens if re.fullmatch(r'p\d+|\d{3,5}|p|sku', tok, re.I)}
+    extra_model_tokens = raw_extra_tokens - sku_tokens
     if extra_model_tokens:
         reason = f"Extra model token mismatch in '{cand_model_part}': candidate has {extra_model_tokens} not in target '{target_model_name}'."
         logger.warning(f"Rejected candidate '{candidate_title}' for '{target_model_name}': {reason}")

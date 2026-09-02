@@ -47,9 +47,9 @@ class ShopifyParser(BaseParser):
         if h1:
             product_title = h1.get_text().strip()
 
-        # Extract Accordion & Tab Specs (Details/Summary, .accordion, .specs, tables)
+        # Extract Accordion & Tab Specs (Details/Summary, .accordion, .specs, tables, overview)
         spec_text_blocks = []
-        for acc in soup.find_all(["details", "table", "div", "section"], class_=re.compile(r"accordion|spec|tab|tech|detail", re.I)):
+        for acc in soup.find_all(["details", "table", "div", "section"], class_=re.compile(r"accordion|spec|tab|tech|detail|overview|feature", re.I)):
             spec_text_blocks.append(acc.get_text(separator=" ", strip=True))
 
         # Main product description container
@@ -108,19 +108,31 @@ class ShopifyParser(BaseParser):
             meta_tag = soup.find("meta", property=meta_prop) or soup.find("meta", attrs={"name": meta_prop})
             if meta_tag and meta_tag.get("content"):
                 src = meta_tag["content"].strip()
-                if ("cdn/shop" in src or "cdn.shopify" in src) and not any(ign in src.lower() for ign in ["preview_images", "thumbnail", "video", "poster", "icon", "logo", "badge"]):
+                is_product_img = any(p in src for p in ["cdn/shop", "cdn.shopify", "media/catalog/product", "wp-content/uploads"])
+                if is_product_img and not any(ign in src.lower() for ign in ["preview_images", "thumbnail", "video", "poster", "icon", "logo", "badge"]):
                     if src.startswith("//"):
                         src = f"https:{src}"
                     elif src.startswith("http://"):
                         src = "https://" + src[7:]
-                    src = re.sub(r"width=\d+", "width=2048", src) if "width=" in src else f"{src}&width=2048" if "?" in src else f"{src}?width=2048"
+                    
+                    if "width=" in src:
+                        src = re.sub(r"width=\d+", "width=2048", src)
+                    elif "media/catalog/product" in src:
+                        src = re.sub(r'/cache/[a-f0-9]+/', '/', src)
+                    else:
+                        sep = "&" if "?" in src else "?"
+                        src = f"{src}{sep}width=2048"
+
                     if src not in image_urls:
                         image_urls.append(src)
 
         # 2. Gallery product photos
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or img.get("data-master")
-            if src and ("cdn/shop" in src or "cdn.shopify" in src):
+            if src:
+                is_product_img = any(p in src for p in ["cdn/shop", "cdn.shopify", "media/catalog/product", "wp-content/uploads"])
+                if not is_product_img:
+                    continue
                 # Strict exclusion of video poster thumbnails and UI elements
                 if any(ign in src.lower() for ign in ["preview_images", "thumbnail", "video", "poster", "icon", "logo", "badge", "payment", "flag", "star", "review"]):
                     continue
@@ -132,7 +144,9 @@ class ShopifyParser(BaseParser):
 
                 if "width=" in src:
                     src = re.sub(r"width=\d+", "width=2048", src)
-                else:
+                elif "media/catalog/product" in src:
+                    src = re.sub(r'/cache/[a-f0-9]+/', '/', src)
+                elif "cdn/shop" in src or "cdn.shopify" in src:
                     sep = "&" if "?" in src else "?"
                     src = f"{src}{sep}width=2048"
 
@@ -175,20 +189,34 @@ class ShopifyParser(BaseParser):
         watt = re.search(r'\b(\d+(?:\.\d+)?\s*W(?:att)?)\b', text, re.I)
         if watt:
             specs["output"] = f"{watt.group(1)} Fast Charging"
+        else:
+            va = re.search(r'(\d+(?:\.\d+)?\s*V)\s*[/xX,\s]\s*(\d+(?:\.\d+)?\s*A)', text, re.I)
+            if va:
+                try:
+                    volts = float(re.search(r'\d+(?:\.\d+)?', va.group(1)).group(0))
+                    amps = float(re.search(r'\d+(?:\.\d+)?', va.group(2)).group(0))
+                    calc_w = int(round(volts * amps))
+                    specs["output"] = f"{calc_w}W Output"
+                except Exception:
+                    pass
 
         # Ports
         ports = []
         if re.search(r'type-?c|usb-?c', text, re.I):
             ports.append("Type-C")
-        if re.search(r'usb-?a|qc\s*3\.0', text, re.I):
+        if re.search(r'usb-?a|qc\s*3\.0|\busb\s*output\b', text, re.I):
             ports.append("USB-A")
+        if re.search(r'micro\s*usb|\bmicro\b', text, re.I):
+            ports.append("Micro-USB")
         if re.search(r'wireless|magsafe|qi2?', text, re.I):
             ports.append("Magnetic Wireless")
+        if re.search(r'lightning', text, re.I):
+            ports.append("Lightning")
         if ports:
             specs["ports"] = ", ".join(ports)
 
         # Weight
-        wt = re.search(r'\b(\d{2,3}(?:\.\d+)?)\s*(?:g|grams|gm)\b', text, re.I)
+        wt = re.search(r'\b(\d{2,4}(?:\.\d+)?)\s*(?:g|grams|gm)\b', text, re.I)
         if wt:
             specs["weight"] = f"{wt.group(1)}g"
 
