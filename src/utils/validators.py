@@ -136,12 +136,24 @@ def validate_row_deterministic(
     override_img = row_dict.get("Override_Image_Path")
     brand_slug = slugify(brand)
     model_slug = slugify(model_name)
+    category_slug = slugify(str(row_dict.get("Category") or "powerbank"))
     images_dir = (brand_defaults or {}).get("images_dir", "images")
     clean_dir = images_dir.rstrip("/\\")
-    if brand_slug and brand_slug in clean_dir.lower():
-        default_img_path = f"{clean_dir}/{model_slug}.png"
+    
+    if category_slug and category_slug in clean_dir.lower():
+        if brand_slug and brand_slug in clean_dir.lower():
+            default_img_path = f"{clean_dir}/{model_slug}.png"
+        else:
+            default_img_path = f"{clean_dir}/{brand_slug}/{model_slug}.png"
     else:
-        default_img_path = f"{clean_dir}/{brand_slug}/{model_slug}.png"
+        cat_img_path = f"{clean_dir}/{category_slug}/{brand_slug}/{model_slug}.png"
+        if os.path.exists(cat_img_path):
+            default_img_path = cat_img_path
+        elif os.path.exists(f"{clean_dir}/{brand_slug}/{model_slug}.png"):
+            default_img_path = f"{clean_dir}/{brand_slug}/{model_slug}.png"
+        else:
+            default_img_path = cat_img_path
+            
     expected_img_path = str(override_img).strip() if not is_empty_value(override_img) else default_img_path
     
     if not os.path.exists(expected_img_path) or not os.path.isfile(expected_img_path) or os.path.getsize(expected_img_path) == 0:
@@ -161,7 +173,14 @@ def validate_row_deterministic(
                 other_pid = str(other_row.get("Product_ID", "")).strip()
                 if other_pid != pid and other_row.get("Status") != "Skipped":
                     other_override = other_row.get("Override_Image_Path")
-                    other_path = str(other_override).strip() if not is_empty_value(other_override) else f"images/{slugify(other_row.get('Brand', ''))}/{slugify(other_row.get('Model_Name', ''))}.png"
+                    other_cat = slugify(str(other_row.get("Category") or "powerbank"))
+                    other_b = slugify(other_row.get("Brand", ""))
+                    other_m = slugify(other_row.get("Model_Name", ""))
+                    if not is_empty_value(other_override):
+                        other_path = str(other_override).strip()
+                    else:
+                        other_cat_path = f"images/{other_cat}/{other_b}/{other_m}.png"
+                        other_path = other_cat_path if os.path.exists(other_cat_path) else f"images/{other_b}/{other_m}.png"
                     if os.path.abspath(other_path) != os.path.abspath(expected_img_path) and os.path.exists(other_path) and os.path.isfile(other_path):
                         other_hash = get_image_file_hash(other_path)
                         if other_hash == img_hash:

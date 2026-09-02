@@ -68,23 +68,29 @@ def load_config(config_path: str = "config.yaml") -> dict:
 def resolve_output_pdf_path(config: dict, brand: Optional[str] = None) -> str:
     """
     Resolves the output PDF file path using category name and current timestamp.
-    Writes to dist/{brand_slug}/ when brand is provided.
-    Writes to dist/combined/ when building multiple brands (combined build).
+    Writes to dist/{category_slug}/{brand_slug}/ when brand is provided.
+    Writes to dist/{category_slug}/combined/ when building multiple brands (combined build).
     Configurable via paths.output_filename_pattern in config.yaml.
     """
     paths_cfg = config.get("paths", {})
     output_dir = paths_cfg.get("output_dir", "dist/")
     pattern = paths_cfg.get("output_filename_pattern", "{category}_catalogue_{timestamp}.pdf")
     
-    category_raw = config.get("category", {}).get("name", "catalogue")
+    category_raw = config.get("category", {}).get("name", "powerbank")
     category_slug = slugify(category_raw)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     
+    clean_output_dir = output_dir.rstrip("/\\")
+    if category_slug not in clean_output_dir.lower():
+        cat_output_dir = os.path.join(clean_output_dir, category_slug)
+    else:
+        cat_output_dir = clean_output_dir
+        
     filename = pattern.format(category=category_slug, timestamp=timestamp)
     if brand:
         brand_slug = slugify(brand)
-        return os.path.join(output_dir, brand_slug, filename)
-    return os.path.join(output_dir, "combined", filename)
+        return os.path.join(cat_output_dir, brand_slug, filename)
+    return os.path.join(cat_output_dir, "combined", filename)
 
 
 def format_name_html(model_name: str) -> str:

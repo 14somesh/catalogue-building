@@ -32,7 +32,7 @@ from src.utils.logger import setup_logger
 logger = setup_logger("run_brand")
 
 
-def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") -> str:
+def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist", category: str = "powerbank") -> str:
     """
     Generates a comprehensive Markdown run report for human review:
     - Summary header: Ready / Blocked / Deferred / Warnings
@@ -40,7 +40,14 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
     - Full breakdown per product row with field sources, tiers, attempts, image metrics, and LLM Provider.
     """
     brand_slug = slugify(brand)
-    brand_output_dir = os.path.join(output_dir, brand_slug) if brand_slug not in output_dir else output_dir
+    category_slug = slugify(category)
+    clean_output_dir = output_dir.rstrip("/\\")
+    if category_slug not in clean_output_dir.lower():
+        cat_output_dir = os.path.join(clean_output_dir, category_slug)
+    else:
+        cat_output_dir = clean_output_dir
+
+    brand_output_dir = os.path.join(cat_output_dir, brand_slug) if brand_slug not in cat_output_dir else cat_output_dir
     os.makedirs(brand_output_dir, exist_ok=True)
     timestamp_str = datetime.now().strftime("%Y-%m-%d_%H%M")
     report_filename = f"RUN_REPORT_{brand_slug}_{timestamp_str}.md"
@@ -159,7 +166,14 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist") 
         
         brand_slug = slugify(brand)
         model_slug = slugify(model)
-        img_path = str(row.get("Override_Image_Path") or f"images/{brand_slug}/{model_slug}.png")
+        category_slug = slugify(str(row.get("Category") or category or "powerbank"))
+        cat_img_path = f"images/{category_slug}/{brand_slug}/{model_slug}.png"
+        if not is_empty_value(row.get("Override_Image_Path")):
+            img_path = str(row.get("Override_Image_Path")).strip()
+        elif os.path.exists(cat_img_path):
+            img_path = cat_img_path
+        else:
+            img_path = f"images/{brand_slug}/{model_slug}.png"
         
         dims_str = "Missing"
         if os.path.exists(img_path) and os.path.isfile(img_path):
@@ -441,7 +455,7 @@ def execute_automatic_llm_post_run_review(
     return df
 
 
-def format_final_presentation_table(df: pd.DataFrame, brand_name: str) -> str:
+def format_final_presentation_table(df: pd.DataFrame, brand_name: str, category: str = "powerbank") -> str:
     """Formats the single final review table and prompts the two build questions."""
     brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
     brand_df = df[brand_mask]
@@ -489,10 +503,11 @@ def format_final_presentation_table(df: pd.DataFrame, brand_name: str) -> str:
 
         lines.append(f"| `{pid}` | {model} | **{disp}** | `{status}` | {cap} | {out} | {mrp_str} | `{img_st}` | {flags} |")
 
+    category_slug = slugify(category)
     lines.append("\n---\n")
     lines.append("### 🚀 Ready for Human Sign-Off")
     lines.append("1. **Approve these rows?**")
-    lines.append(f"2. **Standalone PDF in `dist/{brand_name.lower()}/`, or append to the combined PDF and where in `brand_order`?**")
+    lines.append(f"2. **Standalone PDF in `dist/{category_slug}/{brand_name.lower()}/`, or append to the combined PDF and where in `brand_order`?**")
 
     return "\n".join(lines)
 
@@ -571,8 +586,11 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
 
     save_catalogue_data(df, excel_path)
     
+    category_name = config.get("category", {}).get("name", "powerbank")
     brand_rows = [df.loc[idx].to_dict() for idx in df[brand_mask].index]
-    report_path = generate_run_report(brand_name, brand_rows)
+    report_path = generate_run_report(
+        brand_name, brand_rows, output_dir=config.get("paths", {}).get("output_dir", "dist"), category=category_name
+    )
     
     ready_count = sum(1 for r in brand_rows if r.get("Status") in ("Ready_For_Review", "Approved"))
     blocked_count = sum(1 for r in brand_rows if r.get("Status") == "Blocked")
@@ -582,7 +600,7 @@ def run_brand(brand_name: str, config_path: str = "config.yaml", enable_semantic
     logger.info(f"Brand run complete for '{brand_name}': {ready_count} Ready for Review | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
 
     # ==================== STEP 5.5: FINAL PRESENTATION & QUESTION PROMPT ====================
-    table_output = format_final_presentation_table(df, brand_name)
+    table_output = format_final_presentation_table(df, brand_name, category=category_name)
     print(table_output)
 
     return report_path

@@ -252,9 +252,10 @@ Vianet Catalogue/
 ├── brochures/                 # Tier 0 Manual brand brochure PDFs
 │   └── {brand_slug}/
 │       └── *.pdf
-├── images/                    # Master image repository (convention: {brand_slug}/{model_slug}.png)
-│   └── {brand_slug}/
-│       └── {model_slug}.png
+├── images/                    # Master image repository (convention: {category_slug}/{brand_slug}/{model_slug}.png)
+│   └── {category_slug}/       # Category namespace (e.g. powerbank/, smartwatch/)
+│       └── {brand_slug}/
+│           └── {model_slug}.png
 ├── src/
 │   ├── parsers/               # Source-specific parsers
 │   │   ├── base.py            # BaseParser & standardized ParserResult
@@ -286,7 +287,9 @@ Vianet Catalogue/
 │   ├── tokens.css             # Approved design tokens (palette, typography, geometry)
 │   └── layout.css             # Pixel-perfect A4 print layout rules
 └── dist/
-    └── catalogue.pdf          # Final compiled PDF deliverable
+    └── {category_slug}/       # Category deliverables
+        ├── combined/          # Combined cross-brand PDF & HTML preview
+        └── {brand_slug}/      # Standalone single-brand PDFs & run reports
 ```
 
 ---

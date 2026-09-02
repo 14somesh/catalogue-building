@@ -160,18 +160,28 @@ def download_image(url: str, dest_path: str, timeout: int = 15) -> bool:
 
 
 def resolve_product_image_path(row: dict, images_dir: str = "images") -> str:
-    """Resolves convention image path: {images_dir}/{brand_slug}/{model_slug}.png or {images_dir}/{model_slug}.png"""
+    """Resolves convention image path: {images_dir}/{category_slug}/{brand_slug}/{model_slug}.png"""
     override_path = row.get("Override_Image_Path")
     if not is_empty_value(override_path):
         return str(override_path).strip()
 
     brand_slug = slugify(row.get("Brand", ""))
     model_slug = slugify(row.get("Model_Name", ""))
+    category_slug = slugify(str(row.get("Category") or "powerbank"))
     
     clean_dir = images_dir.rstrip("/\\")
-    if brand_slug and brand_slug in clean_dir.lower():
-        return f"{clean_dir}/{model_slug}.png"
-    return f"{clean_dir}/{brand_slug}/{model_slug}.png"
+    if category_slug and category_slug in clean_dir.lower():
+        if brand_slug and brand_slug in clean_dir.lower():
+            return f"{clean_dir}/{model_slug}.png"
+        return f"{clean_dir}/{brand_slug}/{model_slug}.png"
+        
+    cat_path = f"{clean_dir}/{category_slug}/{brand_slug}/{model_slug}.png"
+    if os.path.exists(cat_path):
+        return cat_path
+    legacy_path = f"{clean_dir}/{brand_slug}/{model_slug}.png"
+    if os.path.exists(legacy_path):
+        return legacy_path
+    return cat_path
 
 
 def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:

@@ -9,7 +9,7 @@ logger = setup_logger("excel_handler")
 
 # Standard flat schema defined in ARCHITECTURE.md
 EXPECTED_COLUMNS = [
-    "Product_ID", "Brand", "Model_Name", "Display_Name", "Product_URL", "Brochure_PDF", "Marketplace_URL", "MRP_Input", "MRP_Display",
+    "Product_ID", "Category", "Brand", "Model_Name", "Display_Name", "Product_URL", "Brochure_PDF", "Marketplace_URL", "MRP_Input", "MRP_Display",
     "Source_URL", "Source_Audit",
     "Raw_Title", "Source_Title", "Tier_Title",
     "Raw_Subtitle", "Source_Subtitle", "Tier_Subtitle",
@@ -204,7 +204,15 @@ def get_effective_value(row: Union[pd.Series, Dict[str, Any]], field: str) -> An
             return str(row_dict.get("Override_Image_Path")).strip()
         brand_slug = slugify(row_dict.get("Brand", ""))
         model_slug = slugify(row_dict.get("Model_Name", ""))
-        return f"images/{brand_slug}/{model_slug}.png"
+        category_slug = slugify(str(row_dict.get("Category") or "powerbank"))
+        
+        cat_path = f"images/{category_slug}/{brand_slug}/{model_slug}.png"
+        if os.path.exists(cat_path):
+            return cat_path
+        old_path = f"images/{brand_slug}/{model_slug}.png"
+        if os.path.exists(old_path):
+            return old_path
+        return cat_path
 
     # Standard override precedence: Override_{field} > Raw_{field} > {field}
     override_key = f"Override_{field}"
@@ -252,8 +260,13 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
     raw_mrp_scraped = row_dict.get("Raw_MRP_Scraped")
     effective_mrp = mrp_display_val if not is_empty_value(mrp_display_val) else raw_mrp_scraped if not is_empty_value(raw_mrp_scraped) else None
 
+    category_raw = str(row_dict.get("Category") or "Powerbank").strip()
+    category_slug = slugify(category_raw)
+
     return {
         "product_id": row_dict.get("Product_ID"),
+        "category": category_raw,
+        "category_slug": category_slug,
         "brand": brand,
         "brand_slug": brand_slug,
         "model_name": model_name,
