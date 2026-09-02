@@ -713,12 +713,48 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
 
         elif job_type == "build":
             import importlib
+            import pypdfium2 as pdfium
+            from src.utils.excel_handler import load_catalogue_data_readonly
+
             build_mod = importlib.import_module("src.4_build")
             out_pdf = build_mod.build_catalogue(
                 brand=brand,
                 progress_callback=progress_cb
             )
-            result = {"pdf_path": out_pdf, "brand": brand}
+            clean_pdf_path = out_pdf.replace("\\", "/")
+            url = f"/{clean_pdf_path}" if clean_pdf_path.startswith("dist/") else f"/dist/{os.path.basename(clean_pdf_path)}"
+            file_size = os.path.getsize(out_pdf) if os.path.exists(out_pdf) else 0
+
+            # Count pages using pypdfium2
+            page_count = 0
+            if os.path.exists(out_pdf):
+                try:
+                    pdf_doc = pdfium.PdfDocument(out_pdf)
+                    page_count = len(pdf_doc)
+                except Exception as err:
+                    logger.warning(f"Failed to read page count for {out_pdf}: {err}")
+
+            df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+            approved_mask = df["Status"] == "Approved"
+            if brand:
+                brand_mask = df["Brand"].astype(str).str.lower() == brand.lower()
+                target_df = df[approved_mask & brand_mask]
+                brand_count = 1 if not target_df.empty else 0
+            else:
+                target_df = df[approved_mask]
+                brand_count = int(target_df["Brand"].nunique())
+
+            product_count = len(target_df)
+
+            result = {
+                "pdf_path": clean_pdf_path,
+                "url": url,
+                "page_count": page_count,
+                "product_count": product_count,
+                "brand_count": brand_count,
+                "file_size": file_size,
+                "brand": brand
+            }
 
         elif job_type == "ingest":
             from src.onboard_brand import extract_text_from_file, analyze_price_sheet, generate_onboarding_summary

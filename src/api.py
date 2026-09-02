@@ -1,10 +1,14 @@
 import os
 import re
+import io
 import sys
+import glob
 import time
 import uuid
 import json
+import yaml
 import asyncio
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Union
 
@@ -12,6 +16,8 @@ from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Depen
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from PIL import Image
+import pypdfium2 as pdfium
 
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -40,6 +46,8 @@ from src.utils.excel_handler import (
     is_empty_value,
     slugify
 )
+from src.utils.validators import validate_row_deterministic
+from src.run_brand import derive_failure_reason
 from src.utils.logger import setup_logger
 
 logger = setup_logger("api")
@@ -47,7 +55,8 @@ logger = setup_logger("api")
 UPLOAD_DIR = "uploads"
 BROCHURE_DIR = "brochures"
 MAX_UPLOAD_SIZE = 25 * 1024 * 1024  # 25 MB
-ALLOWED_UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".pdf", ".xlsx", ".xls", ".csv", ".txt"}
+ALLOWED_UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".pdf", ".xlsx", ".xls", ".csv", ".txt"}
+ALLOWED_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 @asynccontextmanager
@@ -72,8 +81,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Vianet Catalogue Engine API",
-    version="2.0.0",
-    description="API for autonomous catalogue ingestion, curation, live collection, and PDF rendering pipeline.",
+    version="3.0.0",
+    description="API for autonomous catalogue ingestion, curation, live collection, approval editing, and PDF build pipeline.",
     lifespan=lifespan
 )
 
@@ -84,6 +93,69 @@ os.makedirs(BROCHURE_DIR, exist_ok=True)
 app.mount("/images", StaticFiles(directory="images"), name="images")
 app.mount("/dist", StaticFiles(directory="dist"), name="dist")
 app.mount("/brochures", StaticFiles(directory=BROCHURE_DIR), name="brochures")
+
+
+# ==============================================================================
+# Helper Functions
+# ==============================================================================
+
+def build_resolved_row_response(row_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Formats a product row for review and edit endpoints with full resolution chain."""
+    prod = get_effective_product_dict(row_dict)
+    pid = str(row_dict.get("Product_ID", "")).strip()
+
+    title_val = prod.get("display_name")
+    subtitle_val = prod.get("subtitle")
+    bullets = prod.get("bullets", [])
+    bullet_1 = bullets[0] if len(bullets) > 0 else None
+    bullet_2 = bullets[1] if len(bullets) > 1 else None
+    bullet_3 = bullets[2] if len(bullets) > 2 else None
+    bullet_4 = bullets[3] if len(bullets) > 3 else None
+    dp_val = prod.get("dp_raw") if prod.get("dp_raw") is not None else prod.get("dp")
+    mrp_val = prod.get("mrp")
+
+    img_full_path = prod.get("image_full_path") or ""
+    clean_img_path = img_full_path.replace("\\", "/").lstrip("./")
+    if clean_img_path.startswith("images/"):
+        image_url = f"/{clean_img_path}"
+    elif clean_img_path:
+        image_url = f"/images/{clean_img_path}"
+    else:
+        image_url = None
+
+    failure_reason = derive_failure_reason(row_dict)
+
+    is_overridden = {
+        "title": not is_empty_value(row_dict.get("Override_Title")),
+        "subtitle": not is_empty_value(row_dict.get("Override_Subtitle")),
+        "bullet_1": not is_empty_value(row_dict.get("Override_Bullet_1")),
+        "bullet_2": not is_empty_value(row_dict.get("Override_Bullet_2")),
+        "bullet_3": not is_empty_value(row_dict.get("Override_Bullet_3")),
+        "bullet_4": not is_empty_value(row_dict.get("Override_Bullet_4")),
+        "dp": not is_empty_value(row_dict.get("Override_DP")),
+        "mrp": not is_empty_value(row_dict.get("Override_MRP")),
+        "image": not is_empty_value(row_dict.get("Override_Image_Path"))
+    }
+
+    return {
+        "product_id": pid,
+        "model_name": row_dict.get("Model_Name"),
+        "title": title_val,
+        "subtitle": subtitle_val,
+        "bullet_1": bullet_1,
+        "bullet_2": bullet_2,
+        "bullet_3": bullet_3,
+        "bullet_4": bullet_4,
+        "dp": dp_val,
+        "mrp": mrp_val,
+        "status": row_dict.get("Status", "Pending"),
+        "source_url": row_dict.get("Source_URL"),
+        "image_url": image_url,
+        "image_status": row_dict.get("Image_Status", "missing"),
+        "flags": row_dict.get("Flags"),
+        "failure_reason": failure_reason,
+        "is_overridden": is_overridden
+    }
 
 
 # ==============================================================================
@@ -225,7 +297,7 @@ def cancel_job_endpoint(job_id: str) -> Dict[str, Any]:
 @app.post("/uploads")
 async def upload_staging_file(file: UploadFile = File(...)) -> Dict[str, Any]:
     """
-    Accepts multipart file upload (png, jpg, jpeg, pdf, xlsx, xls, csv, txt).
+    Accepts multipart file upload (png, jpg, jpeg, webp, pdf, xlsx, xls, csv, txt).
     Saves to uploads/ with a unique identifier.
     Rejects files over 25 MB or with disallowed extensions.
     """
@@ -678,7 +750,496 @@ def provide_manual_source_url(product_id: str, body: ManualSourceRequest) -> Dic
 
 
 # ==============================================================================
-# 6. Read Endpoints: GET /brands & GET /brands/{brand}/rows
+# 6. Stage 4 Approval, Review & Edit Endpoints
+# ==============================================================================
+
+@app.get("/brands/{brand}/review")
+def get_brand_review_data(brand: str) -> List[Dict[str, Any]]:
+    """
+    Returns everything the approval screen needs per row:
+    Product_ID, Model_Name, resolved card title, subtitle, the 4 bullets, DP, MRP,
+    Status, Source_URL, image URL servable from /images mount, Image_Status, Flags,
+    and derived plain-language failure reason.
+    Every field is passed through get_effective_value so overrides are reflected.
+    Includes is_overridden dictionary indicating which fields were manually edited.
+    Does NOT include specs (specs are not rendered on the card).
+    """
+    clean_brand = brand.strip()
+    df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+    mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+
+    brand_df = df[mask].sort_values(by="Product_ID", ascending=True)
+    results = []
+    for _, row in brand_df.iterrows():
+        row_dict = row.to_dict()
+        results.append(build_resolved_row_response(row_dict))
+    return results
+
+
+class EditProductRequest(BaseModel):
+    title: Optional[Union[str, None]] = None
+    subtitle: Optional[Union[str, None]] = None
+    bullet_1: Optional[Union[str, None]] = None
+    bullet_2: Optional[Union[str, None]] = None
+    bullet_3: Optional[Union[str, None]] = None
+    bullet_4: Optional[Union[str, None]] = None
+    dp: Optional[Union[float, int, None]] = None
+    mrp: Optional[Union[float, int, None]] = None
+
+
+@app.patch("/products/{product_id}")
+def edit_product_row(product_id: str, body: EditProductRequest) -> Dict[str, Any]:
+    """
+    Edits manual overrides for a row: title, subtitle, bullets 1-4, DP, MRP.
+    Writes to Override_Title, Override_Subtitle, Override_Bullet_1..4, Override_DP, Override_MRP.
+    Sending null for a field clears that override and falls back to the collected value.
+    Enforces identical card layout limits:
+      - title: max 20 characters
+      - subtitle: max 80 characters
+      - bullet_1..4: max 60 characters
+    Returns the row's resolved values after edit.
+    """
+    clean_pid = product_id.strip()
+    df = load_catalogue_data("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    fields_set = body.model_fields_set
+
+    # 1. Title (Card width limit: 20 characters)
+    if "title" in fields_set:
+        if body.title is None or str(body.title).strip() == "":
+            df.loc[mask, "Override_Title"] = None
+        else:
+            val = str(body.title).strip()
+            if len(val) > 20:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Title exceeds 20-character limit ({len(val)} characters given): '{val}'"
+                )
+            df.loc[mask, "Override_Title"] = val
+
+    # 2. Subtitle (Limit: 80 characters)
+    if "subtitle" in fields_set:
+        if body.subtitle is None or str(body.subtitle).strip() == "":
+            df.loc[mask, "Override_Subtitle"] = None
+        else:
+            val = str(body.subtitle).strip()
+            if len(val) > 80:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Subtitle exceeds 80-character limit ({len(val)} characters given): '{val}'"
+                )
+            df.loc[mask, "Override_Subtitle"] = val
+
+    # 3. Bullets 1..4 (Limit: 60 characters each)
+    for b_idx in range(1, 5):
+        key = f"bullet_{b_idx}"
+        if key in fields_set:
+            val = getattr(body, key)
+            if val is None or str(val).strip() == "":
+                df.loc[mask, f"Override_Bullet_{b_idx}"] = None
+            else:
+                b_str = str(val).strip()
+                if len(b_str) > 60:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Bullet_{b_idx} exceeds 60-character wrap limit ({len(b_str)} characters given): '{b_str}'"
+                    )
+                df.loc[mask, f"Override_Bullet_{b_idx}"] = b_str
+
+    # 4. DP (Dealer Price)
+    if "dp" in fields_set:
+        if body.dp is None:
+            df.loc[mask, "Override_DP"] = None
+        else:
+            try:
+                num = float(body.dp)
+                if num < 0:
+                    raise ValueError
+                df.loc[mask, "Override_DP"] = num
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid DP value '{body.dp}'. Must be a non-negative number."
+                )
+
+    # 5. MRP (Maximum Retail Price)
+    if "mrp" in fields_set:
+        if body.mrp is None:
+            df.loc[mask, "Override_MRP"] = None
+        else:
+            try:
+                num = float(body.mrp)
+                if num < 0:
+                    raise ValueError
+                df.loc[mask, "Override_MRP"] = num
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid MRP value '{body.mrp}'. Must be a non-negative number."
+                )
+
+    save_catalogue_data(df, "data/catalogue_data.xlsx")
+    updated_row = df.loc[mask].iloc[0].to_dict()
+    return build_resolved_row_response(updated_row)
+
+
+@app.post("/products/{product_id}/image")
+async def upload_product_image_override(product_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+    """
+    Accepts an uploaded image file for a product.
+    Validates:
+      - Valid image format
+      - At least 1200x1200 resolution
+      - Square aspect ratio (pads to 1:1 on white background if rectangular)
+    Saves image to images/overrides/{brand_slug}/{model_slug}.png.
+    Sets Override_Image_Path and Image_Status = 'ok' in catalogue data.
+    """
+    clean_pid = product_id.strip()
+    df = load_catalogue_data("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded.")
+
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in ALLOWED_IMG_EXTS:
+        allowed_str = ", ".join(sorted(ALLOWED_IMG_EXTS))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image extension '{ext}' not allowed. Allowed image formats: {allowed_str}"
+        )
+
+    contents = await file.read()
+    try:
+        img = Image.open(io.BytesIO(contents))
+        img.verify()
+        # Re-open for operations after verify
+        img = Image.open(io.BytesIO(contents))
+    except Exception as err:
+        raise HTTPException(status_code=400, detail=f"Uploaded file is corrupted or not a valid image: {err}")
+
+    w, h = img.size
+    if w < 1200 or h < 1200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image resolution ({w}x{h}px) is below the required 1200x1200px minimum. Upload a high-resolution image."
+        )
+
+    # Pad to 1:1 square on white background if rectangular
+    max_dim = max(w, h)
+    if w == h:
+        final_img = img.convert("RGB")
+    else:
+        padded = Image.new("RGB", (max_dim, max_dim), (255, 255, 255))
+        offset_x = (max_dim - w) // 2
+        offset_y = (max_dim - h) // 2
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            final_img = padded
+            final_img.paste(img.convert("RGBA"), (offset_x, offset_y), img.convert("RGBA"))
+        else:
+            final_img = padded
+            final_img.paste(img.convert("RGB"), (offset_x, offset_y))
+
+    brand_val = str(df.loc[mask, "Brand"].iloc[0]).strip()
+    model_val = str(df.loc[mask, "Model_Name"].iloc[0]).strip()
+    brand_slug = slugify(brand_val)
+    model_slug = slugify(model_val)
+
+    dest_dir = os.path.join("images", "overrides", brand_slug)
+    os.makedirs(dest_dir, exist_ok=True)
+    saved_filename = f"{model_slug}.png"
+    dest_path = os.path.join(dest_dir, saved_filename).replace("\\", "/")
+
+    final_img.save(dest_path, format="PNG")
+
+    df.loc[mask, "Override_Image_Path"] = dest_path
+    df.loc[mask, "Image_Status"] = "ok"
+    save_catalogue_data(df, "data/catalogue_data.xlsx")
+
+    logger.info(f"Saved image override for {clean_pid} to {dest_path} ({max_dim}x{max_dim}px)")
+    return {
+        "product_id": clean_pid,
+        "override_image_path": dest_path,
+        "image_url": f"/{dest_path}",
+        "width": max_dim,
+        "height": max_dim,
+        "message": f"Image override uploaded and validated successfully ({max_dim}x{max_dim}px)."
+    }
+
+
+@app.delete("/products/{product_id}/image")
+def delete_product_image_override(product_id: str) -> Dict[str, Any]:
+    """
+    Drops the image override for a product and falls back to the collected image asset.
+    """
+    clean_pid = product_id.strip()
+    df = load_catalogue_data("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    current_override = df.loc[mask, "Override_Image_Path"].iloc[0]
+    df.loc[mask, "Override_Image_Path"] = None
+    save_catalogue_data(df, "data/catalogue_data.xlsx")
+
+    # Optionally clean up override file from disk if it was in images/overrides/
+    if current_override and not is_empty_value(current_override):
+        override_file = str(current_override).strip()
+        if "overrides" in override_file and os.path.exists(override_file):
+            try:
+                os.remove(override_file)
+            except Exception:
+                pass
+
+    logger.info(f"Dropped image override for {clean_pid}.")
+    return {
+        "product_id": clean_pid,
+        "override_image_path": None,
+        "message": "Image override removed. Reverted to collected image."
+    }
+
+
+@app.post("/products/{product_id}/approve")
+def approve_single_product(product_id: str) -> Dict[str, Any]:
+    """
+    Sets Status = 'Approved' for a single product.
+    Allows approval even with unresolved hard flags (since the user is final authority),
+    but clearly reports any active flags in the response.
+    """
+    clean_pid = product_id.strip()
+    df = load_catalogue_data("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    row_dict = df.loc[mask].iloc[0].to_dict()
+    row_dict["Status"] = "Approved"
+    is_passed, hard_flags, warnings = validate_row_deterministic(row_dict)
+
+    df.loc[mask, "Status"] = "Approved"
+    save_catalogue_data(df, "data/catalogue_data.xlsx")
+
+    msg = f"Product {clean_pid} approved successfully."
+    if hard_flags:
+        msg = f"Product {clean_pid} approved with unresolved hard flags: {', '.join(hard_flags)}"
+
+    return {
+        "product_id": clean_pid,
+        "status": "Approved",
+        "has_hard_flags": bool(hard_flags),
+        "hard_flags": hard_flags,
+        "warnings": warnings,
+        "message": msg
+    }
+
+
+@app.post("/products/{product_id}/skip")
+def skip_single_product(product_id: str) -> Dict[str, Any]:
+    """Sets Status = 'Skipped' for a single product."""
+    clean_pid = product_id.strip()
+    df = load_catalogue_data("data/catalogue_data.xlsx")
+    mask = df["Product_ID"].astype(str).str.lower() == clean_pid.lower()
+    if not mask.any():
+        raise HTTPException(status_code=404, detail=f"Product_ID '{clean_pid}' not found in catalogue data.")
+
+    df.loc[mask, "Status"] = "Skipped"
+    save_catalogue_data(df, "data/catalogue_data.xlsx")
+    return {
+        "product_id": clean_pid,
+        "status": "Skipped",
+        "message": f"Product {clean_pid} marked as Skipped."
+    }
+
+
+class BrandApproveRequest(BaseModel):
+    product_ids: Optional[List[str]] = Field(
+        None,
+        description="Optional list of specific product_ids to approve. If omitted, approves all rows currently 'Ready_For_Review' for the brand."
+    )
+
+
+@app.post("/brands/{brand}/approve")
+def approve_brand_products(brand: str, body: Optional[BrandApproveRequest] = None) -> Dict[str, Any]:
+    """
+    Approves products for a brand.
+    If product_ids is omitted: approves every row currently 'Ready_For_Review' for that brand.
+    If product_ids is provided: approves the specified products.
+    Reports which rows changed and which were left alone and why.
+    """
+    clean_brand = brand.strip()
+    df = load_catalogue_data("data/catalogue_data.xlsx")
+    brand_mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if not brand_mask.any():
+        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+
+    specified_ids = set(str(p).strip().lower() for p in body.product_ids) if body and body.product_ids else None
+    changed_rows = []
+    unchanged_rows = []
+
+    for idx in df[brand_mask].index:
+        r_dict = df.loc[idx].to_dict()
+        pid = str(r_dict.get("Product_ID", "")).strip()
+        current_status = str(r_dict.get("Status", "Pending")).strip()
+
+        should_approve = False
+        skip_reason = None
+
+        if specified_ids is not None:
+            if pid.lower() in specified_ids:
+                should_approve = True
+            else:
+                skip_reason = "Product_ID not included in approve request list"
+        else:
+            if current_status == "Ready_For_Review":
+                should_approve = True
+            else:
+                skip_reason = f"Current status is '{current_status}', not 'Ready_For_Review'"
+
+        if should_approve:
+            df.at[idx, "Status"] = "Approved"
+            test_dict = dict(r_dict)
+            test_dict["Status"] = "Approved"
+            _, hard_flags, _ = validate_row_deterministic(test_dict)
+            changed_rows.append({
+                "product_id": pid,
+                "model_name": r_dict.get("Model_Name"),
+                "from_status": current_status,
+                "to_status": "Approved",
+                "hard_flags": hard_flags
+            })
+        else:
+            unchanged_rows.append({
+                "product_id": pid,
+                "model_name": r_dict.get("Model_Name"),
+                "status": current_status,
+                "reason": skip_reason
+            })
+
+    if changed_rows:
+        save_catalogue_data(df, "data/catalogue_data.xlsx")
+
+    return {
+        "brand": clean_brand,
+        "approved_count": len(changed_rows),
+        "changed_rows": changed_rows,
+        "unchanged_rows": unchanged_rows
+    }
+
+
+# ==============================================================================
+# 7. Stage 5 Build & Outputs Endpoints
+# ==============================================================================
+
+class BuildRequest(BaseModel):
+    brand: Optional[str] = Field(None, description="Optional brand name to compile single-brand catalogue")
+    brand_order: Optional[List[str]] = Field(None, description="Optional explicit brand order list for combined catalogue")
+
+
+@app.post("/build")
+def trigger_catalogue_build(body: Optional[BuildRequest] = None) -> Dict[str, Any]:
+    """
+    Enqueues a 'build' job using build_catalogue with progress tracking.
+    If brand is provided: compiles single-brand PDF.
+    If brand_order is provided: updates config.yaml so the order persists, then compiles combined PDF.
+    If empty: compiles default combined PDF.
+    Returns job_id immediately.
+    """
+    brand_target = body.brand.strip() if body and body.brand and body.brand.strip() else None
+    brand_order = body.brand_order if body and body.brand_order else None
+
+    # Update config.yaml if brand_order is provided
+    if brand_order:
+        config_path = "config.yaml"
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            cfg["brand_order"] = brand_order
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, sort_keys=False)
+            logger.info(f"Updated config.yaml brand_order: {brand_order}")
+        except Exception as err:
+            logger.error(f"Failed to update config.yaml brand_order: {err}")
+            raise HTTPException(status_code=500, detail=f"Failed to update config.yaml brand_order: {err}")
+
+    try:
+        job_id = enqueue_job(
+            job_type="build",
+            brand=brand_target,
+            payload={"brand": brand_target, "brand_order": brand_order}
+        )
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "brand": brand_target,
+            "stream_url": f"/jobs/{job_id}/stream"
+        }
+    except BrandLockedError as err:
+        raise HTTPException(status_code=409, detail=str(err))
+
+
+@app.get("/builds")
+def list_built_catalogues() -> List[Dict[str, Any]]:
+    """
+    Lists all built PDFs in dist/ with brand, page count, size, and timestamp,
+    newest first, so the UI can offer the latest and history.
+    """
+    pdf_files = glob.glob("dist/**/*.pdf", recursive=True)
+    results = []
+
+    for p in pdf_files:
+        clean_p = p.replace("\\", "/")
+        try:
+            st = os.stat(p)
+            file_size = st.st_size
+            mtime = st.st_mtime
+            ts_iso = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+        except Exception:
+            continue
+
+        # Extract brand label from path: dist/{category}/{brand}/*.pdf or dist/{category}/combined/*.pdf
+        parts = clean_p.split("/")
+        brand_label = "Combined"
+        if len(parts) >= 4:
+            sub = parts[-2]
+            if sub.lower() == "combined":
+                brand_label = "Combined"
+            else:
+                brand_label = sub.capitalize()
+
+        page_count = 0
+        try:
+            pdf_doc = pdfium.PdfDocument(p)
+            page_count = len(pdf_doc)
+        except Exception:
+            pass
+
+        url = f"/{clean_p}"
+        results.append({
+            "filename": os.path.basename(clean_p),
+            "path": clean_p,
+            "url": url,
+            "brand": brand_label,
+            "page_count": page_count,
+            "size": file_size,
+            "timestamp": ts_iso,
+            "_mtime": mtime
+        })
+
+    results.sort(key=lambda x: x["_mtime"], reverse=True)
+    for r in results:
+        del r["_mtime"]
+    return results
+
+
+# ==============================================================================
+# 8. Read Endpoints: GET /brands & GET /brands/{brand}/rows
 # ==============================================================================
 
 @app.get("/brands")
@@ -732,8 +1293,6 @@ def get_brand_rows(brand: str) -> List[Dict[str, Any]]:
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
     if not mask.any():
         raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
-
-    from src.run_brand import derive_failure_reason
 
     brand_df = df[mask].sort_values(by="Product_ID", ascending=True)
     results = []
