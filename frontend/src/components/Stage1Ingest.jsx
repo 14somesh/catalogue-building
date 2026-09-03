@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { UploadIcon } from './Icons';
+import { ErrorDisplay } from './ErrorDisplay';
 
 export function Stage1Ingest({ onIngestComplete }) {
   const [file, setFile] = useState(null);
@@ -8,6 +9,7 @@ export function Stage1Ingest({ onIngestComplete }) {
   const [isIngesting, setIsIngesting] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [techDetails, setTechDetails] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
   const fileInputRef = useRef(null);
@@ -15,6 +17,7 @@ export function Stage1Ingest({ onIngestComplete }) {
   const handleFileSelection = async (selectedFile) => {
     if (!selectedFile) return;
     setErrorMsg('');
+    setTechDetails(null);
     setFile(selectedFile);
     setIsUploading(true);
 
@@ -36,6 +39,7 @@ export function Stage1Ingest({ onIngestComplete }) {
     } catch (err) {
       console.error('File upload error:', err);
       setErrorMsg(err.message || 'Failed to upload file');
+      setTechDetails(err.stack || null);
       setFile(null);
       setUploadId(null);
     } finally {
@@ -64,6 +68,7 @@ export function Stage1Ingest({ onIngestComplete }) {
     if (!uploadId || isIngesting) return;
     setIsIngesting(true);
     setErrorMsg('');
+    setTechDetails(null);
     setProgressMsg('Initiating ingestion job...');
 
     try {
@@ -115,7 +120,9 @@ export function Stage1Ingest({ onIngestComplete }) {
               } else if (parsed.status === 'failed') {
                 eventSource.close();
                 setIsIngesting(false);
+                setProgressMsg('');
                 setErrorMsg(parsed.error || 'Ingest job failed');
+                setTechDetails(parsed.technical_details || null);
               }
             }
           } catch (e) {
@@ -134,7 +141,9 @@ export function Stage1Ingest({ onIngestComplete }) {
     } catch (err) {
       console.error('Ingest error:', err);
       setIsIngesting(false);
+      setProgressMsg('');
       setErrorMsg(err.message || 'Failed to analyze price sheet');
+      setTechDetails(err.stack || null);
     }
   };
 
@@ -155,13 +164,21 @@ export function Stage1Ingest({ onIngestComplete }) {
         } else if (job.status === 'failed') {
           clearInterval(interval);
           setIsIngesting(false);
+          setProgressMsg('');
           setErrorMsg(job.error || 'Ingest job failed');
+          setTechDetails(job.technical_details || null);
         }
       } catch (e) {
         console.warn('Poll error:', e);
       }
     }, 1000);
   };
+
+  const isRetryState =
+    progressMsg &&
+    (progressMsg.includes('busy right now') ||
+      progressMsg.includes('Trying again') ||
+      progressMsg.includes('Falling back'));
 
   return (
     <div className="stage-1-container">
@@ -215,6 +232,7 @@ export function Stage1Ingest({ onIngestComplete }) {
                 setFile(null);
                 setUploadId(null);
                 setErrorMsg('');
+                setTechDetails(null);
                 setProgressMsg('');
               }}
               disabled={isIngesting}
@@ -235,17 +253,15 @@ export function Stage1Ingest({ onIngestComplete }) {
           )}
         </div>
 
-        {progressMsg && (
-          <div className="drop-zone__progress">
-            <span className="spinner-indicator"></span>
+        {isIngesting && progressMsg && (
+          <div className={`drop-zone__progress ${isRetryState ? 'drop-zone__progress--retry' : ''}`}>
+            <span className={`spinner-indicator ${isRetryState ? 'spinner-indicator--retry' : ''}`}></span>
             <span>{progressMsg}</span>
           </div>
         )}
 
         {errorMsg && (
-          <div className="drop-zone__error">
-            {errorMsg}
-          </div>
+          <ErrorDisplay error={errorMsg} technicalDetails={techDetails} />
         )}
       </div>
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { CheckIcon, CrossIcon, RefreshIcon, WarningTriangleIcon } from './Icons';
+import { ErrorDisplay } from './ErrorDisplay';
 
 // Helper to format source nicely
 function formatSourceLabel(url) {
@@ -500,10 +501,7 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
 
           {/* Error banner if any */}
           {errorMsg && (
-            <div className="stage-error-banner">
-              <WarningTriangleIcon width={16} height={16} color="var(--red)" />
-              <span>{errorMsg}</span>
-            </div>
+            <ErrorDisplay error={errorMsg} showIcon={true} />
           )}
 
           {/* Footer: Stop on left, visually disabled continue on right */}
@@ -558,10 +556,7 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
 
           {/* Error banner if any */}
           {errorMsg && (
-            <div className="stage-error-banner">
-              <WarningTriangleIcon width={16} height={16} color="var(--red)" />
-              <span>{errorMsg}</span>
-            </div>
+            <ErrorDisplay error={errorMsg} showIcon={true} />
           )}
 
           {/* Failures Cream Block (if any failed) */}

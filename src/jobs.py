@@ -216,6 +216,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         except sqlite3.OperationalError:
             pass
 
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN technical_details TEXT;")
+        except sqlite3.OperationalError:
+            pass
+
         # Startup crash recovery: mark stale running jobs as failed
         now_iso = datetime.now(timezone.utc).isoformat()
         cur = conn.cursor()
@@ -777,7 +782,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
 
             if file_path:
                 progress_cb({"stage": "extract_text", "message": f"Extracting content from {os.path.basename(file_path)}..."})
-                raw_content, fmt_type = extract_text_from_file(file_path, llm_config)
+                raw_content, fmt_type = extract_text_from_file(file_path, llm_config, progress_cb=progress_cb)
             elif pasted_text:
                 raw_content = pasted_text
                 fmt_type = "pasted_text"
@@ -785,7 +790,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 raise ValueError("Ingest job requires either 'file_path' or 'pasted_text'.")
 
             progress_cb({"stage": "analyze_sheet", "message": "Analyzing price sheet structure with AI..."})
-            inference = analyze_price_sheet(raw_content, category_name=category_name, llm_config=llm_config)
+            inference = analyze_price_sheet(raw_content, category_name=category_name, llm_config=llm_config, progress_cb=progress_cb)
 
             # Check duplicates
             seen = {}
@@ -954,18 +959,32 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
 
     except Exception as e:
         logger.error(f"Job '{job_id}' failed: {e}", exc_info=True)
+        user_msg, tech_details = translate_job_error(e)
         now_iso = datetime.now(timezone.utc).isoformat()
         with get_db_connection(db_path) as conn:
-            conn.execute(
-                """
-                UPDATE jobs
-                SET status = 'failed',
-                    error = ?,
-                    finished_at = ?
-                WHERE id = ?
-                """,
-                (str(e), now_iso, job_id)
-            )
+            try:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        error = ?,
+                        technical_details = ?,
+                        finished_at = ?
+                    WHERE id = ?
+                    """,
+                    (user_msg, tech_details, now_iso, job_id)
+                )
+            except sqlite3.OperationalError:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed',
+                        error = ?,
+                        finished_at = ?
+                    WHERE id = ?
+                    """,
+                    (user_msg, now_iso, job_id)
+                )
             conn.commit()
 
         with _cancelled_jobs_lock:
@@ -977,9 +996,43 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             "product_id": None,
             "current": 0,
             "total": 0,
-            "message": f"Job failed: {e}",
-            "error": str(e)
+            "message": user_msg,
+            "error": user_msg,
+            "technical_details": tech_details
         })
+
+
+def translate_job_error(e: Exception) -> Tuple[str, str]:
+    """
+    Translates raw provider exceptions into user-friendly messages.
+    Preserves raw stack and payloads in technical_details.
+    """
+    err_str = str(e)
+    err_lower = err_str.lower()
+
+    if hasattr(e, "user_message") and getattr(e, "user_message"):
+        user_msg = getattr(e, "user_message")
+        tech = getattr(e, "technical_details", err_str) or err_str
+        return user_msg, tech
+
+    # 1. 503 / Unavailable / High Demand
+    if any(m in err_lower for m in ["503", "unavailable", "high demand", "overloaded", "spikes in demand"]):
+        return "The AI service is unavailable. Try again in a few minutes.", err_str
+
+    # 2. 429 / Quota / Rate limit
+    if any(m in err_lower for m in ["429", "quota", "resource_exhausted", "rate limit", "ratelimit"]):
+        return "The AI service request quota was reached. Please try again later.", err_str
+
+    # 3. Timeout / Network
+    if any(m in err_lower for m in ["timeout", "timed out", "deadlineexceeded", "connectionerror", "connection reset"]):
+        return "The request timed out while contacting the AI service. Please try again.", err_str
+
+    # 4. JSON / dict payloads from providers
+    first_line = err_str.splitlines()[0] if err_str else "Unknown error occurred"
+    if "{" in first_line and ("'error'" in first_line or '"error"' in first_line):
+        return "The AI service encountered an error processing this file. Please try again.", err_str
+
+    return first_line[:140], err_str
 
 
 def _worker_loop(db_path: str) -> None:

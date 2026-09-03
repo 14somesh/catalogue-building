@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { TrashIcon, PdfIcon, WarningTriangleIcon } from './Icons';
+import { ErrorDisplay } from './ErrorDisplay';
 
 export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
   // Brand selection
@@ -366,10 +367,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
 
       {/* Error banner if submission failed or brand is locked */}
       {errorMsg && (
-        <div className="stage-error-banner">
-          <WarningTriangleIcon width={16} height={16} color="var(--red)" />
-          <span>{errorMsg}</span>
-        </div>
+        <ErrorDisplay error={errorMsg} showIcon={true} />
       )}
 
       {/* Footer Actions */}

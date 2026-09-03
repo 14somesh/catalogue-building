@@ -52,7 +52,15 @@ class BrandInferenceSchema(BaseModel):
     products: List[RawProductItem] = Field(description="List of extracted product rows")
 
 
-def extract_text_from_file(file_path: str, llm_config: dict) -> Tuple[str, str]:
+class AIServiceUnavailableError(Exception):
+    """Raised when all AI providers and retries are exhausted."""
+    def __init__(self, message: str = "The AI service is unavailable. Try again in a few minutes.", technical_details: Optional[str] = None):
+        super().__init__(message)
+        self.user_message = message
+        self.technical_details = technical_details
+
+
+def extract_text_from_file(file_path: str, llm_config: dict, progress_cb: Optional[Any] = None) -> Tuple[str, str]:
     """
     Detects file format and extracts text content.
     Returns (extracted_text, format_type).
@@ -90,13 +98,13 @@ def extract_text_from_file(file_path: str, llm_config: dict) -> Tuple[str, str]:
                 pil_img.save(buf, format="PNG")
                 images.append((buf.getvalue(), "image/png"))
             doc.close()
-            return _ocr_images_via_gemini(images, llm_config), "pdf_vision"
+            return _ocr_images_via_gemini(images, llm_config, progress_cb=progress_cb), "pdf_vision"
 
     elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
         with open(file_path, "rb") as f:
             img_bytes = f.read()
         mime = "image/png" if ext == ".png" else "image/jpeg"
-        return _ocr_images_via_gemini([(img_bytes, mime)], llm_config), "image_vision"
+        return _ocr_images_via_gemini([(img_bytes, mime)], llm_config, progress_cb=progress_cb), "image_vision"
 
     elif ext in [".txt", ".md"]:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -106,44 +114,119 @@ def extract_text_from_file(file_path: str, llm_config: dict) -> Tuple[str, str]:
         raise ValueError(f"Unsupported file format: {ext}")
 
 
-def _ocr_images_via_gemini(image_parts: List[Tuple[bytes, str]], llm_config: dict) -> str:
-    """Uses Gemini Vision to OCR price sheet images/pages."""
-    try:
-        from google import genai
-        from google.genai import types
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not set")
-        client = genai.Client(api_key=api_key)
+def _ocr_images_via_gemini(
+    image_parts: List[Tuple[bytes, str]],
+    llm_config: dict,
+    progress_cb: Optional[Any] = None
+) -> str:
+    """
+    Uses Gemini Vision with retries and fallback to Groq Vision to OCR price sheet images/pages.
+    """
+    import time
+    from google.genai import types
+    from src.utils.llm_client import classify_gemini_error, get_gemini_client
 
-        prompt = (
-            "You are an expert tabular OCR engine. Extract all rows, headers, and product pricing information "
-            "from the given dealer price sheet images. Preserve product codes, names, capacities, DP, and MRP. "
-            "Output the result as a clean markdown table or structured CSV text."
-        )
+    candidate_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"]
+    configured_model = llm_config.get("model")
+    if configured_model and configured_model in candidate_models:
+        candidate_models.remove(configured_model)
+        candidate_models.insert(0, configured_model)
 
-        contents = [prompt]
-        for b_data, m_type in image_parts:
-            contents.append(types.Part.from_bytes(data=b_data, mime_type=m_type))
+    prompt = (
+        "You are an expert tabular OCR engine. Extract all rows, headers, and product pricing information "
+        "from the given dealer price sheet images. Preserve product codes, names, capacities, DP, and MRP. "
+        "Output the result as a clean markdown table or structured CSV text."
+    )
 
-        response = client.models.generate_content(
-            model=llm_config.get("model", "gemini-3.6-flash"),
-            contents=contents
-        )
-        return response.text or ""
-    except Exception as e:
-        logger.error(f"Error during Gemini OCR: {e}")
-        return ""
+    contents = [prompt]
+    for b_data, m_type in image_parts:
+        contents.append(types.Part.from_bytes(data=b_data, mime_type=m_type))
+
+    last_error = None
+
+    # 1. Primary: Gemini Models with Backoff Retries
+    for model in candidate_models:
+        for attempt in range(3):
+            try:
+                client = get_gemini_client()
+                logger.info(f"[Ingest OCR] Calling Gemini Vision ({model}), attempt {attempt+1}/3...")
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents
+                )
+                text = response.text or ""
+                if text.strip():
+                    logger.info(f"[Ingest OCR] Successfully extracted text via Gemini Vision ({model}).")
+                    return text
+            except Exception as e:
+                last_error = e
+                err_type = classify_gemini_error(e)
+                logger.warning(f"[Ingest OCR] Error on model '{model}' attempt {attempt+1}: {e} (type={err_type})")
+
+                if err_type in ("TRANSIENT", "RATE_LIMIT") and attempt < 2:
+                    backoff_sec = 2.0 * (attempt + 1)
+                    if progress_cb:
+                        progress_cb({
+                            "stage": "retry",
+                            "message": f"The AI service is busy right now. Trying again in {backoff_sec:.0f}s..."
+                        })
+                    time.sleep(backoff_sec)
+                    continue
+                else:
+                    break
+
+    # 2. Secondary: Groq Vision Fallback if configured
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        try:
+            from src.utils.llm_client import get_groq_client, classify_groq_error
+            import base64
+            groq_client = get_groq_client()
+            groq_vision_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
+            for g_model in groq_vision_models:
+                logger.info(f"[Ingest OCR] Falling back to Groq Vision ({g_model})...")
+                if progress_cb:
+                    progress_cb({"stage": "fallback", "message": "Falling back to secondary AI provider (Groq)..."})
+
+                content_items = [{"type": "text", "text": prompt}]
+                for b_data, m_type in image_parts[:2]:
+                    b64 = base64.b64encode(b_data).decode("utf-8")
+                    content_items.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{m_type};base64,{b64}"}
+                    })
+
+                res = groq_client.chat.completions.create(
+                    model=g_model,
+                    messages=[{"role": "user", "content": content_items}],
+                    temperature=0.1
+                )
+                text = res.choices[0].message.content or ""
+                if text.strip():
+                    logger.info(f"[Ingest OCR] Successfully extracted text via Groq Vision ({g_model}).")
+                    return text
+        except Exception as ge:
+            logger.warning(f"[Ingest OCR] Groq Vision fallback failed: {ge}")
+            last_error = ge
+
+    raise AIServiceUnavailableError(
+        "The AI service is unavailable. Try again in a few minutes.",
+        technical_details=f"OCR failed across all vision models and retries. Last error: {last_error}"
+    )
 
 
-def analyze_price_sheet(raw_content: str, category_name: str, llm_config: dict) -> BrandInferenceSchema:
+def analyze_price_sheet(
+    raw_content: str,
+    category_name: str,
+    llm_config: dict,
+    progress_cb: Optional[Any] = None
+) -> BrandInferenceSchema:
     """
     Uses structured LLM output to parse raw sheet content and perform autonomous inference.
+    Implements multi-model exponential backoff retry and Groq fallback chain.
     """
-    from google import genai
-    from google.genai import types
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
+    if not raw_content or not raw_content.strip():
+        raise ValueError("No readable text found in price sheet to analyze.")
 
     prompt = f"""
 Analyze this dealer price sheet for a brand in the '{category_name}' category.
@@ -169,18 +252,106 @@ PRICE SHEET CONTENT:
 {raw_content}
 """
 
-    response = client.models.generate_content(
-        model=llm_config.get("model", "gemini-3.6-flash"),
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=BrandInferenceSchema,
-            temperature=0.1
-        )
-    )
+    import time
+    from google.genai import types
+    from src.utils.llm_client import classify_gemini_error, classify_groq_error, get_gemini_client, get_groq_client
 
-    result_json = json.loads(response.text)
-    return BrandInferenceSchema(**result_json)
+    candidate_gemini_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"]
+    configured_model = llm_config.get("model")
+    if configured_model and configured_model in candidate_gemini_models:
+        candidate_gemini_models.remove(configured_model)
+        candidate_gemini_models.insert(0, configured_model)
+
+    last_error = None
+
+    # 1. Primary: Gemini Models with Backoff Retries
+    for model in candidate_gemini_models:
+        for attempt in range(3):
+            try:
+                client = get_gemini_client()
+                logger.info(f"[Analyze Sheet] Calling Gemini ({model}), attempt {attempt+1}/3...")
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=BrandInferenceSchema,
+                        temperature=0.1
+                    )
+                )
+                result_json = json.loads(response.text)
+                logger.info(f"[Analyze Sheet] Successfully analyzed price sheet via Gemini ({model}).")
+                return BrandInferenceSchema(**result_json)
+            except Exception as e:
+                last_error = e
+                err_type = classify_gemini_error(e)
+                logger.warning(f"[Analyze Sheet] Error on Gemini '{model}' attempt {attempt+1}: {e} (type={err_type})")
+
+                if err_type in ("TRANSIENT", "RATE_LIMIT") and attempt < 2:
+                    backoff_sec = 2.0 * (attempt + 1)
+                    if progress_cb:
+                        progress_cb({
+                            "stage": "retry",
+                            "message": f"The AI service is busy right now. Trying again in {backoff_sec:.0f}s..."
+                        })
+                    time.sleep(backoff_sec)
+                    continue
+                else:
+                    break
+
+    # 2. Secondary: Groq Fallback Chain
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        groq_model = "llama-3.3-70b-versatile"
+        logger.info(f"[Analyze Sheet] Failing over to Groq ({groq_model})...")
+        if progress_cb:
+            progress_cb({
+                "stage": "fallback",
+                "message": "The AI service is busy. Failing over to secondary provider (Groq)..."
+            })
+
+        for attempt in range(3):
+            try:
+                groq_client = get_groq_client()
+                system_inst = (
+                    "You are an expert dealer price sheet analyzer for corporate gifting catalogues.\n"
+                    "You MUST return valid JSON matching BrandInferenceSchema with fields: "
+                    "brand_name, brand_code, domain, platform, qualifier_tokens, dp_column_explanation, column_mapping, products."
+                )
+                res = groq_client.chat.completions.create(
+                    model=groq_model,
+                    messages=[
+                        {"role": "system", "content": system_inst},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+                result_json = json.loads(res.choices[0].message.content)
+                logger.info(f"[Analyze Sheet] Successfully analyzed price sheet via Groq ({groq_model}).")
+                return BrandInferenceSchema(**result_json)
+            except Exception as ge:
+                last_error = ge
+                err_type = classify_groq_error(ge)
+                logger.warning(f"[Analyze Sheet] Groq error on attempt {attempt+1}: {ge} (type={err_type})")
+                if err_type in ("TRANSIENT", "RATE_LIMIT") and attempt < 2:
+                    backoff_sec = 2.0 * (attempt + 1)
+                    if progress_cb:
+                        progress_cb({
+                            "stage": "retry",
+                            "message": f"The AI service is busy right now. Trying again in {backoff_sec:.0f}s..."
+                        })
+                    time.sleep(backoff_sec)
+                    continue
+                else:
+                    break
+
+    # 3. All Exhausted
+    logger.error(f"[Analyze Sheet] All AI providers exhausted after retries. Last error: {last_error}")
+    raise AIServiceUnavailableError(
+        "The AI service is unavailable. Try again in a few minutes.",
+        technical_details=f"All AI providers exhausted. Last error: {last_error}"
+    )
 
 
 def generate_onboarding_summary(inference: BrandInferenceSchema) -> str:

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { DownloadIcon, RefreshIcon } from './Icons';
+import { ErrorDisplay } from './ErrorDisplay';
 
 export function Stage5Build({ buildTarget, onBack, onStartNewBrand }) {
   const [latestBuild, setLatestBuild] = useState(null);
@@ -121,9 +122,7 @@ export function Stage5Build({ buildTarget, onBack, onStartNewBrand }) {
     <div className="stage-5-container">
       {/* Error callout if rebuild failed */}
       {buildError && (
-        <div className="card-edit-error" style={{ marginBottom: '20px' }}>
-          <span>{buildError}</span>
-        </div>
+        <ErrorDisplay error={buildError} showIcon={true} />
       )}
 
       {/* Block 1: Amber Bar */}
