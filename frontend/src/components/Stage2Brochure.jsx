@@ -7,7 +7,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
   const [knownBrands, setKnownBrands] = useState([]);
   const [isCustomBrand, setIsCustomBrand] = useState(false);
 
-  // Rows state
+  // Rows state - keep real display name in display_name column!
   const [rows, setRows] = useState(() => {
     const products = ingestResult?.products || [];
     const dups = ingestResult?.duplicates || [];
@@ -23,7 +23,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
         id: `row-${rowNum}-${Date.now()}`,
         rowNumber: rowNum,
         model_name: p.model_name || '',
-        display_name: duplicateOf ? `same as row ${duplicateOf}` : (p.display_name || p.model_name || ''),
+        display_name: p.display_name || p.model_name || '',
         dp: p.dp !== undefined && p.dp !== null ? p.dp : '',
         mrp: p.mrp !== undefined && p.mrp !== null ? p.mrp : '',
         raw_text: p.raw_text || '',
@@ -196,6 +196,11 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                 ))}
                 <option value="__custom__">+ Enter different brand...</option>
               </select>
+              <span className="brand-select__chevron" aria-hidden="true">
+                <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="#BA7517" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M1 1L5 5L9 1" />
+                </svg>
+              </span>
             </div>
           )}
         </div>
@@ -240,18 +245,23 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                 >
                   {/* Model column */}
                   <td>
-                    <div className="cell-flex">
+                    <div className="model-cell-wrapper">
+                      <div className="model-cell-main">
+                        {row.isDuplicate && (
+                          <span className="dup-warning-icon" title={`Same as row ${row.duplicateOf}`}>
+                            <WarningTriangleIcon width={15} height={15} color="var(--amber-dark)" />
+                          </span>
+                        )}
+                        <input
+                          type="text"
+                          className="cell-input"
+                          value={row.model_name}
+                          onChange={(e) => handleCellChange(idx, 'model_name', e.target.value)}
+                        />
+                      </div>
                       {row.isDuplicate && (
-                        <span className="dup-warning-icon" title={`Same as row ${row.duplicateOf}`}>
-                          <WarningTriangleIcon width={15} height={15} color="var(--amber-dark)" />
-                        </span>
+                        <div className="dup-note">same as row {row.duplicateOf}</div>
                       )}
-                      <input
-                        type="text"
-                        className="cell-input"
-                        value={row.model_name}
-                        onChange={(e) => handleCellChange(idx, 'model_name', e.target.value)}
-                      />
                     </div>
                   </td>
 

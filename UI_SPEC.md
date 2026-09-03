@@ -113,10 +113,10 @@ Endpoints: `POST /uploads` then `POST /ingest`. Ingest returns a job id — poll
 
 Three blocks, in this order.
 
-**Amber bar.** Brand dropdown on the left (editable — the inferred brand may be wrong). On the right, two numbers: rows read, duplicates.
+**Amber bar.** Brand dropdown on the left (editable — the inferred brand may be wrong): styled with cream (`#FAEEDA`) background, 1px `#BA7517` border, 8px radius, `#412402` text at 14px, 8px vertical and 12px horizontal padding, and a custom chevron in `#BA7517` (native appearance removed). On the right, two numbers: rows read, duplicates.
 
-**Parsed rows table.** Columns: Model, Display name, DP, MRP, and a trailing delete icon. Every cell is inline-editable on click. Header right: `Click any cell to edit`.
-Duplicate rows get a cream row background, an amber warning triangle before the model name, and the text `same as row N` in the display name column.
+**Parsed rows table.** Columns: Model, Display name, DP, MRP, and a trailing delete icon. Every cell is inline-editable on click. Header right: `Click any cell to edit`. Column headers stay muted grey, not amber. Table data is plain text: `#2C2C2A` at 13px, weight 400 (amber appears only on warning rows).
+Duplicate rows get a cream row background, an amber warning triangle before the model name, and the text `same as row N` as small `#633806` text at 12px directly beneath the model name in the Model column (under the warning triangle). The real display name is preserved in the Display name column.
 
 **Brochure strip.** A dashed amber box on cream, single row: PDF icon, `Brand brochure`, `Optional`, and a `Choose PDF` button. Not a blocking question.
 

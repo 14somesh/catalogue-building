@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 import { StageStepper } from '../components/StageStepper';
 import { Stage1Ingest } from '../components/Stage1Ingest';
 import { Stage2Brochure } from '../components/Stage2Brochure';
+import { Stage3Collect } from '../components/Stage3Collect';
 
 export function BuildFlowPage() {
   const [currentStage, setCurrentStage] = useState(1);
   const [ingestResult, setIngestResult] = useState(null);
   const [collectionTarget, setCollectionTarget] = useState(null);
+  const [approvalTarget, setApprovalTarget] = useState(null);
 
   const handleIngestComplete = (result) => {
     setIngestResult(result);
@@ -18,13 +20,23 @@ export function BuildFlowPage() {
     setCurrentStage(3);
   };
 
+  const handleCollectionContinue = (target) => {
+    setApprovalTarget(target);
+    setCurrentStage(4);
+  };
+
   React.useEffect(() => {
     window.__SET_STAGE_2 = (result) => {
       setIngestResult(result);
       setCurrentStage(2);
     };
+    window.__SET_STAGE_3 = (target) => {
+      setCollectionTarget(target);
+      setCurrentStage(3);
+    };
     return () => {
       delete window.__SET_STAGE_2;
+      delete window.__SET_STAGE_3;
     };
   }, []);
 
@@ -56,16 +68,13 @@ export function BuildFlowPage() {
           />
         )}
 
-        {/* Stage 3 Placeholder for Step 3 */}
+        {/* Stage 3 — Collect */}
         {currentStage === 3 && (
-          <div className="stage-panel">
-            <div style={{ fontSize: '17px', fontWeight: 500, marginBottom: '8px' }}>
-              Stage 3 — Collect: {collectionTarget?.brand || 'Brand'}
-            </div>
-            <p style={{ color: 'var(--amber-mid)', fontSize: '15px' }}>
-              Ready to implement in Step 3: Autonomous collection with SSE progress stream.
-            </p>
-          </div>
+          <Stage3Collect
+            collectionTarget={collectionTarget}
+            onBack={() => setCurrentStage(2)}
+            onContinue={handleCollectionContinue}
+          />
         )}
 
         {/* Stage 4 Placeholder for Step 4 */}
