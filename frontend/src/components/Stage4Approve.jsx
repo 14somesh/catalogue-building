@@ -33,6 +33,7 @@ export function Stage4Approve({
   const [editDraft, setEditDraft] = useState({});
   const [editError, setEditError] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
+  const editInitialValues = useRef({});
 
   // Track image uploads and reruns
   const [uploadingImageId, setUploadingImageId] = useState(null);
@@ -278,16 +279,18 @@ export function Stage4Approve({
   // Open inline edit
   function startEditing(row) {
     setEditingId(row.product_id);
-    setEditDraft({
-      title: row.title || '',
-      subtitle: row.subtitle || '',
-      bullet_1: row.bullet_1 || '',
-      bullet_2: row.bullet_2 || '',
-      bullet_3: row.bullet_3 || '',
-      bullet_4: row.bullet_4 || '',
-      dp: row.dp !== null && row.dp !== undefined ? row.dp : '',
-      mrp: row.mrp !== null && row.mrp !== undefined ? row.mrp : ''
-    });
+    const initial = {
+      title: row.title ?? '',
+      subtitle: row.subtitle ?? '',
+      bullet_1: row.bullet_1 ?? '',
+      bullet_2: row.bullet_2 ?? '',
+      bullet_3: row.bullet_3 ?? '',
+      bullet_4: row.bullet_4 ?? '',
+      dp: row.dp !== null && row.dp !== undefined ? String(row.dp) : '',
+      mrp: row.mrp !== null && row.mrp !== undefined ? String(row.mrp) : ''
+    };
+    editInitialValues.current = initial;
+    setEditDraft({ ...initial });
     setEditError('');
   }
 
@@ -318,6 +321,7 @@ export function Stage4Approve({
         ...prev,
         [fieldName]: updatedRow[fieldName] || ''
       }));
+      editInitialValues.current[fieldName] = updatedRow[fieldName] || '';
     } catch (err) {
       setEditError(err.message);
     } finally {
@@ -325,7 +329,7 @@ export function Stage4Approve({
     }
   }
 
-  // Save inline edits
+  // Save inline edits: only send fields that actually changed
   async function saveEditing(productId) {
     try {
       setSavingEdit(true);
@@ -351,16 +355,35 @@ export function Stage4Approve({
         }
       }
 
-      const payload = {
-        title: editDraft.title.trim() === '' ? null : editDraft.title,
-        subtitle: editDraft.subtitle.trim() === '' ? null : editDraft.subtitle,
-        bullet_1: editDraft.bullet_1.trim() === '' ? null : editDraft.bullet_1,
-        bullet_2: editDraft.bullet_2.trim() === '' ? null : editDraft.bullet_2,
-        bullet_3: editDraft.bullet_3.trim() === '' ? null : editDraft.bullet_3,
-        bullet_4: editDraft.bullet_4.trim() === '' ? null : editDraft.bullet_4,
-        dp: editDraft.dp !== '' ? parseFloat(editDraft.dp) : null,
-        mrp: editDraft.mrp !== '' ? parseFloat(editDraft.mrp) : null
-      };
+      const initial = editInitialValues.current;
+      const payload = {};
+
+      if (editDraft.title !== initial.title) {
+        payload.title = editDraft.title.trim() === '' ? null : editDraft.title;
+      }
+      if (editDraft.subtitle !== initial.subtitle) {
+        payload.subtitle = editDraft.subtitle.trim() === '' ? null : editDraft.subtitle;
+      }
+      for (let i = 1; i <= 4; i++) {
+        const key = `bullet_${i}`;
+        if (editDraft[key] !== initial[key]) {
+          payload[key] = editDraft[key].trim() === '' ? null : editDraft[key];
+        }
+      }
+      if (editDraft.dp !== initial.dp) {
+        payload.dp = editDraft.dp.trim() === '' ? null : parseFloat(editDraft.dp);
+      }
+      if (editDraft.mrp !== initial.mrp) {
+        payload.mrp = editDraft.mrp.trim() === '' ? null : parseFloat(editDraft.mrp);
+      }
+
+      // If user did not touch anything, simply close edit mode
+      if (Object.keys(payload).length === 0) {
+        setEditingId(null);
+        setEditDraft({});
+        setSavingEdit(false);
+        return;
+      }
 
       const res = await fetch(`/products/${encodeURIComponent(productId)}`, {
         method: 'PATCH',
@@ -440,7 +463,11 @@ export function Stage4Approve({
       ) : (
         <div className="cards-list">
           {rows.map(row => {
-            const problem = isRowProblem(row);
+            const isApproved = row.status === 'Approved';
+            const isSkipped = row.status === 'Skipped';
+            const hasWarningOrFailure = isRowProblem(row);
+            const isUnresolvedProblem = hasWarningOrFailure && !isApproved;
+
             const isEditing = editingId === row.product_id;
             const bullets = [row.bullet_1, row.bullet_2, row.bullet_3, row.bullet_4].filter(
               b => b && typeof b === 'string' && b.trim() !== ''
@@ -454,7 +481,7 @@ export function Stage4Approve({
             return (
               <div
                 key={row.product_id}
-                className={`product-card ${problem ? 'product-card--problem' : 'product-card--clean'} ${row.status === 'Skipped' ? 'product-card--skipped' : ''}`}
+                className={`product-card ${isUnresolvedProblem ? 'product-card--problem' : 'product-card--clean'} ${isSkipped ? 'product-card--skipped' : ''}`}
               >
                 {/* Left Column: Image Thumbnail + Replace Button */}
                 <div className="product-card__media">
@@ -482,7 +509,7 @@ export function Stage4Approve({
                   </div>
 
                   <button
-                    className={`btn-thumb-replace ${problem ? 'btn-thumb-replace--problem' : 'btn-thumb-replace--clean'}`}
+                    className={`btn-thumb-replace ${isUnresolvedProblem ? 'btn-thumb-replace--problem' : 'btn-thumb-replace--clean'}`}
                     onClick={() => triggerImageUpload(row.product_id)}
                     disabled={uploadingImageId === row.product_id}
                   >
@@ -538,7 +565,7 @@ export function Stage4Approve({
                           className={`edit-input ${editDraft.title.length > 20 ? 'edit-input--error' : ''}`}
                           value={editDraft.title}
                           onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
-                          placeholder="Product card title (max 20 chars)"
+                          placeholder="Title"
                         />
                       </div>
 
@@ -568,7 +595,7 @@ export function Stage4Approve({
                           className={`edit-input ${editDraft.subtitle.length > 80 ? 'edit-input--error' : ''}`}
                           value={editDraft.subtitle}
                           onChange={(e) => setEditDraft({ ...editDraft, subtitle: e.target.value })}
-                          placeholder="Subtitle (max 80 chars)"
+                          placeholder="Subtitle"
                         />
                       </div>
 
@@ -602,7 +629,7 @@ export function Stage4Approve({
                                 className={`edit-input ${isOver ? 'edit-input--error' : ''}`}
                                 value={val}
                                 onChange={(e) => setEditDraft({ ...editDraft, [key]: e.target.value })}
-                                placeholder={`Feature bullet ${idx} (max 60 chars)`}
+                                placeholder={`Bullet ${idx}`}
                               />
                             </div>
                           );
@@ -685,15 +712,15 @@ export function Stage4Approve({
                           {row.title || row.model_name}
                         </h3>
 
-                        {row.status === 'Approved' ? (
+                        {isApproved ? (
                           <span className="status-badge status-badge--approved">
                             Approved
                           </span>
-                        ) : problem ? (
+                        ) : hasWarningOrFailure ? (
                           <span className="status-badge status-badge--problem">
                             Needs a look
                           </span>
-                        ) : row.status === 'Skipped' ? (
+                        ) : isSkipped ? (
                           <span className="status-badge status-badge--skipped">
                             Skipped
                           </span>
@@ -722,8 +749,8 @@ export function Stage4Approve({
                         </div>
                       )}
 
-                      {/* Problem Callout Box */}
-                      {problem && (
+                      {/* Problem / Advisory Warning Callout Box */}
+                      {hasWarningOrFailure && (
                         <div className="problem-callout">
                           <WarningIcon width={16} height={16} color="var(--amber-dark)" />
                           <span className="problem-callout__text">
@@ -749,17 +776,7 @@ export function Stage4Approve({
                         </div>
 
                         <div className="product-card__actions">
-                          {/* Approve button if not already approved */}
-                          {row.status !== 'Approved' && (
-                            <button
-                              className="btn-card-action btn-card-action--approve"
-                              onClick={() => handleApproveRow(row.product_id)}
-                            >
-                              Approve
-                            </button>
-                          )}
-
-                          {/* Edit button */}
+                          {/* 1. Edit */}
                           <button
                             className="btn-card-action"
                             onClick={() => startEditing(row)}
@@ -767,8 +784,8 @@ export function Stage4Approve({
                             Edit
                           </button>
 
-                          {/* Re-run button (only on problem rows) */}
-                          {problem && (
+                          {/* 2. Re-run (problem rows only) */}
+                          {hasWarningOrFailure && (
                             <button
                               className="btn-card-action"
                               onClick={() => handleRerunRow(row.product_id)}
@@ -781,13 +798,21 @@ export function Stage4Approve({
                             </button>
                           )}
 
-                          {/* Skip button */}
-                          {row.status !== 'Skipped' && (
+                          {/* 3. Skip (appears on every card regardless of status) */}
+                          <button
+                            className="btn-card-action"
+                            onClick={() => handleSkipRow(row.product_id)}
+                          >
+                            Skip
+                          </button>
+
+                          {/* 4. Approve (on rows not yet approved) */}
+                          {!isApproved && (
                             <button
-                              className="btn-card-action"
-                              onClick={() => handleSkipRow(row.product_id)}
+                              className="btn-card-action btn-card-action--approve"
+                              onClick={() => handleApproveRow(row.product_id)}
                             >
-                              Skip
+                              Approve
                             </button>
                           )}
                         </div>
