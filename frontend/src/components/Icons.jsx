@@ -96,7 +96,7 @@ export function CheckIcon({ width = 14, height = 14, color = '#0F6E56' }) {
   );
 }
 
-export function CrossIcon({ width = 14, height = 14, color = '#D85A5A' }) {
+export function CrossIcon({ width = 14, height = 14, color = '#A32D2D' }) {
   return (
     <svg
       width={width}

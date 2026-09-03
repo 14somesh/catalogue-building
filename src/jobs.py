@@ -780,6 +780,9 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             file_path = payload.get("file_path")
             pasted_text = payload.get("pasted_text")
 
+            category_name = payload.get("category") or cfg.get("category", {}).get("name", "Powerbank")
+            brand_name = payload.get("brand") or job.get("brand") or ""
+
             if file_path:
                 progress_cb({"stage": "extract_text", "message": f"Extracting content from {os.path.basename(file_path)}..."})
                 raw_content, fmt_type = extract_text_from_file(file_path, llm_config, progress_cb=progress_cb)
@@ -790,7 +793,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 raise ValueError("Ingest job requires either 'file_path' or 'pasted_text'.")
 
             progress_cb({"stage": "analyze_sheet", "message": "Analyzing price sheet structure with AI..."})
-            inference = analyze_price_sheet(raw_content, category_name=category_name, llm_config=llm_config, progress_cb=progress_cb)
+            inference = analyze_price_sheet(raw_content, category_name=category_name, brand_name=brand_name, llm_config=llm_config, progress_cb=progress_cb)
 
             # Check duplicates
             seen = {}
@@ -903,9 +906,12 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                     elif hasattr(c, "column_name"):
                         col_objs.append(c)
 
+            category_name = payload.get("category") or "Powerbank"
+
             inference = BrandInferenceSchema(
                 brand_name=brand_name,
                 brand_code=brand_code,
+                category=category_name,
                 domain=domain,
                 platform=platform,
                 qualifier_tokens=qual_objs,
@@ -918,7 +924,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             register_brand_config(inference)
 
             progress_cb({"stage": "append_excel", "message": f"Writing {len(products)} rows to catalogue_data.xlsx..."})
-            count, created_rows = append_products_to_catalogue(inference)
+            count, created_rows = append_products_to_catalogue(inference, category=category_name)
 
             result = {
                 "brand": brand_name,

@@ -36,8 +36,9 @@ class ColumnMappingItem(BaseModel):
 
 
 class BrandInferenceSchema(BaseModel):
-    brand_name: str = Field(description="Inferred brand name (e.g. 'Stuffcool', 'Pebble', 'Portronics', 'Anker')")
+    brand_name: str = Field(description="Brand name (e.g. 'Stuffcool', 'Pebble', 'Portronics', 'Anker')")
     brand_code: str = Field(description="2-4 character uppercase brand code for Product_ID (e.g. 'SC', 'PEB', 'POR', 'ANK')")
+    category: Optional[str] = Field(default="Powerbank", description="Category name (e.g. 'Powerbank', 'Smartwatch', 'Audio')")
     domain: str = Field(description="Official brand website domain (e.g. 'anker.com', 'ambraneindia.com')")
     platform: str = Field(description="Website platform: 'shopify' or 'custom'")
     qualifier_tokens: List[QualifierTokenItem] = Field(
@@ -218,17 +219,48 @@ def _ocr_images_via_gemini(
 def analyze_price_sheet(
     raw_content: str,
     category_name: str,
-    llm_config: dict,
+    brand_name: Optional[str] = None,
+    llm_config: Optional[dict] = None,
     progress_cb: Optional[Any] = None
 ) -> BrandInferenceSchema:
     """
-    Uses structured LLM output to parse raw sheet content and perform autonomous inference.
+    Uses structured LLM output to parse raw sheet content and extract product rows.
+    If brand_name is specified by the user, brand inference is skipped and the provided brand is enforced.
     Implements multi-model exponential backoff retry and Groq fallback chain.
     """
     if not raw_content or not raw_content.strip():
         raise ValueError("No readable text found in price sheet to analyze.")
 
-    prompt = f"""
+    llm_config = llm_config or {}
+
+    if brand_name and brand_name.strip():
+        clean_brand = brand_name.strip()
+        prompt = f"""
+You are analyzing a dealer price sheet.
+The user has already specified the Brand: '{clean_brand}' and Category: '{category_name}'.
+Do NOT infer or override the Brand Name. Set brand_name to '{clean_brand}' and category to '{category_name}'.
+
+Execute these tasks:
+1. Assign a concise 2-4 uppercase brand code for Product_ID generation (e.g. derived from '{clean_brand}', like 'SC', 'PEB', 'POR', 'ANK').
+2. Find the brand's official consumer website domain and e-commerce platform ('shopify' or 'custom').
+3. Disambiguate price columns:
+   - If two prices exist: the lower price is Dealer Price (DP), the higher price is Maximum Retail Price (MRP).
+   - If one price exists: it is Dealer Price (DP).
+4. Extract product rows:
+   - Strip internal SKU codes, brand prefixes, and color variant suffixes (e.g. 'Black', 'White') to produce `model_name`.
+   - Generate `display_name`: the SHORTEST clean product title for the catalogue card (e.g. 'Mega', 'Major', 'Roam Plus', 'Power Shutter' — NOT 'Mega 20000mAh Powerbank').
+   - Extract `dp` and `mrp` as numbers if found in the row.
+5. Select Brand-Specific Qualifier Tokens:
+   - Analyze naming patterns for true variant/modifier suffixes (e.g. 'Plus', 'Pro', 'Max', 'Mini', 'Ultra', 'Lite', 'Go').
+   - DO NOT include actual product model names.
+6. Column Mapping:
+   - Map original headers to roles: 'Model_Name', 'DP', 'MRP', or 'ignored'.
+
+PRICE SHEET CONTENT:
+{raw_content}
+"""
+    else:
+        prompt = f"""
 Analyze this dealer price sheet for a brand in the '{category_name}' category.
 
 Execute these tasks autonomously:
@@ -241,6 +273,7 @@ Execute these tasks autonomously:
 5. Extract product rows:
    - Strip internal SKU codes, brand prefixes, and color variant suffixes (e.g. 'Black', 'White') to produce `model_name`.
    - Generate `display_name`: the SHORTEST clean product title for the catalogue card (e.g. 'Mega', 'Major', 'Roam Plus', 'Power Shutter' — NOT 'Mega 20000mAh Powerbank').
+   - Extract `dp` and `mrp` as numbers if found in the row.
 6. Select Brand-Specific Qualifier Tokens:
    - Analyze the catalog's naming patterns to identify true variant/modifier suffixes (e.g. 'Plus', 'Pro', 'Max', 'Mini', 'Ultra', 'Lite', 'Go').
    - Provide a short rationale for each token explaining why it is a variant modifier.
@@ -281,7 +314,12 @@ PRICE SHEET CONTENT:
                 )
                 result_json = json.loads(response.text)
                 logger.info(f"[Analyze Sheet] Successfully analyzed price sheet via Gemini ({model}).")
-                return BrandInferenceSchema(**result_json)
+                inference = BrandInferenceSchema(**result_json)
+                if brand_name and brand_name.strip():
+                    inference.brand_name = brand_name.strip()
+                if category_name and category_name.strip():
+                    inference.category = category_name.strip()
+                return inference
             except Exception as e:
                 last_error = e
                 err_type = classify_gemini_error(e)
@@ -329,7 +367,12 @@ PRICE SHEET CONTENT:
                 )
                 result_json = json.loads(res.choices[0].message.content)
                 logger.info(f"[Analyze Sheet] Successfully analyzed price sheet via Groq ({groq_model}).")
-                return BrandInferenceSchema(**result_json)
+                inference = BrandInferenceSchema(**result_json)
+                if brand_name and brand_name.strip():
+                    inference.brand_name = brand_name.strip()
+                if category_name and category_name.strip():
+                    inference.category = category_name.strip()
+                return inference
             except Exception as ge:
                 last_error = ge
                 err_type = classify_groq_error(ge)
@@ -437,10 +480,12 @@ def register_brand_config(inference: BrandInferenceSchema, config_path: str = "c
 
 def append_products_to_catalogue(
     inference: BrandInferenceSchema,
-    excel_path: str = "data/catalogue_data.xlsx"
+    excel_path: str = "data/catalogue_data.xlsx",
+    category: Optional[str] = None
 ) -> Tuple[int, List[Dict[str, Any]]]:
     """Appends the newly onboarded product rows to the master Excel catalogue."""
     df = load_catalogue_data(excel_path)
+    cat = category or getattr(inference, "category", None) or "Powerbank"
     
     # Determine the starting sequence number using max + 1 across existing rows for this brand
     existing_brand_mask = df["Brand"].astype(str).str.lower() == inference.brand_name.lower()
@@ -471,6 +516,7 @@ def append_products_to_catalogue(
         row_dict = {
             "Product_ID": pid,
             "Brand": inference.brand_name,
+            "Category": cat,
             "Model_Name": p.model_name,
             "Display_Name": p.display_name,
             "MRP_Input": p.dp,

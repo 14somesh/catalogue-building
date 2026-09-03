@@ -1,8 +1,17 @@
-import React, { useState, useRef } from 'react';
-import { UploadIcon } from './Icons';
+import React, { useState, useEffect, useRef } from 'react';
+import { UploadIcon, WarningTriangleIcon } from './Icons';
 import { ErrorDisplay } from './ErrorDisplay';
 
 export function Stage1Ingest({ onIngestComplete }) {
+  // Brand & Category inputs
+  const [brand, setBrand] = useState('');
+  const [category, setCategory] = useState('Powerbank');
+  const [newCategory, setNewCategory] = useState('');
+  const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);
+  const [knownBrands, setKnownBrands] = useState([]);
+  const [knownCategories, setKnownCategories] = useState(['Powerbank']);
+
+  // File & Upload state
   const [file, setFile] = useState(null);
   const [uploadId, setUploadId] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -12,12 +21,45 @@ export function Stage1Ingest({ onIngestComplete }) {
   const [techDetails, setTechDetails] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
+  // Unusable / Low-confidence extraction state
+  const [unusableExtraction, setUnusableExtraction] = useState(null);
+
   const fileInputRef = useRef(null);
+
+  // Fetch known brands and categories for autocomplete & dropdown
+  useEffect(() => {
+    async function loadMetadata() {
+      try {
+        const [brandsRes, catsRes] = await Promise.all([
+          fetch('/brands'),
+          fetch('/categories'),
+        ]);
+
+        if (brandsRes.ok) {
+          const list = await brandsRes.json();
+          const names = list.map((b) => b.brand).filter(Boolean);
+          setKnownBrands(names);
+        }
+
+        if (catsRes.ok) {
+          const catList = await catsRes.json();
+          if (Array.isArray(catList) && catList.length > 0) {
+            setKnownCategories(catList);
+            setCategory(catList[0]);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load brands or categories:', err);
+      }
+    }
+    loadMetadata();
+  }, []);
 
   const handleFileSelection = async (selectedFile) => {
     if (!selectedFile) return;
     setErrorMsg('');
     setTechDetails(null);
+    setUnusableExtraction(null);
     setFile(selectedFile);
     setIsUploading(true);
 
@@ -64,18 +106,57 @@ export function Stage1Ingest({ onIngestComplete }) {
     setIsDragOver(false);
   };
 
+  const effectiveBrand = brand.trim();
+  const effectiveCategory = (isAddingNewCategory ? newCategory : category).trim();
+  const isFormValid = uploadId && effectiveBrand && effectiveCategory;
+
+  const validateAndProceed = (result) => {
+    const products = result?.products || [];
+    const usableRows = products.filter(
+      (p) =>
+        Boolean((p.model_name || p.display_name)?.trim()) &&
+        ((p.dp != null && !isNaN(Number(p.dp)) && Number(p.dp) > 0) ||
+          (p.mrp != null && !isNaN(Number(p.mrp)) && Number(p.mrp) > 0))
+    );
+
+    // If nothing extracted, or fewer than half the rows have a usable name and price: stay on Stage 1
+    if (products.length === 0 || usableRows.length < Math.ceil(products.length / 2)) {
+      setIsIngesting(false);
+      setProgressMsg('');
+      setUnusableExtraction({
+        total: products.length,
+        usableCount: usableRows.length,
+        products: products,
+        rawResult: result,
+      });
+      return;
+    }
+
+    // At least half rows usable -> proceed to Stage 2 with brand & category
+    onIngestComplete({
+      ...result,
+      brand_name: effectiveBrand,
+      category_name: effectiveCategory,
+    });
+  };
+
   const handleReadSheet = async () => {
-    if (!uploadId || isIngesting) return;
+    if (!isFormValid || isIngesting) return;
     setIsIngesting(true);
     setErrorMsg('');
     setTechDetails(null);
+    setUnusableExtraction(null);
     setProgressMsg('Initiating ingestion job...');
 
     try {
       const res = await fetch('/ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upload_id: uploadId }),
+        body: JSON.stringify({
+          upload_id: uploadId,
+          brand: effectiveBrand,
+          category: effectiveCategory,
+        }),
       });
 
       const data = await res.json();
@@ -85,7 +166,6 @@ export function Stage1Ingest({ onIngestComplete }) {
 
       const jobId = data.job_id;
 
-      // Listen via Server-Sent Events (SSE) with fallback to polling
       let eventSource;
       let completed = false;
 
@@ -93,7 +173,7 @@ export function Stage1Ingest({ onIngestComplete }) {
         if (completed) return;
         completed = true;
         if (eventSource) eventSource.close();
-        onIngestComplete(result);
+        validateAndProceed(result);
       };
 
       try {
@@ -131,7 +211,6 @@ export function Stage1Ingest({ onIngestComplete }) {
         };
 
         eventSource.onerror = () => {
-          // If SSE encounters an issue, fallback to polling
           eventSource.close();
           pollJobStatus(jobId, finishWithResult);
         };
@@ -182,7 +261,78 @@ export function Stage1Ingest({ onIngestComplete }) {
 
   return (
     <div className="stage-1-container">
-      {/* Dashed Amber Border Box on Cream */}
+      {/* 1. Pre-upload Brand and Category Fields */}
+      <div className="stage-1-meta-form">
+        <div className="stage-1-field">
+          <label htmlFor="brand-input">Brand name *</label>
+          <input
+            id="brand-input"
+            list="brand-options"
+            type="text"
+            className="stage-1-input"
+            placeholder="e.g. Portronics, Pebble, Stuffcool"
+            value={brand}
+            onChange={(e) => setBrand(e.target.value)}
+            disabled={isIngesting}
+          />
+          <datalist id="brand-options">
+            {knownBrands.map((b) => (
+              <option key={b} value={b} />
+            ))}
+          </datalist>
+        </div>
+
+        <div className="stage-1-field">
+          <label htmlFor="category-select">Category *</label>
+          {isAddingNewCategory ? (
+            <div className="stage-1-new-cat-row">
+              <input
+                type="text"
+                className="stage-1-input"
+                placeholder="Enter new category name"
+                value={newCategory}
+                onChange={(e) => setNewCategory(e.target.value)}
+                autoFocus
+                disabled={isIngesting}
+              />
+              <button
+                type="button"
+                className="stage-1-new-cat-cancel"
+                onClick={() => {
+                  setIsAddingNewCategory(false);
+                  setNewCategory('');
+                }}
+                title="Cancel adding new category"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <select
+              id="category-select"
+              className="stage-1-select"
+              value={category}
+              onChange={(e) => {
+                if (e.target.value === '__ADD_NEW__') {
+                  setIsAddingNewCategory(true);
+                } else {
+                  setCategory(e.target.value);
+                }
+              }}
+              disabled={isIngesting}
+            >
+              {knownCategories.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+              <option value="__ADD_NEW__">+ Add new category</option>
+            </select>
+          )}
+        </div>
+      </div>
+
+      {/* 2. Upload Drop Zone */}
       <div
         className={`drop-zone ${isDragOver ? 'drop-zone--active' : ''}`}
         onDrop={handleDrop}
@@ -234,6 +384,7 @@ export function Stage1Ingest({ onIngestComplete }) {
                 setErrorMsg('');
                 setTechDetails(null);
                 setProgressMsg('');
+                setUnusableExtraction(null);
               }}
               disabled={isIngesting}
             >
@@ -265,14 +416,108 @@ export function Stage1Ingest({ onIngestComplete }) {
         )}
       </div>
 
-      {/* Bottom Right: Primary Teal Action Button */}
+      {/* 3. Low-Confidence / Unusable Extraction Review State */}
+      {unusableExtraction && (
+        <div className="stage-1-unusable">
+          <div className="stage-1-unusable__header">
+            <div className="stage-1-unusable__title">
+              Price sheet could not be parsed reliably
+            </div>
+            <div className="stage-1-unusable__desc">
+              {unusableExtraction.total === 0 ? (
+                'No product rows could be recognized in this file. A catalogue requires a list of products each with a dealer price (DP) and an MRP.'
+              ) : (
+                `We found ${unusableExtraction.total} rows, but only ${unusableExtraction.usableCount} had a usable product name and price. A catalogue requires a list of products each with a dealer price (DP) and an MRP. Here is what was extracted from your sheet:`
+              )}
+            </div>
+          </div>
+
+          {unusableExtraction.products.length > 0 && (
+            <div className="stage-1-unusable__table-container">
+              <table className="stage-1-unusable__table">
+                <thead>
+                  <tr>
+                    <th style={{ width: '40px' }}>#</th>
+                    <th>Model name</th>
+                    <th style={{ width: '120px' }}>Dealer price (DP)</th>
+                    <th style={{ width: '120px' }}>MRP</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unusableExtraction.products.map((p, idx) => (
+                    <tr key={idx}>
+                      <td>{idx + 1}</td>
+                      <td>{p.model_name || <em style={{ color: 'var(--amber-dark)' }}>Missing</em>}</td>
+                      <td>
+                        {p.dp != null ? (
+                          `₹${p.dp}`
+                        ) : (
+                          <span style={{ color: 'var(--amber-dark)' }}>Missing DP</span>
+                        )}
+                      </td>
+                      <td>
+                        {p.mrp != null ? (
+                          `₹${p.mrp}`
+                        ) : (
+                          <span style={{ color: 'var(--amber-dark)' }}>Missing MRP</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="stage-1-unusable__actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                setUnusableExtraction(null);
+                setFile(null);
+                setUploadId(null);
+              }}
+            >
+              Choose different file
+            </button>
+            {unusableExtraction.products.length > 0 && (
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ borderColor: 'var(--amber)' }}
+                onClick={() => {
+                  // Allow proceeding to Stage 2 so user can fill in details
+                  onIngestComplete({
+                    ...unusableExtraction.rawResult,
+                    brand_name: effectiveBrand,
+                    category_name: effectiveCategory,
+                  });
+                }}
+              >
+                Proceed to Stage 2 anyway
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 4. Bottom Right: Primary Teal Action Button */}
       <div className="stage-footer">
-        <div className="stage-footer__left"></div>
+        <div className="stage-footer__left">
+          {(!effectiveBrand || !effectiveCategory) && (
+            <span style={{ fontSize: '13px', color: 'var(--amber-mid)' }}>
+              {!effectiveBrand
+                ? 'Enter a brand name to read sheet'
+                : 'Select or enter a category to read sheet'}
+            </span>
+          )}
+        </div>
         <div className="stage-footer__right">
           <button
             type="button"
             className="btn-primary"
-            disabled={!uploadId || isIngesting || isUploading}
+            disabled={!isFormValid || isIngesting || isUploading}
             onClick={handleReadSheet}
           >
             {isIngesting ? 'Reading sheet...' : 'Read the sheet'}

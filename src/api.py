@@ -346,6 +346,8 @@ async def upload_staging_file(file: UploadFile = File(...)) -> Dict[str, Any]:
 class IngestRequest(BaseModel):
     upload_id: Optional[str] = None
     pasted_text: Optional[str] = None
+    brand: Optional[str] = None
+    category: Optional[str] = None
 
 
 @app.post("/ingest")
@@ -373,11 +375,13 @@ def trigger_ingest_job(body: IngestRequest) -> Dict[str, Any]:
 
     payload = {
         "file_path": target_path,
-        "pasted_text": body.pasted_text.strip() if body.pasted_text else None
+        "pasted_text": body.pasted_text.strip() if body.pasted_text else None,
+        "brand": body.brand.strip() if body.brand and body.brand.strip() else None,
+        "category": body.category.strip() if body.category and body.category.strip() else None
     }
 
     try:
-        job_id = enqueue_job(job_type="ingest", brand=None, payload=payload)
+        job_id = enqueue_job(job_type="ingest", brand=body.brand.strip() if body.brand else None, payload=payload)
         return {"job_id": job_id, "status": "queued"}
     except Exception as err:
         logger.error(f"Failed to enqueue ingest job: {err}", exc_info=True)
@@ -400,6 +404,7 @@ class ProductRowInput(BaseModel):
 class ConfirmBrandRequest(BaseModel):
     brand_name: Optional[str] = None
     brand_code: Optional[str] = None
+    category: Optional[str] = "Powerbank"
     domain: Optional[str] = ""
     platform: Optional[str] = "shopify"
     column_mapping: Optional[Dict[str, str]] = None
@@ -425,6 +430,7 @@ def confirm_brand_onboarding(brand: str, body: ConfirmBrandRequest) -> Dict[str,
     payload = {
         "brand_name": target_brand,
         "brand_code": body.brand_code,
+        "category": (body.category or "Powerbank").strip(),
         "domain": body.domain,
         "platform": body.platform,
         "column_mapping": body.column_mapping or {},
@@ -1296,6 +1302,18 @@ def list_brands() -> List[Dict[str, Any]]:
         })
 
     return brand_list
+
+
+@app.get("/categories")
+def list_categories() -> List[str]:
+    """
+    Lists distinct categories currently present in the catalogue data.
+    """
+    df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
+    if df.empty or "Category" not in df.columns:
+        return ["Powerbank"]
+    cats = sorted(list(set(str(c).strip() for c in df["Category"].dropna() if str(c).strip())))
+    return cats if cats else ["Powerbank"]
 
 
 @app.get("/brands/{brand}/rows")

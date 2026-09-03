@@ -99,32 +99,53 @@ Sits at the top of every build screen. Five items: Ingest, Brochure, Collect, Ap
 
 ## 6. Stage 1 — Ingest
 
-Shows nothing but the upload. No results, no preview.
+Pre-upload metadata and sheet upload zone.
 
-- A dashed amber border box on cream, centred: upload icon, `Drop your price sheet here`, subline `Screenshot, PDF, Excel, CSV, or pasted text`, and a `Choose file` button in amber pale.
-- Drag and drop must work, not just the button.
-- Bottom right: teal `Read the sheet`.
+1. **Brand and Category Inputs (Above Drop Zone):**
+   - Two required fields side-by-side above the drop zone:
+     - **Brand:** Free text, required. Autocompletes against existing brands in the sheet (`GET /brands`) so a re-run matches an existing brand exactly rather than introducing a spelling duplicate.
+     - **Category:** Dropdown of existing categories in the sheet (`GET /categories`), plus an `+ Add new category` option which reveals an inline text input. Required.
+   - Both Brand and Category must be filled and a file uploaded before `Read the sheet` is enabled.
+   - Brand and Category are passed directly to `POST /ingest` in the payload. The LLM extracts rows without overriding the typed brand or category.
 
-Endpoints: `POST /uploads` then `POST /ingest`. Ingest returns a job id — poll `GET /jobs/{id}` or stream. Advance to stage 2 when the job completes.
+2. **Upload Zone:**
+   - A dashed amber border box on cream, centred: upload icon, `Drop your price sheet here`, subline `Screenshot, PDF, Excel, CSV, or pasted text`, and a `Choose file` button in amber pale.
+   - Drag and drop works across `.xlsx`, `.xls`, `.csv`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.txt`.
+   - Bottom right: teal `Read the sheet`.
+
+3. **Validation of Extracted Rows:**
+   - Evaluates row completeness (each row must have a clean product name, a DP, and an MRP):
+     - **All complete:** Advances directly to Stage 2.
+     - **Some incomplete:** Advances to Stage 2, marking incomplete rows and highlighting missing fields in amber so they can be filled in inline.
+     - **Low confidence / Unusable (< 50% usable or 0 rows):** Stays on Stage 1. Explains plainly what was found and what is needed (products with both a dealer price and an MRP). Renders a review table of whatever rows were found so the user can see what went wrong, with an option to choose a different file or retry.
+   - Incomplete rows are never silently dropped.
+
+Endpoints: `POST /uploads`, `POST /ingest` (with `brand` and `category`). Ingest returns a job id — poll `GET /jobs/{id}` or stream `/jobs/{id}/stream`.
 
 ---
 
-## 7. Stage 2 — Brochure
+## 7. Stage 2 — Brochure & Ingest Review
 
-Three blocks, in this order.
+Three blocks, reflecting Stage 1 inputs:
 
-**Amber bar.** Brand dropdown on the left (editable — the inferred brand may be wrong): styled with cream (`#FAEEDA`) background, 1px `#BA7517` border, 8px radius, `#412402` text at 14px, 8px vertical and 12px horizontal padding, and a custom chevron in `#BA7517` (native appearance removed). On the right, two numbers: rows read, duplicates.
+**Amber bar.**
+- Brand control on the left (pre-filled from what was entered in Stage 1, still editable).
+- Category label displayed beside the brand (e.g. `Category: Powerbank`).
+- On the right, two numbers: rows read, duplicates.
 
-**Parsed rows table.** Columns: Model, Display name, DP, MRP, and a trailing delete icon. Every cell is inline-editable on click. Header right: `Click any cell to edit`. Column headers stay muted grey, not amber. Table data is plain text: `#2C2C2A` at 13px, weight 400 (amber appears only on warning rows).
-Duplicate rows get a cream row background, an amber warning triangle before the model name, and the text `same as row N` as small `#633806` text at 12px directly beneath the model name in the Model column (under the warning triangle). The real display name is preserved in the Display name column.
+**Parsed rows table.**
+- Columns: Model, Display name, DP, MRP, and a trailing delete icon. Every cell is inline-editable on click.
+- Missing DP or MRP cells get an amber cell treatment (`#FAEEDA` background, `#EF9F27` border) and can be clicked to fill in the missing price.
+- Incomplete rows cannot be included until their required DP and MRP values are supplied.
+- Duplicate rows get a cream row background, an amber warning triangle before the model name, and the text `same as row N` beneath the model name.
+- Table data is plain text: `#2C2C2A` at 13px, weight 400.
 
-**Brochure strip.** A dashed amber box on cream, single row: PDF icon, `Brand brochure`, `Optional`, and a `Choose PDF` button. Not a blocking question.
+**Brochure strip.**
+- A dashed amber box on cream, single row: PDF icon, `Brand brochure`, `Optional`, and a `Choose PDF` button.
 
-Footer: `Back` on the left, teal `Start collecting N rows` on the right, where N excludes deleted rows.
+Footer: `Back` on the left, teal `Continue with N rows` on the right, where N counts **only complete rows**. Disabled if complete count is 0.
 
-Endpoints: `POST /brands/{brand}/confirm` on continue, `POST /brands/{brand}/brochure` if a PDF is attached.
-
-Do not show: column mapping, platform detection, powerbank illustrations, or a stats band. All were removed as noise.
+Endpoints: `POST /brands/{brand}/confirm` on continue (passing `category`), `POST /brands/{brand}/brochure` if a PDF is attached.
 
 ---
 

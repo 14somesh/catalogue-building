@@ -67,7 +67,7 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def resolve_output_pdf_path(config: dict, brand: Optional[str] = None) -> str:
+def resolve_output_pdf_path(config: dict, brand: Optional[str] = None, category: Optional[str] = None) -> str:
     """
     Resolves the output PDF file path using category name and current timestamp.
     Writes to dist/{category_slug}/{brand_slug}/ when brand is provided.
@@ -78,7 +78,7 @@ def resolve_output_pdf_path(config: dict, brand: Optional[str] = None) -> str:
     output_dir = paths_cfg.get("output_dir", "dist/")
     pattern = paths_cfg.get("output_filename_pattern", "{category}_catalogue_{timestamp}.pdf")
     
-    category_raw = config.get("category", {}).get("name", "powerbank")
+    category_raw = category or config.get("category", {}).get("name", "powerbank")
     category_slug = slugify(category_raw)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     
@@ -294,8 +294,19 @@ def build_catalogue_pdf(
 
     logger.info(f"Brand ordering sequence: {ordered_brands}")
 
+    # Detect category from active products in df if present
+    df_cat = None
+    if "Category" in df.columns:
+        cats = [str(c).strip() for c in df["Category"].dropna().unique() if str(c).strip()]
+        if len(cats) == 1:
+            df_cat = cats[0]
+        elif len(cats) > 1 and brand:
+            brand_cats = [str(c).strip() for c in df[df["Brand"].astype(str).str.lower() == brand.lower()]["Category"].dropna().unique() if str(c).strip()]
+            if brand_cats:
+                df_cat = brand_cats[0]
+
     brand_for_output = ordered_brands[0] if len(ordered_brands) == 1 else (brand or None)
-    output_pdf = resolve_output_pdf_path(config, brand=brand_for_output)
+    output_pdf = resolve_output_pdf_path(config, brand=brand_for_output, category=df_cat)
     os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
 
     # 2. Resolve logo
@@ -303,8 +314,8 @@ def build_catalogue_pdf(
     logo_mark_url = image_to_base64(logo_path)
 
     category_cfg = config.get("category", {})
-    category_name = category_cfg.get("name", "POWERBANK")
-    category_display_title = category_cfg.get("display_title", "Powerbanks & Portable Chargers")
+    category_name = (df_cat or category_cfg.get("name", "POWERBANK")).upper()
+    category_display_title = (f"{df_cat.capitalize()}s" if df_cat and df_cat.lower() != "powerbank" else category_cfg.get("display_title", "Powerbanks & Portable Chargers"))
 
     # 3. Group products by brand and build 2-up paginated structure
     brand_groups = []

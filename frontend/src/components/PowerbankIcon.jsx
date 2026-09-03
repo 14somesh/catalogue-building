@@ -8,8 +8,8 @@ export function PowerbankIcon({
   width = 16,
   height = 20,
   fill = 'currentColor',
-  slotFill = 'rgba(0,0,0,0.2)',
-  dotFill = 'rgba(0,0,0,0.25)',
+  slotFill = '#412402',
+  dotFill = '#E1F5EE',
   showDot = false,
   className = ''
 }) {
@@ -24,12 +24,12 @@ export function PowerbankIcon({
       style={{ display: 'inline-block', verticalAlign: 'middle', flexShrink: 0 }}
     >
       {/* Outer rounded powerbank body */}
-      <rect x="0" y="0" width="24" height="32" rx="4" fill={fill} />
-      {/* Top horizontal notch / connector port */}
-      <rect x="4" y="3.5" width="10" height="2" rx="1" fill={slotFill} />
-      {/* Optional bottom indicator */}
+      <rect x="2" y="5" width="20" height="25" rx="4" fill={fill} />
+      {/* Top connector notch / slot */}
+      <rect x="7" y="2" width="10" height="4" rx="1.5" fill={slotFill} />
+      {/* Single subtle charge indicator dot */}
       {showDot && (
-        <rect x="15" y="24" width="4" height="4" rx="1" fill={dotFill} />
+        <circle cx="12" cy="12" r="1.5" fill={dotFill} />
       )}
     </svg>
   );
@@ -41,7 +41,7 @@ export function PowerbankIcon({
  */
 export function LandingPowerbankTrio() {
   return (
-    <div className="landing-glyphs">
+    <div className="landing-powerbank-trio">
       {/* Left powerbank: smaller, pale amber */}
       <PowerbankIcon
         width={48}
@@ -56,7 +56,7 @@ export function LandingPowerbankTrio() {
         height={82}
         fill="#0F6E56"
         slotFill="#9FE1CB"
-        dotFill="#073B2E"
+        dotFill="#E1F5EE"
         showDot={true}
       />
       {/* Right powerbank: smaller, cream */}
