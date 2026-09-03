@@ -36,9 +36,16 @@ These rules are programmatically enforced during every execution of `4_build.py`
    - *Failure behavior:* `ValueError` raised if manual letter-spaced patterns are detected.
 
 5. **Rendered Title Width & Overflow Integrity (No Auto-Shrink):**
-   - Every product title must fit completely within the details panel's available width (`~346px`) at its natural font size.
-   - The engine does not auto-shrink product titles. If any title's rendered text width exceeds the container's available width, the build must fail immediately and identify the offending product row.
-   - *Failure behavior:* `ValueError` raised specifying the overflowing Product ID, model name, text width, and container width.
+   - Every product title must fit completely within the details panel's available width (`291px` inner container width inside the 331px panel) at its natural font size (`32px 700 Space Grotesk`, `letter-spacing: -0.02em`, `white-space: nowrap`).
+   - The engine does not auto-shrink product titles. If any title's rendered text width (including the sequence prefix `01.`) exceeds the container's available width (`textWidth > containerWidth + 1.0px`), the build must fail immediately and identify the offending product row.
+   - **Critical Architecture Rule:** The title limit is strictly a **physical rendered width limit (291px)**, NOT a character count. Wide glyphs (e.g. `WMWMWMWMW`) overflow at 9 characters, while narrower titles (e.g. `Rapid Electra 20`) fit at 16 characters. Never reintroduce a fixed character number.
+   - *Failure behavior:* `ValueError` raised specifying the overflowing Product ID, model name, rendered text width, and container width.
+
+6. **Card Height Integrity & Text Wrap Ceilings (Fixed 290px Card Height):**
+   - The product card details panel has a fixed height of `290px` (`--prod-h: 290px; padding: 16px 20px;`, available interior height: `258px`). Content flows vertically: Title -> Subtitle -> Gold Divider -> 2-Column Bullets Grid -> Gold DP Badge.
+   - **Subtitle Limit (80 chars max):** Subtitles wrap to 2 lines up to ~80 chars (height: 33px). At 81+ chars, subtitle wraps to a 3rd line (height: 49px), pushing down the stack and causing vertical card overflow (`scrollHeight > clientHeight`). 80 is a **vertical 2-line wrap ceiling**, not a width limit.
+   - **Bullet Limit (60 chars max each):** Feature bullets render in a 2-column CSS Grid with 125.5px column width. Bullets wrap to 2 or 3 lines up to ~58 chars (height: 52px). At 60+ chars, a bullet wraps to a 4th line (height: 69px), collapsing bottom clearance to 0.8px or negative. 60 is a **vertical 3-line wrap ceiling per grid column**, not a width limit.
+   - *Failure behavior:* Violations push the DP badge flush or out of bounds, violating Section B Rule 3.
 
 6. **No Stray Decorative Elements:**
    - Legacy eyebrow lines (e.g. `"01 — STUFFCOOL SERIES"`), orphaned rule dividers, or abandoned decorative elements must never appear in template output.

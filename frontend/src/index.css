@@ -213,6 +213,37 @@ html, body {
   opacity: 0.85;
 }
 
+.btn-secondary,
+.btn-back {
+  background-color: transparent;
+  border: 1px solid #D0C9BD;
+  border-radius: var(--panel-radius);
+  font-family: var(--font-family);
+  font-size: var(--fs-btn);
+  font-weight: 500;
+  padding: 9px 20px;
+  color: #2C2C2A;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  text-decoration: none;
+}
+
+.btn-secondary:hover:not(:disabled),
+.btn-back:hover:not(:disabled) {
+  background-color: #F4F2EB;
+  border-color: #B8B2A6;
+}
+
+.btn-secondary:disabled,
+.btn-back:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .landing-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1589,6 +1620,47 @@ html, body {
   font-weight: 600;
 }
 
+/* Live Title Width Fit Meter */
+.title-fit-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.title-fit-bar-wrap {
+  width: 64px;
+  height: 5px;
+  background-color: #E8E5DD;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.title-fit-bar {
+  height: 100%;
+  background-color: var(--teal);
+  transition: width 0.15s ease, background-color 0.15s ease;
+}
+
+.title-fit-bar--warning {
+  background-color: var(--amber);
+}
+
+.title-fit-bar--overflow {
+  background-color: var(--red);
+}
+
+.title-fit-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--grey-400);
+  white-space: nowrap;
+}
+
+.title-fit-text--overflow {
+  color: var(--red);
+  font-weight: 600;
+}
+
 .edit-input {
   width: 100%;
   padding: 7px 10px;
@@ -1643,6 +1715,149 @@ html, body {
 
 .btn-card-cancel:hover:not(:disabled) {
   background-color: #F4F2EB;
+}
+
+/* ==========================================================================
+   Stage 5 — Build Styles
+   ========================================================================== */
+
+.stage-5-container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+}
+
+/* Block 1: Amber Bar */
+.stage-5-amber-bar {
+  background-color: var(--amber);
+  border-radius: var(--panel-radius);
+  padding: 24px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+}
+
+.stage-5-amber-bar__left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stage-5-amber-bar__title {
+  font-size: 24px;
+  font-weight: 500;
+  color: #412402;
+  margin: 0;
+  line-height: 1.25;
+}
+
+.stage-5-amber-bar__meta {
+  font-size: 14px;
+  font-weight: 400;
+  color: #633806;
+  line-height: 1.4;
+}
+
+.stage-5-amber-bar__right {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.btn-download-pdf {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background-color: var(--teal);
+  color: #FFFFFF;
+  font-family: var(--font-family);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 22px;
+  border-radius: 6px;
+  text-decoration: none;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: background-color 0.15s ease, transform 0.1s ease;
+}
+
+.btn-download-pdf:hover:not(.btn-download-pdf--disabled) {
+  background-color: var(--teal-deep);
+}
+
+.btn-download-pdf--disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Block 2: Cream Strip */
+.stage-5-cream-strip {
+  background-color: var(--cream);
+  border: 1px solid #EEDBBE;
+  border-radius: var(--panel-radius);
+  padding: 18px 32px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.stage-5-cream-strip__label {
+  font-size: 15px;
+  font-weight: 500;
+  color: #412402;
+}
+
+.btn-start-new-brand {
+  background-color: var(--amber-pale);
+  border: 1px solid var(--amber-dark);
+  border-radius: 6px;
+  color: var(--amber-deep);
+  font-family: var(--font-family);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 18px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.btn-start-new-brand:hover {
+  background-color: #F8B855;
+}
+
+/* Footer Navigation */
+.stage-5-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 16px;
+}
+
+.btn-rebuild {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: transparent;
+  border: 1px solid var(--amber-dark);
+  border-radius: var(--panel-radius);
+  color: var(--amber-deep);
+  font-family: var(--font-family);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 8px 18px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.btn-rebuild:hover:not(:disabled) {
+  background-color: #F8E6C8;
+}
+
+.btn-rebuild:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 

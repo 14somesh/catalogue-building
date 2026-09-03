@@ -49,6 +49,7 @@ from src.utils.excel_handler import (
 from src.utils.validators import validate_row_deterministic
 from src.run_brand import derive_failure_reason
 from src.utils.logger import setup_logger
+from src.title_measurer import get_title_measurer, stop_title_measurer
 
 logger = setup_logger("api")
 
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down FastAPI catalogue API...")
     stop_worker()
+    stop_title_measurer()
 
 
 app = FastAPI(
@@ -778,6 +780,18 @@ def get_brand_review_data(brand: str) -> List[Dict[str, Any]]:
     return results
 
 
+class TitleValidateRequest(BaseModel):
+    title: str = Field(..., description="Title to measure against the card container")
+
+
+@app.post("/validate/title")
+@app.post("/products/validate-title")
+def validate_title_endpoint(body: TitleValidateRequest) -> Dict[str, Any]:
+    """Measures rendered title width in Chromium against 291px container."""
+    measurer = get_title_measurer()
+    return measurer.measure_title(body.title)
+
+
 class EditProductRequest(BaseModel):
     title: Optional[Union[str, None]] = None
     subtitle: Optional[Union[str, None]] = None
@@ -796,9 +810,9 @@ def edit_product_row(product_id: str, body: EditProductRequest) -> Dict[str, Any
     Writes to Override_Title, Override_Subtitle, Override_Bullet_1..4, Override_DP, Override_MRP.
     Sending null for a field clears that override and falls back to the collected value.
     Enforces identical card layout limits:
-      - title: max 20 characters
-      - subtitle: max 80 characters
-      - bullet_1..4: max 60 characters
+      - title: measured rendered width against 291px container (reusing Rule 5)
+      - subtitle: max 80 characters (max 2 lines)
+      - bullet_1..4: max 60 characters (max 3 lines)
     Returns the row's resolved values after edit.
     """
     clean_pid = product_id.strip()
@@ -809,16 +823,19 @@ def edit_product_row(product_id: str, body: EditProductRequest) -> Dict[str, Any
 
     fields_set = body.model_fields_set
 
-    # 1. Title (Card width limit: 20 characters)
+    # 1. Title (Real width measurement against 291px card container)
     if "title" in fields_set:
         if body.title is None or str(body.title).strip() == "":
             df.loc[mask, "Override_Title"] = None
         else:
             val = str(body.title).strip()
-            if len(val) > 20:
+            measurer = get_title_measurer()
+            m_res = measurer.measure_title(val)
+            if m_res["overflow"]:
+                diff_px = round(m_res["diff"])
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Title exceeds 20-character limit ({len(val)} characters given): '{val}'"
+                    detail=f"Title will not fit the card: rendered width ({round(m_res['textWidth'])}px) exceeds the available container width ({round(m_res['containerWidth'])}px) by {diff_px}px. Please shorten the title to fit."
                 )
             df.loc[mask, "Override_Title"] = val
 

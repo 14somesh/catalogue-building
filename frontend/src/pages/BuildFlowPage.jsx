@@ -4,6 +4,7 @@ import { Stage1Ingest } from '../components/Stage1Ingest';
 import { Stage2Brochure } from '../components/Stage2Brochure';
 import { Stage3Collect } from '../components/Stage3Collect';
 import { Stage4Approve } from '../components/Stage4Approve';
+import { Stage5Build } from '../components/Stage5Build';
 
 export function BuildFlowPage() {
   const [currentStage, setCurrentStage] = useState(1);
@@ -32,6 +33,14 @@ export function BuildFlowPage() {
     setCurrentStage(5);
   };
 
+  const handleStartNewBrand = () => {
+    setIngestResult(null);
+    setCollectionTarget(null);
+    setApprovalTarget(null);
+    setBuildTarget(null);
+    setCurrentStage(1);
+  };
+
   React.useEffect(() => {
     window.__SET_STAGE_2 = (result) => {
       setIngestResult(result);
@@ -45,10 +54,15 @@ export function BuildFlowPage() {
       setApprovalTarget(target);
       setCurrentStage(4);
     };
+    window.__SET_STAGE_5 = (target) => {
+      setBuildTarget(target);
+      setCurrentStage(5);
+    };
     return () => {
       delete window.__SET_STAGE_2;
       delete window.__SET_STAGE_3;
       delete window.__SET_STAGE_4;
+      delete window.__SET_STAGE_5;
     };
   }, []);
 
@@ -98,16 +112,13 @@ export function BuildFlowPage() {
           />
         )}
 
-        {/* Stage 5 Placeholder for Step 5 */}
+        {/* Stage 5 — Build */}
         {currentStage === 5 && (
-          <div className="stage-panel">
-            <div style={{ fontSize: '17px', fontWeight: 500, marginBottom: '8px' }}>
-              Stage 5 — Build
-            </div>
-            <p style={{ color: 'var(--amber-mid)', fontSize: '15px' }}>
-              Ready to implement in Step 5: PDF download and build history.
-            </p>
-          </div>
+          <Stage5Build
+            buildTarget={buildTarget}
+            onBack={() => setCurrentStage(4)}
+            onStartNewBrand={handleStartNewBrand}
+          />
         )}
       </div>
     </div>

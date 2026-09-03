@@ -34,6 +34,13 @@ export function Stage4Approve({
   const [editError, setEditError] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const editInitialValues = useRef({});
+  const [titleFit, setTitleFit] = useState({
+    percent: 0,
+    textWidth: 0,
+    containerWidth: 291,
+    overflow: false,
+    diff: 0
+  });
 
   // Track image uploads and reruns
   const [uploadingImageId, setUploadingImageId] = useState(null);
@@ -276,6 +283,32 @@ export function Stage4Approve({
     }
   }
 
+  // Live Title Width Measurement effect
+  useEffect(() => {
+    if (!editingId) return;
+    const currentTitle = editDraft.title || '';
+    if (!currentTitle.trim()) {
+      setTitleFit({ percent: 0, textWidth: 0, containerWidth: 291, overflow: false, diff: 0 });
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/products/validate-title', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: currentTitle })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setTitleFit(data);
+        }
+      } catch (err) {
+        // keep previous on transient error
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [editingId, editDraft.title]);
+
   // Open inline edit
   function startEditing(row) {
     setEditingId(row.product_id);
@@ -292,6 +325,20 @@ export function Stage4Approve({
     editInitialValues.current = initial;
     setEditDraft({ ...initial });
     setEditError('');
+
+    // Pre-fetch title fit for initial title
+    if (initial.title) {
+      fetch('/products/validate-title', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: initial.title })
+      })
+        .then(r => r.json())
+        .then(data => setTitleFit(data))
+        .catch(() => {});
+    } else {
+      setTitleFit({ percent: 0, textWidth: 0, containerWidth: 291, overflow: false, diff: 0 });
+    }
   }
 
   function cancelEditing() {
@@ -335,9 +382,11 @@ export function Stage4Approve({
       setSavingEdit(true);
       setEditError('');
 
-      // Client-side length checks
-      if (editDraft.title.length > 20) {
-        setEditError(`Title exceeds 20-character limit (${editDraft.title.length} characters given): '${editDraft.title}'`);
+      // Measured title overflow check
+      if (titleFit.overflow) {
+        setEditError(
+          `Title will not fit the card: rendered width (${Math.round(titleFit.textWidth)}px) exceeds the available container width (${Math.round(titleFit.containerWidth)}px) by ${Math.round(titleFit.diff)}px. Please shorten the title to fit.`
+        );
         setSavingEdit(false);
         return;
       }
@@ -539,7 +588,7 @@ export function Stage4Approve({
                         </div>
                       )}
 
-                      {/* Title with live 20-char count */}
+                      {/* Title with live proportional width fit meter */}
                       <div className="edit-field">
                         <div className="edit-field__header">
                           <label className="edit-label">Title</label>
@@ -553,16 +602,26 @@ export function Stage4Approve({
                                 ↺ Reset
                               </button>
                             )}
-                            <span
-                              className={`char-counter ${editDraft.title.length > 20 ? 'char-counter--over' : ''}`}
-                            >
-                              {editDraft.title.length} / 20
-                            </span>
+                            <div className="title-fit-meter">
+                              <div className="title-fit-bar-wrap" title={`Card width: 291px. Current: ${Math.round(titleFit.textWidth)}px`}>
+                                <div
+                                  className={`title-fit-bar ${titleFit.overflow ? 'title-fit-bar--overflow' : titleFit.percent > 90 ? 'title-fit-bar--warning' : ''}`}
+                                  style={{ width: `${Math.min(100, titleFit.percent || 0)}%` }}
+                                />
+                              </div>
+                              <span
+                                className={`title-fit-text ${titleFit.overflow ? 'title-fit-text--overflow' : ''}`}
+                              >
+                                {titleFit.overflow
+                                  ? `${titleFit.percent}% (exceeds by ${Math.round(titleFit.diff)}px)`
+                                  : `${titleFit.percent}% width`}
+                              </span>
+                            </div>
                           </div>
                         </div>
                         <input
                           type="text"
-                          className={`edit-input ${editDraft.title.length > 20 ? 'edit-input--error' : ''}`}
+                          className={`edit-input ${titleFit.overflow ? 'edit-input--error' : ''}`}
                           value={editDraft.title}
                           onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
                           placeholder="Title"
@@ -697,7 +756,7 @@ export function Stage4Approve({
                           type="button"
                           className="btn-primary"
                           onClick={() => saveEditing(row.product_id)}
-                          disabled={savingEdit || editDraft.title.length > 20}
+                          disabled={savingEdit || titleFit.overflow}
                         >
                           {savingEdit ? 'Saving...' : 'Save changes'}
                         </button>
@@ -834,7 +893,7 @@ export function Stage4Approve({
         <div className="stage-footer__right">
           <button
             className="btn-primary"
-            onClick={() => onContinue && onContinue({ brand, approvedCount })}
+            onClick={() => onContinue && onContinue({ brand, approvedCount, autoTrigger: true })}
             disabled={approvedCount === 0}
           >
             Build {approvedCount} {approvedCount === 1 ? 'product' : 'products'}

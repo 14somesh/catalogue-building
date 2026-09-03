@@ -172,12 +172,10 @@ Clean rows get a hairline border. Problem rows get a 1px amber border, an amber-
 
 Editing is inline within the card. Editable fields: title, subtitle, and the four bullets, plus DP and MRP. Nothing else.
 
-Length limits — enforce client-side and show the count as the user types:
-- Title: 20 characters
-- Subtitle: 80 characters
-- Each bullet: 60 characters
-
-The 20-character title limit is real and tight. Show remaining characters live so it is never a surprise on submit. The server rejects overruns with the limit and given length; surface that message verbatim.
+Card layout limits:
+- **Title: Physical WIDTH limit (291px container), NOT a character count.** Single-line nowrap (`32px 700 Space Grotesk`, `-0.02em` tracking) including sequence prefix `01.`. A fixed number is false — wide glyphs (`WMWMWMWMW`) overflow at 9 chars, while narrower titles (`Rapid Electra 20`) fit at 16 chars. Never reintroduce a character count. The UI renders a live proportional fit indicator (e.g. `82% width`) with a visual capacity bar that turns red on overflow (`102% (exceeds by 5px)`), disables Save, and surfaces the server's rejection message verbatim.
+- **Subtitle: 80 characters max.** This is a vertical 2-line wrap ceiling against the fixed 290px card height, not a width limit. At 81+ chars, subtitle wraps to a 3rd line (49px), vertically overflowing the card and pushing the DP badge out of bounds.
+- **Each bullet: 60 characters max.** This is a vertical 3-line wrap ceiling per column in the 2-column grid (125.5px column width). At 60+ chars, a bullet wraps to a 4th line (69px), vertically overflowing the card.
 
 Footer: `Back`, and teal `Build N products` counting only approved rows.
 
