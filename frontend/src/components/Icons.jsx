@@ -133,3 +133,6 @@ export function RefreshIcon({ width = 14, height = 14, color = '#412402' }) {
   );
 }
 
+export const WarningIcon = WarningTriangleIcon;
+
+
