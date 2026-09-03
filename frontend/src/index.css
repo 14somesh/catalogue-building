@@ -40,7 +40,7 @@
 
 html, body {
   background-color: var(--page-bg);
-  color: var(--amber-deep);
+  color: #2C2C2A;
   font-family: var(--font-family);
   font-size: var(--fs-body);
   font-weight: 400;
@@ -64,6 +64,7 @@ html, body {
   display: flex;
   flex-direction: column;
   background-color: var(--page-bg);
+  color: #2C2C2A;
 }
 
 /* Common centered container: max-width 1100px, 32px horizontal padding */
@@ -309,13 +310,13 @@ html, body {
 .how-to-use-header {
   font-size: var(--fs-h1);
   font-weight: 500;
-  color: var(--amber-deep);
+  color: #2C2C2A;
   margin-bottom: 8px;
 }
 
 .how-to-use-intro {
   font-size: var(--fs-body);
-  color: var(--amber-mid);
+  color: #55544E;
   margin-bottom: 32px;
 }
 
@@ -363,13 +364,13 @@ html, body {
 .step-title {
   font-size: var(--fs-section);
   font-weight: 500;
-  color: var(--amber-deep);
+  color: #2C2C2A;
   margin-bottom: 3px;
 }
 
 .step-desc {
   font-size: var(--fs-table);
-  color: var(--amber-mid);
+  color: #55544E;
   line-height: 1.4;
 }
 
@@ -633,7 +634,7 @@ html, body {
 .parsed-rows-title {
   font-size: var(--fs-section);
   font-weight: 500;
-  color: var(--amber-deep);
+  color: #2C2C2A;
 }
 
 .parsed-rows-hint {
@@ -1052,7 +1053,7 @@ html, body {
 .found-title {
   font-size: var(--fs-section);
   font-weight: 500;
-  color: var(--amber-deep);
+  color: #2C2C2A;
 }
 
 .found-table-wrap {
@@ -1138,7 +1139,7 @@ html, body {
 .modal-title {
   font-size: 18px;
   font-weight: 500;
-  color: var(--amber-deep);
+  color: #2C2C2A;
   margin: 0;
 }
 
@@ -1153,7 +1154,7 @@ html, body {
 
 .modal-subtitle {
   font-size: 14px;
-  color: var(--amber-mid);
+  color: var(--grey-400);
   margin: 0;
   line-height: 1.4;
 }
@@ -1174,7 +1175,7 @@ html, body {
 .modal-label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--amber-deep);
+  color: #2C2C2A;
 }
 
 .modal-input {
