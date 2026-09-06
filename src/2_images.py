@@ -329,6 +329,8 @@ def execute_image_tier_escalation(
         logger.info(f"[{product_id}] Preserving existing local image at {dest_path} ({dims[0]}x{dims[1]}px) -> Status: {status}")
         return status, "local-verified", 1
 
+    rejected_candidates: List[Dict[str, Any]] = []
+
     # Tier 1: Brand Product Page & Gallery Candidates
     candidate_urls: List[str] = []
     if image_url and isinstance(image_url, str) and (image_url.startswith("http://") or image_url.startswith("https://")):
@@ -350,7 +352,15 @@ def execute_image_tier_escalation(
             if approved:
                 return "ok", "brand-product-page", 1
             else:
-                logger.warning(f"[{product_id}] [Tier 1 Image] Candidate {c_idx+1} rejected by AI Review Gate: {rejection}")
+                logger.warning(f"[{product_id}] [Tier 1 Image] Candidate {c_idx+1} rejected by AI Review Gate: {rejection} (score={score}/10)")
+                if score > 0 or not any(ign in str(rejection).lower() for ign in ["too low resolution", "corrupted", "http"]):
+                    rejected_candidates.append({
+                        "url": c_url,
+                        "score": score,
+                        "reason": rejection,
+                        "source": "brand-product-page",
+                        "tier": 1
+                    })
 
     # Tier 3: Amazon India Fallback (Images Only)
     logger.info(f"[{product_id}] [Tier 3 Image] Searching Amazon fallback for {brand} {model_name}...")
@@ -363,7 +373,28 @@ def execute_image_tier_escalation(
         if approved:
             return "ok", amz_src, 3
         else:
-            logger.warning(f"[{product_id}] [Tier 3 Image] Amazon image rejected by AI Review Gate: {rejection}")
+            logger.warning(f"[{product_id}] [Tier 3 Image] Amazon image rejected by AI Review Gate: {rejection} (score={score}/10)")
+            if score > 0:
+                rejected_candidates.append({
+                    "url": amz_url,
+                    "score": score,
+                    "reason": rejection,
+                    "source": amz_src,
+                    "tier": 3
+                })
+
+    # Fallback Retention: If all candidates failed studio threshold, retain highest-scoring candidate as a fallback
+    if rejected_candidates:
+        rejected_candidates.sort(key=lambda x: x["score"], reverse=True)
+        best_cand = rejected_candidates[0]
+        if best_cand["score"] > 0:
+            logger.info(
+                f"[{product_id}] Preserving best candidate as fallback (score={best_cand['score']}/10, reason: {best_cand['reason']}): {best_cand['url']}"
+            )
+            saved = download_image(best_cand["url"], dest_path)
+            if saved:
+                source_desc = f"{best_cand['source']} (Score {best_cand['score']}/10: {best_cand['reason']})"
+                return "needs-better-image", source_desc, best_cand["tier"]
 
     return "missing", None, None
 

@@ -69,6 +69,14 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist", 
         ""
     ]
 
+    from src.utils.scraper import load_brand_defaults
+    b_cfg = load_brand_defaults(brand)
+    b_domain = b_cfg.get("domain")
+    if not b_domain:
+        report_lines.append("> [!NOTE]")
+        report_lines.append("> **Brand Website Status:** No brand website was available (none was present in price sheet or domain failed storefront verification). Tiers 1 and 2 (direct brand store & collections) were skipped.")
+        report_lines.append("")
+
     # ==================== BLOCKED ROWS SECTION (Grouped at top) ====================
     if blocked_rows:
         report_lines.append("## ⛔ BLOCKED ROWS (Requires Human Resolution)")
@@ -637,6 +645,14 @@ def run_brand(
 
     logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products, semantic audit={enable_semantic_audit})...")
     brand_defaults = load_brand_defaults(brand_name)
+    if not brand_defaults.get("domain"):
+        from src.utils.scraper import discover_and_verify_brand_domain
+        brand_models = [str(df.loc[idx, "Model_Name"]).strip() for idx in brand_indices if not is_empty_value(df.loc[idx, "Model_Name"])]
+        disc = discover_and_verify_brand_domain(brand_name, brand_models)
+        if disc.get("verified") and disc.get("domain"):
+            brand_defaults = load_brand_defaults(brand_name)
+            logger.info(f"[Pre-flight Discovery] Verified domain '{disc['domain']}' for brand '{brand_name}'")
+
     all_rows = [row.to_dict() for _, row in df.iterrows()]
     cancelled_early = False
     for i, idx in enumerate(brand_indices, 1):
@@ -802,17 +818,17 @@ def run_brand(
     for r in brand_rows:
         tier_val = r.get("Tier_Title") or r.get("Tier_Spec_Capacity") or 1
         per_row_results.append({
-            "Product_ID": r.get("Product_ID"),
-            "Model_Name": r.get("Model_Name"),
-            "Display_Name": r.get("Display_Name"),
-            "Status": r.get("Status"),
-            "Source_URL": r.get("Source_URL"),
-            "Tier": tier_val,
-            "Image_Status": r.get("Image_Status", "missing"),
-            "Attempts": r.get("Attempts", 0),
-            "Fix_Log": r.get("Fix_Log"),
-            "Flags": r.get("Flags"),
-            "Failure_Reason": derive_failure_reason(r)
+            "product_id": r.get("Product_ID"),
+            "model_name": r.get("Model_Name"),
+            "display_name": r.get("Display_Name"),
+            "status": r.get("Status"),
+            "source_url": r.get("Source_URL"),
+            "tier": tier_val,
+            "image_status": r.get("Image_Status", "missing"),
+            "attempts": r.get("Attempts", 0),
+            "fix_log": r.get("Fix_Log"),
+            "flags": r.get("Flags"),
+            "failure_reason": derive_failure_reason(r)
         })
 
     status_counts = {

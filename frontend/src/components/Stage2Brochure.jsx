@@ -42,13 +42,25 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
 
   // Action state
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isConfirmed, setIsConfirmed] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [techDetails, setTechDetails] = useState(null);
+
+  // Helper to parse price strings with currency symbols, commas, trailing text
+  const parsePrice = (v) => {
+    if (v === '' || v === null || v === undefined) return NaN;
+    if (typeof v === 'number') return isNaN(v) ? NaN : v;
+    const clean = String(v).replace(/[^0-9.]/g, '');
+    return clean ? parseFloat(clean) : NaN;
+  };
 
   // Helper to check if a row is complete (usable name, valid DP, valid MRP)
   const isRowComplete = (r) => {
     const hasName = Boolean(r.model_name && r.model_name.trim());
-    const hasDp = r.dp !== '' && r.dp !== null && !isNaN(Number(r.dp)) && Number(r.dp) > 0;
-    const hasMrp = r.mrp !== '' && r.mrp !== null && !isNaN(Number(r.mrp)) && Number(r.mrp) > 0;
+    const dpNum = parsePrice(r.dp);
+    const mrpNum = parsePrice(r.mrp);
+    const hasDp = !isNaN(dpNum) && dpNum > 0;
+    const hasMrp = !isNaN(mrpNum) && mrpNum > 0;
     return hasName && hasDp && hasMrp;
   };
 
@@ -69,8 +81,28 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
     fetchBrands();
   }, []);
 
+  // Check on mount if brand is already active (e.g. user navigated back mid-collection)
+  useEffect(() => {
+    async function checkActiveJob() {
+      if (!brand) return;
+      try {
+        const res = await fetch(`/brands/${encodeURIComponent(brand.trim())}/active-job`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.active) {
+            setIsConfirmed(true);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+    checkActiveJob();
+  }, [brand]);
+
   // Update a specific cell
   const handleCellChange = (rowIndex, field, value) => {
+    setIsConfirmed(false);
     setRows((prevRows) => {
       const updated = [...prevRows];
       updated[rowIndex] = { ...updated[rowIndex], [field]: value };
@@ -78,8 +110,23 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
     });
   };
 
+  // Clean cell value on blur
+  const handleCellBlur = (rowIndex, field, value) => {
+    if (field === 'dp' || field === 'mrp') {
+      const num = parsePrice(value);
+      if (!isNaN(num) && num > 0) {
+        handleCellChange(rowIndex, field, num);
+      }
+    } else if (field === 'model_name' || field === 'display_name') {
+      if (typeof value === 'string') {
+        handleCellChange(rowIndex, field, value.trim());
+      }
+    }
+  };
+
   // Delete a row
   const handleDeleteRow = (rowIndex) => {
+    setIsConfirmed(false);
     setRows((prevRows) => prevRows.filter((_, idx) => idx !== rowIndex));
   };
 
@@ -91,11 +138,37 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
   const completeCount = completeRows.length;
   const incompleteCount = rows.length - completeCount;
 
+  // Duplicate display name detection across all rows
+  const displayNameCounts = rows.reduce((acc, r) => {
+    const dn = (r.display_name || '').trim().toLowerCase();
+    if (dn) acc[dn] = (acc[dn] || 0) + 1;
+    return acc;
+  }, {});
+  const dupDisplayNames = Object.keys(displayNameCounts).filter((k) => displayNameCounts[k] > 1);
+
   // Handle continuing to Stage 3
   const handleConfirmAndStart = async () => {
     if (!brand || completeCount === 0 || isSubmitting) return;
+
+    // Check for duplicate display names before proceeding
+    if (dupDisplayNames.length > 0) {
+      setErrorMsg(`Duplicate Display Name detected for "${dupDisplayNames.join(', ')}". Each product must have a unique Display Name.`);
+      return;
+    }
+
+    // If already confirmed in this session or brand has active job, advance straight to Stage 3
+    if (isConfirmed) {
+      onStartCollecting({
+        brand: brand.trim(),
+        category: category,
+        rowCount: completeRows.length,
+      });
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMsg('');
+    setTechDetails(null);
 
     try {
       // 1. Confirm products via POST /brands/{brand}/confirm
@@ -103,16 +176,16 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
         brand_name: brand.trim(),
         brand_code: ingestResult?.brand_code || null,
         category: category,
-        domain: ingestResult?.domain || '',
-        platform: ingestResult?.platform || 'shopify',
+        domain: ingestResult?.domain || null,
+        platform: ingestResult?.platform || null,
         column_mapping: ingestResult?.column_mapping || {},
         qualifier_tokens: ingestResult?.qualifier_tokens || [],
         dp_column_explanation: ingestResult?.dp_column_explanation || 'User confirmed price sheet rows',
         rows: completeRows.map((r) => ({
           model_name: r.model_name.trim(),
-          display_name: r.display_name.trim(),
-          dp: parseFloat(r.dp),
-          mrp: parseFloat(r.mrp),
+          display_name: (r.display_name || r.model_name).trim(),
+          dp: parsePrice(r.dp),
+          mrp: parsePrice(r.mrp),
           raw_text: r.raw_text,
           notes: r.notes,
         })),
@@ -127,12 +200,39 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
       const confirmData = await confirmRes.json();
 
       if (confirmRes.status === 409) {
-        throw new Error(confirmData.detail || `Brand '${brand}' is currently locked by an active job.`);
+        const detail = confirmData.detail;
+        const activeId = typeof detail === 'object' ? detail.active_job_id : null;
+        if (activeId) {
+          // Brand already running a collection job — advance straight to Stage 3 to reattach
+          setIsConfirmed(true);
+          setIsSubmitting(false);
+          onStartCollecting({
+            brand: brand.trim(),
+            category: category,
+            rowCount: completeRows.length,
+          });
+          return;
+        }
+
+        const plainMsg = typeof detail === 'object' && detail.message
+          ? detail.message
+          : (typeof detail === 'string' ? detail : `Brand '${brand}' is currently locked by an active job.`);
+        const techInfo = typeof detail === 'object' && detail.active_job_id
+          ? `Job ID: ${detail.active_job_id}`
+          : null;
+        setErrorMsg(plainMsg);
+        setTechDetails(techInfo);
+        setIsSubmitting(false);
+        return;
       }
 
       if (!confirmRes.ok) {
-        throw new Error(confirmData.detail || 'Failed to confirm brand products.');
+        const detail = confirmData.detail;
+        const plainMsg = typeof detail === 'string' ? detail : 'Failed to confirm brand products.';
+        throw new Error(plainMsg);
       }
+
+      setIsConfirmed(true);
 
       // 2. Attach brochure if provided via POST /brands/{brand}/brochure
       if (brochureFile) {
@@ -237,6 +337,12 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
               {duplicateCount === 1 ? 'duplicate' : 'duplicates'}
             </span>
           </div>
+          {dupDisplayNames.length > 0 && (
+            <div className="stage-2-stat" style={{ borderLeft: '1px solid var(--amber-dark)', paddingLeft: '14px' }}>
+              <span className="stage-2-stat__number" style={{ color: 'var(--amber-deep)' }}>{dupDisplayNames.length}</span>
+              <span className="stage-2-stat__label">dup names</span>
+            </div>
+          )}
           {incompleteCount > 0 && (
             <div className="stage-2-stat" style={{ borderLeft: '1px solid var(--amber-dark)', paddingLeft: '14px' }}>
               <span className="stage-2-stat__number" style={{ color: 'var(--red)' }}>{incompleteCount}</span>
@@ -272,8 +378,10 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
               {rows.map((row, idx) => {
                 const complete = isRowComplete(row);
                 const missingModel = !row.model_name || !row.model_name.trim();
-                const missingDp = row.dp === '' || row.dp === null || isNaN(Number(row.dp)) || Number(row.dp) <= 0;
-                const missingMrp = row.mrp === '' || row.mrp === null || isNaN(Number(row.mrp)) || Number(row.mrp) <= 0;
+                const dpNum = parsePrice(row.dp);
+                const mrpNum = parsePrice(row.mrp);
+                const missingDp = isNaN(dpNum) || dpNum <= 0;
+                const missingMrp = isNaN(mrpNum) || mrpNum <= 0;
 
                 return (
                   <tr
@@ -301,6 +409,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                             placeholder={missingModel ? 'Enter model name' : ''}
                             value={row.model_name}
                             onChange={(e) => handleCellChange(idx, 'model_name', e.target.value)}
+                            onBlur={(e) => handleCellBlur(idx, 'model_name', e.target.value)}
                           />
                         </div>
                         {row.isDuplicate && (
@@ -322,12 +431,27 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
 
                     {/* Display Name column */}
                     <td>
-                      <input
-                        type="text"
-                        className="cell-input"
-                        value={row.display_name}
-                        onChange={(e) => handleCellChange(idx, 'display_name', e.target.value)}
-                      />
+                      <div className="model-cell-wrapper">
+                        <div className="model-cell-main">
+                          {displayNameCounts[(row.display_name || '').trim().toLowerCase()] > 1 && (
+                            <span className="dup-warning-icon" title="Duplicate Display Name across rows">
+                              <WarningTriangleIcon width={15} height={15} color="var(--amber-dark)" />
+                            </span>
+                          )}
+                          <input
+                            type="text"
+                            className={`cell-input ${displayNameCounts[(row.display_name || '').trim().toLowerCase()] > 1 ? 'cell-input--amber' : ''}`}
+                            value={row.display_name}
+                            onChange={(e) => handleCellChange(idx, 'display_name', e.target.value)}
+                            onBlur={(e) => handleCellBlur(idx, 'display_name', e.target.value)}
+                          />
+                        </div>
+                        {displayNameCounts[(row.display_name || '').trim().toLowerCase()] > 1 && (
+                          <div className="dup-note" style={{ color: 'var(--amber-deep)' }}>
+                            Duplicate display name
+                          </div>
+                        )}
+                      </div>
                     </td>
 
                     {/* DP column */}
@@ -338,6 +462,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                         placeholder={missingDp ? 'Enter DP' : ''}
                         value={row.dp}
                         onChange={(e) => handleCellChange(idx, 'dp', e.target.value)}
+                        onBlur={(e) => handleCellBlur(idx, 'dp', e.target.value)}
                       />
                     </td>
 
@@ -349,6 +474,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                         placeholder={missingMrp ? 'Enter MRP' : ''}
                         value={row.mrp}
                         onChange={(e) => handleCellChange(idx, 'mrp', e.target.value)}
+                        onBlur={(e) => handleCellBlur(idx, 'mrp', e.target.value)}
                       />
                     </td>
 
@@ -424,7 +550,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
 
       {/* Error banner if submission failed or brand is locked */}
       {errorMsg && (
-        <ErrorDisplay error={errorMsg} showIcon={true} />
+        <ErrorDisplay error={errorMsg} technicalDetails={techDetails} showIcon={true} />
       )}
 
       {/* Footer Actions */}
@@ -447,7 +573,9 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
             onClick={handleConfirmAndStart}
           >
             {isSubmitting
-              ? 'Starting...'
+              ? 'Saving...'
+              : isConfirmed
+              ? `Continue to collection (${completeCount} ${completeCount === 1 ? 'row' : 'rows'})`
               : `Continue with ${completeCount} ${completeCount === 1 ? 'row' : 'rows'}`}
           </button>
         </div>

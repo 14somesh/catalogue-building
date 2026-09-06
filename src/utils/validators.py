@@ -109,15 +109,15 @@ def validate_row_deterministic(
                 hard_flags.append(f"Boilerplate detected in Bullet_{b_idx}: '{bp_phrase}'")
 
     # --------------------------------------------------------------------------
-    # HARD CHECK e: Fewer than 3 of 5 spec fields populated (Hard Fail), 3-4 populated (WARN)
+    # HARD CHECK e: Fewer than 2 of 4 spec fields populated (Hard Fail), 2 populated (WARN), 3-4 populated (Pass cleanly)
     # --------------------------------------------------------------------------
-    spec_fields = ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight", "Spec_Warranty"]
+    spec_fields = ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight"]
     empty_spec_count = sum(1 for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf)))
     if empty_spec_count > 2:
-        hard_flags.append(f"Insufficient specifications: {empty_spec_count} of 5 required specs are empty (fewer than 3 populated)")
-    elif empty_spec_count > 0:
+        hard_flags.append(f"Insufficient specifications: {empty_spec_count} of 4 required specs are empty (fewer than 2 populated)")
+    elif empty_spec_count == 2:
         missing_sf = [sf.replace("Spec_", "").lower() for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf))]
-        warnings.append(f"Partial specifications: {empty_spec_count} of 5 specs empty ({', '.join(missing_sf)})")
+        warnings.append(f"Partial specifications: 2 of 4 specs empty ({', '.join(missing_sf)})")
 
     # --------------------------------------------------------------------------
     # HARD CHECK f: Any populated field with an empty Source_ (Write Guard Integrity)
@@ -157,7 +157,7 @@ def validate_row_deterministic(
     expected_img_path = str(override_img).strip() if not is_empty_value(override_img) else default_img_path
     
     if not os.path.exists(expected_img_path) or not os.path.isfile(expected_img_path) or os.path.getsize(expected_img_path) == 0:
-        hard_flags.append(f"Image missing on disk at '{expected_img_path}'")
+        warnings.append(f"Image missing on disk at '{expected_img_path}'")
     else:
         # Check i: Filename slug check (if not override)
         if is_empty_value(override_img):
@@ -202,14 +202,25 @@ def validate_row_deterministic(
             hard_flags.append(f"Corrupted image file at '{expected_img_path}': {e}")
 
     # --------------------------------------------------------------------------
-    # HARD CHECK j: Bullet length > 60 chars (The Measured Wrap Cliff)
+    # HARD CHECK j: Bullet validations (length <= 60 chars, count between 2 and 4, no warranty)
     # --------------------------------------------------------------------------
+    non_empty_bullets = []
     for b_idx in range(1, 5):
         b_val = get_effective_value(row_dict, f"Bullet_{b_idx}")
         if not is_empty_value(b_val):
             b_str = str(b_val).strip()
+            non_empty_bullets.append((b_idx, b_str))
             if len(b_str) > 60:
                 hard_flags.append(f"Bullet_{b_idx} exceeds 60-character wrap limit ({len(b_str)} chars): '{b_str}'")
+            if re.search(r'\b(warrant|guarantee)\b', b_str, re.I):
+                hard_flags.append(f"Disallowed warranty claim in Bullet_{b_idx}: '{b_str}'")
+
+    if len(non_empty_bullets) < 2 and (raw_title or override_title):
+        hard_flags.append(f"Thin copy: Product has fewer than 2 bullets ({len(non_empty_bullets)} present)")
+
+    sub_val = get_effective_value(row_dict, "Subtitle")
+    if not is_empty_value(sub_val) and re.search(r'\b(warrant|guarantee)\b', str(sub_val), re.I):
+        hard_flags.append(f"Disallowed warranty claim in Subtitle: '{sub_val}'")
 
     # --------------------------------------------------------------------------
     # WARN n: Image from non-brand source

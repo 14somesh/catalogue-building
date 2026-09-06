@@ -9,12 +9,6 @@ import pypdfium2 as pdfium
 from PIL import Image
 
 from src.parsers.base import BaseParser, ParserResult
-from src.utils.scraper import (
-    extract_model_name_portion,
-    normalize_model_tokens,
-    score_candidate_match,
-    reject_qualifier_mismatch
-)
 from src.utils.llm_client import extract_specs_via_vision, VisionExtractedSpecsSchema
 from src.utils.logger import setup_logger
 
@@ -148,97 +142,142 @@ def extract_brochure_page_vision(
                 pass
 
 
-def parse_brochure_for_model(
+def find_product_in_brochure(
     brand: str,
     model_name: str,
-    qualifier_tokens: List[str],
-    config: dict,
+    qualifier_tokens: Optional[List[str]] = None,
+    config: Optional[dict] = None,
     brochure_override: Optional[str] = None
 ) -> Optional[ParserResult]:
     """
-    TIER 0: Brand Brochure PDF Extractor.
-    1. Searches brochure PDFs for target product by Model_Name.
-    2. Extracts text layer specs first.
-    3. If text layer is thin / image-based, falls back to Vision Extraction on the rendered PDF page.
-    4. Handles multi-product pages by isolating the target model region.
-    5. Returns ParserResult with Tier 0 / Tier 0-vision provenance, or None if no brochure exists.
-    POLICY: Brochure PDFs are strictly used for technical specifications and info text extraction only, NEVER for product packshot images.
+    TIER 0: Smart Two-Pass Brand Brochure PDF Extractor.
+    PASS 1 (Text-First): Scans all text-bearing pages across the entire brochure first.
+    If the target model is matched in text and yields specs (>= 2), returns immediately with 0 Vision calls.
+    PASS 2 (Targeted Vision Fallback): ONLY runs if Pass 1 found zero matches in text,
+    auditing at most 3 scanned/graphical pages.
     """
     pdf_paths = find_brochure_pdfs(brand, brochure_override=brochure_override)
     if not pdf_paths:
         logger.debug(f"[Tier 0] No brochure PDFs found for brand '{brand}'. Silently skipping Tier 0.")
         return None
 
+    from src.utils.scraper import extract_model_name_portion, normalize_model_tokens, reject_qualifier_mismatch
     model_portion = extract_model_name_portion(model_name)
     target_tokens = normalize_model_tokens(model_portion)
 
     for pdf_path in pdf_paths:
         pdf_filename = os.path.basename(pdf_path)
-        logger.info(f"[Tier 0] Scanning brochure '{pdf_filename}' for '{brand} {model_name}'...")
+        logger.info(f"[Tier 0] Scanning brochure '{pdf_filename}' for '{brand} {model_name}' (Pass 1: Text First)...")
 
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                total_pages = len(pdf.pages)
+                scanned_pages: List[int] = []
+
+                # ==============================================================
+                # PASS 1: TEXT-FIRST SEARCH ACROSS ALL PAGES
+                # ==============================================================
                 for page_idx, page in enumerate(pdf.pages):
                     page_num = page_idx + 1
                     raw_text = page.extract_text() or ""
                     is_text_page = len(raw_text.strip()) > 30
 
-                    if is_text_page:
-                        # Check if model tokens appear on this page
-                        page_tokens = normalize_model_tokens(raw_text)
-                        if not target_tokens.issubset(page_tokens):
-                            continue
+                    if not is_text_page:
+                        scanned_pages.append(page_num)
+                        continue
 
-                        # Multi-product handling: isolate section for target model first
-                        model_section_text = raw_text
-                        lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
-                        model_line_idx = -1
-                        for idx, line in enumerate(lines):
-                            if target_tokens.issubset(normalize_model_tokens(line)):
-                                model_line_idx = idx
+                    # Check if model tokens appear on this page
+                    page_tokens = normalize_model_tokens(raw_text)
+                    if not target_tokens.issubset(page_tokens):
+                        continue
+
+                    # Multi-product handling: isolate section for target model
+                    model_section_text = raw_text
+                    lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
+                    model_line_idx = -1
+                    for idx, line in enumerate(lines):
+                        if target_tokens.issubset(normalize_model_tokens(line)):
+                            model_line_idx = idx
+                            break
+
+                    if model_line_idx != -1:
+                        section_lines = []
+                        for l_idx in range(model_line_idx, min(len(lines), model_line_idx + 25)):
+                            line = lines[l_idx]
+                            if l_idx > model_line_idx and any(kw in line.lower() for kw in ["power bank", "powerbank", "charger", "adapter"]) and not target_tokens.issubset(normalize_model_tokens(line)):
                                 break
+                            section_lines.append(line)
+                        model_section_text = "\n".join(section_lines)
 
-                        if model_line_idx != -1:
-                            section_lines = []
-                            for l_idx in range(model_line_idx, min(len(lines), model_line_idx + 25)):
-                                line = lines[l_idx]
-                                # If we encounter another product header line after the start, terminate section
-                                if l_idx > model_line_idx and any(kw in line.lower() for kw in ["power bank", "powerbank", "charger", "adapter"]) and not target_tokens.issubset(normalize_model_tokens(line)):
-                                    break
-                                section_lines.append(line)
-                            model_section_text = "\n".join(section_lines)
+                    # Validate qualifier tokens on isolated product section
+                    is_valid, reject_reason = reject_qualifier_mismatch(model_name, model_section_text, qualifier_tokens)
+                    if not is_valid:
+                        logger.warning(f"[Tier 0] Page {page_num} matched model but rejected due to qualifier conflict: {reject_reason}")
+                        continue
 
-                        # Validate qualifier tokens on the isolated product section to prevent sibling mismatches
-                        is_valid, reject_reason = reject_qualifier_mismatch(model_name, model_section_text, qualifier_tokens)
-                        if not is_valid:
-                            logger.warning(f"[Tier 0] Page {page_num} matched model but rejected due to qualifier conflict: {reject_reason}")
-                            continue
+                    logger.info(f"[Tier 0] Matched '{model_name}' in brochure '{pdf_filename}' text on page {page_num}.")
+                    text_specs = parse_specs_from_text(model_section_text)
+                    source_label = f"brochure: {pdf_filename}, page {page_num}"
 
-                        logger.info(f"[Tier 0] Matched '{model_name}' in brochure '{pdf_filename}' on page {page_num}.")
+                    # If text layer provided >= 2 specs, return immediately without Vision
+                    if len(text_specs) >= 2:
+                        logger.info(f"[Tier 0] Text layer extraction successful on p.{page_num}: {text_specs}")
+                        field_sources = {k: source_label for k in text_specs}
+                        field_tiers = {k: 0 for k in text_specs}
+                        return ParserResult(
+                            success=True,
+                            status_code=200,
+                            url=source_label,
+                            title=model_name,
+                            description_text=model_section_text,
+                            specs=text_specs,
+                            field_sources=field_sources,
+                            field_tiers=field_tiers,
+                            tier=0
+                        )
 
-                        text_specs = parse_specs_from_text(model_section_text)
-                        source_label = f"brochure: {pdf_filename}, page {page_num}"
+                    # If text layer yielded only 1 spec, run Vision solely on this specific matching page
+                    logger.info(f"[Tier 0] Text layer yielded thin specs ({len(text_specs)}/4). Running targeted Vision on page {page_num}...")
+                    vision_specs = extract_brochure_page_vision(
+                        pdf_path=pdf_path,
+                        page_num=page_num,
+                        brand=brand,
+                        model_name=model_name,
+                        config=config
+                    )
 
-                        # If text layer provided >= 3 specs, use Text Tier 0
-                        if len(text_specs) >= 3:
-                            logger.info(f"[Tier 0] Text layer extraction successful on p.{page_num}: {text_specs}")
-                            field_sources = {k: source_label for k in text_specs}
-                            field_tiers = {k: 0 for k in text_specs}
-                            return ParserResult(
-                                success=True,
-                                status_code=200,
-                                url=source_label,
-                                title=model_name,
-                                description_text=model_section_text,
-                                specs=text_specs,
-                                field_sources=field_sources,
-                                field_tiers=field_tiers,
-                                tier=0
-                            )
+                    combined_specs = dict(text_specs)
+                    tier_label = 0
+                    if vision_specs:
+                        for k, v in vision_specs.items():
+                            if v and k not in combined_specs:
+                                combined_specs[k] = v
+                        tier_label = "0-vision"
+                        logger.info(f"[Tier 0 Vision] Extracted additional specs from brochure p.{page_num}: {combined_specs}")
 
-                        # If text layer was partial (< 3 specs), execute Vision Fallback on PDF page
-                        logger.info(f"[Tier 0] Text layer yielded partial specs ({len(text_specs)}/5). Executing Tier 0 Vision Fallback...")
+                    if combined_specs:
+                        field_sources = {k: source_label for k in combined_specs}
+                        field_tiers = {k: tier_label for k in combined_specs}
+                        return ParserResult(
+                            success=True,
+                            status_code=200,
+                            url=source_label,
+                            title=model_name,
+                            description_text=model_section_text,
+                            specs=combined_specs,
+                            field_sources=field_sources,
+                            field_tiers=field_tiers,
+                            tier=tier_label
+                        )
+
+                # ==============================================================
+                # PASS 2: TARGETED VISION ON SCANNED PAGES (ONLY IF TEXT FAILED)
+                # ==============================================================
+                if scanned_pages:
+                    max_vision_pages = min(3, len(scanned_pages))
+                    logger.info(
+                        f"[Tier 0] Pass 1 text found no matches for '{model_name}'. Auditing up to {max_vision_pages} scanned page(s) via Vision: {scanned_pages[:max_vision_pages]}..."
+                    )
+                    for page_num in scanned_pages[:max_vision_pages]:
                         vision_specs = extract_brochure_page_vision(
                             pdf_path=pdf_path,
                             page_num=page_num,
@@ -246,41 +285,7 @@ def parse_brochure_for_model(
                             model_name=model_name,
                             config=config
                         )
-
-                        combined_specs = dict(text_specs)
-                        tier_label = 0
-                        if vision_specs:
-                            for k, v in vision_specs.items():
-                                if v and k not in combined_specs:
-                                    combined_specs[k] = v
-                            tier_label = "0-vision"
-                            logger.info(f"[Tier 0 Vision] Successfully extracted specs from brochure p.{page_num}: {combined_specs}")
-
-                        if combined_specs:
-                            field_sources = {k: source_label for k in combined_specs}
-                            field_tiers = {k: tier_label for k in combined_specs}
-                            return ParserResult(
-                                success=True,
-                                status_code=200,
-                                url=source_label,
-                                title=model_name,
-                                description_text=model_section_text,
-                                specs=combined_specs,
-                                field_sources=field_sources,
-                                field_tiers=field_tiers,
-                                tier=tier_label
-                            )
-                    else:
-                        # Scanned / Image-based PDF page (no text stream) -> Execute Vision Fallback directly
-                        logger.info(f"[Tier 0] Scanned/image-based page {page_num} detected. Executing Tier 0 Vision Fallback...")
-                        vision_specs = extract_brochure_page_vision(
-                            pdf_path=pdf_path,
-                            page_num=page_num,
-                            brand=brand,
-                            model_name=model_name,
-                            config=config
-                        )
-                        if vision_specs:
+                        if vision_specs and len(vision_specs) >= 2:
                             source_label = f"brochure: {pdf_filename}, page {page_num}"
                             field_sources = {k: source_label for k in vision_specs}
                             field_tiers = {k: "0-vision" for k in vision_specs}
@@ -300,3 +305,6 @@ def parse_brochure_for_model(
             continue
 
     return None
+
+
+parse_brochure_for_model = find_product_in_brochure
