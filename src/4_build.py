@@ -244,6 +244,20 @@ def validate_product_data(prod: dict, raw_row: dict) -> None:
     validate_image_aspect_ratio(raw_img_path, pid)
 
 
+def resolve_effective_dp_float(row: Any) -> float:
+    """Extracts numeric effective DP for sorting; products without DP return infinity to sort last."""
+    prod = get_effective_product_dict(row)
+    dp_val = prod.get("dp_raw") if prod.get("dp_raw") is not None else prod.get("dp")
+    if dp_val is None and prod.get("mrp_raw") is not None:
+        dp_val = prod.get("mrp_raw")
+    if dp_val is not None and not is_empty_value(dp_val):
+        try:
+            return float(str(dp_val).replace("₹", "").replace("MRP", "").replace(",", "").strip())
+        except Exception:
+            pass
+    return float("inf")
+
+
 def build_catalogue_pdf(
     config_path: str = "config.yaml",
     brand: Optional[str] = None,
@@ -280,6 +294,24 @@ def build_catalogue_pdf(
     df = df[df["Status"] == "Approved"]
     if df.empty:
         raise ValueError(f"No approved products to build in {excel_path}")
+
+    # Pre-build validation: refuse compilation if any approved product lacks an image on disk
+    missing_images = []
+    for _, row in df.iterrows():
+        prod = get_effective_product_dict(row)
+        raw_img_path = prod.get("image_full_path", "")
+        pid = prod.get("product_id") or row.get("Product_ID") or "UNKNOWN"
+        model = str(prod.get("model_name", "")).strip()
+        if not raw_img_path or not os.path.exists(raw_img_path) or os.path.getsize(raw_img_path) == 0:
+            missing_images.append((pid, model, raw_img_path or "unspecified"))
+
+    if missing_images:
+        details = "\n".join(f"  • {pid} ({model}): image missing at '{p}'" for pid, model, p in missing_images)
+        logger.error(f"Cannot compile catalogue: {len(missing_images)} approved product(s) lack an image on disk:\n{details}")
+        raise FileNotFoundError(
+            f"Cannot compile catalogue: {len(missing_images)} approved product(s) lack an image on disk:\n{details}\n"
+            f"Please upload an image in Stage 4 before building."
+        )
     
     # 1. Determine brand sequence
     config_brand_order = config.get("brand_order") or []
@@ -321,9 +353,13 @@ def build_catalogue_pdf(
     brand_groups = []
     
     for brand_name in ordered_brands:
-        brand_df = df[df["Brand"] == brand_name].sort_values(by="Product_ID", ascending=True)
+        brand_df = df[df["Brand"] == brand_name].copy()
         if brand_df.empty:
             continue
+        
+        # Sort by resolved DP ascending (cheapest first), missing DP last, ties broken by Product_ID
+        brand_df["_sort_dp"] = brand_df.apply(resolve_effective_dp_float, axis=1)
+        brand_df = brand_df.sort_values(by=["_sort_dp", "Product_ID"], ascending=[True, True])
             
         products = []
         brand_image_paths = []
