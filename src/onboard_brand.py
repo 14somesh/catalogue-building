@@ -39,8 +39,8 @@ class BrandInferenceSchema(BaseModel):
     brand_name: str = Field(description="Brand name (e.g. 'Stuffcool', 'Pebble', 'Portronics', 'Anker')")
     brand_code: str = Field(description="2-4 character uppercase brand code for Product_ID (e.g. 'SC', 'PEB', 'POR', 'ANK')")
     category: Optional[str] = Field(default="Powerbank", description="Category name (e.g. 'Powerbank', 'Smartwatch', 'Audio')")
-    domain: str = Field(description="Official brand website domain (e.g. 'anker.com', 'ambraneindia.com')")
-    platform: str = Field(description="Website platform: 'shopify' or 'custom'")
+    domain: Optional[str] = Field(default=None, description="Official brand website domain ONLY IF explicitly written in the price sheet text, else null")
+    platform: Optional[str] = Field(default=None, description="Website platform ('shopify' or 'custom') ONLY if domain was verified, else null")
     qualifier_tokens: List[QualifierTokenItem] = Field(
         default_factory=list,
         description="List of variant qualifier tokens appropriate for this brand with rationale. Tokens must be variant modifiers (Plus, Pro, Max, Mini) and NOT product model names.",
@@ -242,7 +242,12 @@ Do NOT infer or override the Brand Name. Set brand_name to '{clean_brand}' and c
 
 Execute these tasks:
 1. Assign a concise 2-4 uppercase brand code for Product_ID generation (e.g. derived from '{clean_brand}', like 'SC', 'PEB', 'POR', 'ANK').
-2. Find the brand's official consumer website domain and e-commerce platform ('shopify' or 'custom').
+2. DOMAIN & PLATFORM (CRITICAL RULE):
+   - Do NOT guess, invent, or fabricate a website domain from the brand name.
+   - ONLY return a domain if an official website URL or domain is EXPLICITLY written in the price sheet text itself (e.g. 'www.stuffcool.com' appears in the header or footer of the sheet).
+   - If no website URL or domain is explicitly written in the price sheet text, you MUST return null for `domain` and null for `platform`.
+   - Example 1: Sheet text contains 'For warranty visit www.portronics.com' -> domain: 'portronics.com'.
+   - Example 2: Sheet text has only product names and prices without an explicit website URL -> domain: null, platform: null. (NEVER guess '{clean_brand.lower().replace(" ", "")}.com'!).
 3. Disambiguate price columns:
    - If two prices exist: the lower price is Dealer Price (DP), the higher price is Maximum Retail Price (MRP).
    - If one price exists: it is Dealer Price (DP).
@@ -266,7 +271,11 @@ Analyze this dealer price sheet for a brand in the '{category_name}' category.
 Execute these tasks autonomously:
 1. Infer the Brand Name (e.g. 'Stuffcool', 'Pebble', 'Portronics', 'Anker', 'Ambrane').
 2. Assign a concise 2-4 uppercase brand code for Product_ID generation (e.g. 'SC', 'PEB', 'POR', 'ANK').
-3. Find the brand's official consumer website domain (e.g. 'stuffcool.com', 'anker.com') and e-commerce platform ('shopify' or 'custom').
+3. DOMAIN & PLATFORM (CRITICAL RULE):
+   - Do NOT guess, invent, or fabricate a website domain from the brand name.
+   - ONLY return a domain if an official website URL or domain is EXPLICITLY written in the price sheet text itself.
+   - If no website URL or domain is explicitly present in the price sheet text, you MUST return null for `domain` and null for `platform`.
+   - Example: Sheet text has only product names and prices without a URL -> domain: null, platform: null.
 4. Disambiguate price columns:
    - If two prices exist: the lower price is Dealer Price (DP), the higher price is Maximum Retail Price (MRP).
    - If one price exists: it is Dealer Price (DP).
@@ -277,7 +286,7 @@ Execute these tasks autonomously:
 6. Select Brand-Specific Qualifier Tokens:
    - Analyze the catalog's naming patterns to identify true variant/modifier suffixes (e.g. 'Plus', 'Pro', 'Max', 'Mini', 'Ultra', 'Lite', 'Go').
    - Provide a short rationale for each token explaining why it is a variant modifier.
-   - DO NOT include actual product model names (e.g. 'Fuel', 'Boost', 'Nova', 'Electra', 'Giga', 'Major').
+   - DO NOT include actual product model names.
 7. Column Mapping:
    - Provide a key-value mapping of each original column/header in the sheet to its mapped role: 'Model_Name', 'DP', 'MRP', or 'ignored'.
 
@@ -319,6 +328,11 @@ PRICE SHEET CONTENT:
                     inference.brand_name = brand_name.strip()
                 if category_name and category_name.strip():
                     inference.category = category_name.strip()
+
+                # Verify domain against live storefront rules
+                v_domain, v_platform = verify_storefront_domain(inference.domain)
+                inference.domain = v_domain
+                inference.platform = v_platform
                 return inference
             except Exception as e:
                 last_error = e
@@ -372,6 +386,11 @@ PRICE SHEET CONTENT:
                     inference.brand_name = brand_name.strip()
                 if category_name and category_name.strip():
                     inference.category = category_name.strip()
+
+                # Verify domain against live storefront rules
+                v_domain, v_platform = verify_storefront_domain(inference.domain)
+                inference.domain = v_domain
+                inference.platform = v_platform
                 return inference
             except Exception as ge:
                 last_error = ge
@@ -399,19 +418,21 @@ PRICE SHEET CONTENT:
 
 def generate_onboarding_summary(inference: BrandInferenceSchema) -> str:
     """Generates the formatted inference summary markdown table with platform & bot-block probe."""
-    from src.parsers.generic import detect_ecommerce_platform
-    platform_detected, platform_detail = detect_ecommerce_platform(inference.domain)
-
     lines = []
     lines.append(f"### 📋 Onboarding Inference Summary for Brand '{inference.brand_name}'")
     lines.append(f"- **Brand Inferred:** `{inference.brand_name}` (Brand Code: `{inference.brand_code}`)")
     lines.append(f"- **Price Mapping:** {inference.dp_column_explanation}")
-    lines.append(f"- **Official Domain & Platform:** `{inference.domain}` (Inferred: `{inference.platform}`, Live Probe: `{platform_detected}` — {platform_detail})")
-    
-    if platform_detected == "custom":
-        lines.append(f"- **Platform Status:** ⚠️ E-commerce platform is non-standard / custom. Generic JSON-LD + Sitemap scraper will be active.")
-    if "403" in platform_detail or "error" in platform_detail.lower():
-        lines.append(f"- **Bot Challenge Status:** 🚨 Brand domain is protected or blocking requests ({platform_detail}). Brand will fall straight through to Retail Tier 3.")
+
+    if inference.domain:
+        from src.parsers.generic import detect_ecommerce_platform
+        platform_detected, platform_detail = detect_ecommerce_platform(inference.domain)
+        lines.append(f"- **Official Domain & Platform:** `{inference.domain}` (Inferred: `{inference.platform}`, Live Probe: `{platform_detected}` — {platform_detail})")
+        if platform_detected == "custom":
+            lines.append(f"- **Platform Status:** ⚠️ E-commerce platform is non-standard / custom. Generic JSON-LD + Sitemap scraper will be active.")
+        if platform_detail and ("403" in platform_detail or "error" in platform_detail.lower()):
+            lines.append(f"- **Bot Challenge Status:** 🚨 Brand domain is protected or blocking requests ({platform_detail}). Brand will fall straight through to Retail Tier 3.")
+    else:
+        lines.append("- **Official Domain & Platform:** No verified brand website found in price sheet. Tiers 1 and 2 will be skipped.")
 
     lines.append(f"- **Selected Qualifier Tokens & Justification:**")
     for q in inference.qualifier_tokens:
@@ -443,9 +464,88 @@ def generate_onboarding_summary(inference: BrandInferenceSchema) -> str:
 
     return "\n".join(lines)
 
+def verify_storefront_domain(domain: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Verifies that a candidate domain extracted from the price sheet is a live storefront.
+    Rejects parked domains, registrar landing pages, empty shells, and redirect landers.
+    Returns (verified_domain, verified_platform) if genuine storefront, else (None, None).
+    """
+    if not domain or not isinstance(domain, str):
+        return None, None
+    
+    clean_domain = domain.strip().lower()
+    clean_domain = re.sub(r"^https?://", "", clean_domain).split("/")[0].strip()
+    if not clean_domain or "." not in clean_domain:
+        return None, None
+        
+    url = f"https://{clean_domain}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            final_url = resp.geturl().lower()
+            # 1. Check redirect to parked lander
+            if any(p in final_url for p in ["/lander", "/parking", "sedo.com", "godaddy.com", "hugedomains", "dan.com", "afternic"]):
+                logger.warning(f"[Domain Verification] '{clean_domain}' redirected to parked landing page: {final_url}")
+                return None, None
+                
+            raw_html = resp.read(65536).decode("utf-8", errors="ignore").lower()
+            
+            # 2. Check parked domain signatures in page content
+            parked_signatures = [
+                "window.location.href=\"/lander\"",
+                "window.location.href='/lander'",
+                "buy this domain",
+                "is parked free",
+                "this domain is for sale",
+                "domain may be for sale",
+                "registered at namecheap",
+                "parked domain",
+                "renew now",
+                "inquire about this domain"
+            ]
+            if any(sig in raw_html for sig in parked_signatures):
+                logger.warning(f"[Domain Verification] '{clean_domain}' contains parked domain indicators.")
+                return None, None
+                
+            # 3. Confirm presence of commerce/product content
+            commerce_indicators = [
+                "cart", "checkout", "product", "shop", "price", "add to cart", "catalog", "collection", "inr", "₹", "rs."
+            ]
+            matches = sum(1 for ind in commerce_indicators if ind in raw_html)
+            if matches < 2:
+                logger.warning(f"[Domain Verification] '{clean_domain}' has insufficient commerce indicators (score={matches}). Rejecting.")
+                return None, None
+                
+            # 4. Check platform (Shopify or custom)
+            platform = "custom"
+            try:
+                p_url = f"https://{clean_domain}/products.json?limit=1"
+                p_req = urllib.request.Request(p_url, headers=headers)
+                with urllib.request.urlopen(p_req, timeout=4) as p_resp:
+                    if p_resp.status == 200:
+                        data = json.loads(p_resp.read(4096).decode("utf-8", errors="ignore"))
+                        if "products" in data:
+                            platform = "shopify"
+            except Exception:
+                pass
+                
+            logger.info(f"[Domain Verification] Verified live storefront for '{clean_domain}' (platform={platform}).")
+            return clean_domain, platform
+            
+    except Exception as e:
+        logger.warning(f"[Domain Verification] Verification failed for '{clean_domain}': {e}")
+        return None, None
 
-def register_brand_config(inference: BrandInferenceSchema, config_path: str = "config/brand_defaults.yaml"):
-    """Registers the new brand defaults in brand_defaults.yaml."""
+
+def register_brand_config(inference: BrandInferenceSchema, config_path: str = "config/brand_defaults.yaml") -> None:
+    """Updates config/brand_defaults.yaml with the inferred brand configuration."""
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             brand_cfg = yaml.safe_load(f) or {}
@@ -459,19 +559,16 @@ def register_brand_config(inference: BrandInferenceSchema, config_path: str = "c
         if tok not in token_list:
             token_list.append(tok)
 
+    brand_entry = {
+        "domain": inference.domain if inference.domain else None,
+        "platform": inference.platform if (inference.domain and inference.platform) else None,
+        "qualifier_tokens": token_list
+    }
+
     if "brands" in brand_cfg and isinstance(brand_cfg["brands"], dict):
-        brand_cfg["brands"][inference.brand_name] = {
-            "domain": inference.domain,
-            "platform": inference.platform,
-            "qualifier_tokens": token_list
-        }
+        brand_cfg["brands"][inference.brand_name] = brand_entry
     else:
-        brand_cfg[brand_slug] = {
-            "brand": inference.brand_name,
-            "domain": inference.domain,
-            "platform": inference.platform,
-            "qualifier_tokens": token_list
-        }
+        brand_cfg[brand_slug] = brand_entry
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(brand_cfg, f, sort_keys=False, default_flow_style=False)
@@ -483,12 +580,16 @@ def append_products_to_catalogue(
     excel_path: str = "data/catalogue_data.xlsx",
     category: Optional[str] = None
 ) -> Tuple[int, List[Dict[str, Any]]]:
-    """Appends the newly onboarded product rows to the master Excel catalogue."""
+    """
+    Appends or updates newly onboarded product rows in the master Excel catalogue idempotently.
+    If a row already exists for that brand and model name, updates it in-place instead of creating a duplicate.
+    """
     df = load_catalogue_data(excel_path)
     cat = category or getattr(inference, "category", None) or "Powerbank"
+    clean_brand = inference.brand_name.strip()
     
-    # Determine the starting sequence number using max + 1 across existing rows for this brand
-    existing_brand_mask = df["Brand"].astype(str).str.lower() == inference.brand_name.lower()
+    # Determine starting sequence number using max + 1 across existing rows for this brand
+    existing_brand_mask = df["Brand"].astype(str).str.strip().str.lower() == clean_brand.lower()
     brand_df = df[existing_brand_mask]
 
     existing_seqs = []
@@ -500,34 +601,66 @@ def append_products_to_catalogue(
             except ValueError:
                 continue
 
-    start_seq = max(existing_seqs) + 1 if existing_seqs else 1
-
+    next_seq = max(existing_seqs) + 1 if existing_seqs else 1
     all_existing_pids = set(df["Product_ID"].dropna().astype(str).str.strip())
 
-    new_rows = []
-    for offset, p in enumerate(inference.products):
-        seq = start_seq + offset
-        pid = f"PB-{inference.brand_code}-{seq:03d}"
-        
-        # Guard: Fail-fast if generated Product_ID already exists anywhere in the sheet
-        if pid in all_existing_pids:
-            raise ValueError(f"Product_ID collision detected: '{pid}' already exists in {excel_path}")
-        
-        row_dict = {
-            "Product_ID": pid,
-            "Brand": inference.brand_name,
-            "Category": cat,
-            "Model_Name": p.model_name,
-            "Display_Name": p.display_name,
-            "MRP_Input": p.dp,
-            "MRP_Display": p.mrp,
-            "Status": "Pending",
-            "Attempts": 0
-        }
-        new_rows.append(row_dict)
+    result_rows = []
+    new_rows_to_append = []
 
-    new_df = pd.DataFrame(new_rows)
-    combined_df = pd.concat([df, new_df], ignore_index=True)
+    for p in inference.products:
+        clean_model = p.model_name.strip()
+        # Check if an existing row matches this brand and model_name
+        model_match_mask = existing_brand_mask & (df["Model_Name"].astype(str).str.strip().str.lower() == clean_model.lower())
+        
+        if model_match_mask.any():
+            # Update existing row in place idempotently
+            match_idx = df[model_match_mask].index[0]
+            existing_pid = df.at[match_idx, "Product_ID"]
+            
+            df.at[match_idx, "Category"] = cat
+            df.at[match_idx, "Display_Name"] = p.display_name
+            df.at[match_idx, "MRP_Input"] = p.dp
+            df.at[match_idx, "MRP_Display"] = p.mrp
+            
+            # If status was Pending or Skipped, reset to Pending so collection runs on it
+            if df.at[match_idx, "Status"] in ("Pending", "Skipped", "Deferred"):
+                df.at[match_idx, "Status"] = "Pending"
+                df.at[match_idx, "Attempts"] = 0
+                df.at[match_idx, "Flags"] = None
+                df.at[match_idx, "Fix_Log"] = None
+                
+            updated_dict = df.loc[match_idx].to_dict()
+            result_rows.append(updated_dict)
+            logger.info(f"Updated existing row for '{clean_brand}' - '{clean_model}' ({existing_pid}) in {excel_path}")
+        else:
+            # Assign next sequential Product_ID
+            pid = f"PB-{inference.brand_code}-{next_seq:03d}"
+            while pid in all_existing_pids:
+                next_seq += 1
+                pid = f"PB-{inference.brand_code}-{next_seq:03d}"
+            all_existing_pids.add(pid)
+            next_seq += 1
+
+            row_dict = {
+                "Product_ID": pid,
+                "Brand": clean_brand,
+                "Category": cat,
+                "Model_Name": clean_model,
+                "Display_Name": p.display_name,
+                "MRP_Input": p.dp,
+                "MRP_Display": p.mrp,
+                "Status": "Pending",
+                "Attempts": 0
+            }
+            new_rows_to_append.append(row_dict)
+            result_rows.append(row_dict)
+
+    if new_rows_to_append:
+        new_df = pd.DataFrame(new_rows_to_append)
+        combined_df = pd.concat([df, new_df], ignore_index=True)
+    else:
+        combined_df = df
+
     save_catalogue_data(combined_df, excel_path)
-    logger.info(f"Appended {len(new_rows)} rows for brand '{inference.brand_name}' to {excel_path}")
-    return len(new_rows), new_rows
+    logger.info(f"Processed {len(result_rows)} rows ({len(new_rows_to_append)} new, {len(result_rows) - len(new_rows_to_append)} updated) for brand '{clean_brand}' to {excel_path}")
+    return len(result_rows), result_rows

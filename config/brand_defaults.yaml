@@ -1,8 +1,8 @@
 brands:
   Stuffcool:
     domain: stuffcool.com
+    platform: shopify
     collection_url: https://www.stuffcool.com/collections/power-bank
-    default_warranty: 6 Months (Extendable to 1 Year)
     retail_order:
     - reliance
     qualifier_tokens:
@@ -13,15 +13,10 @@ brands:
     - Mini
     - Lite
     - Go
-    image_tier_order:
-    - brand_product
-    - retail
-    - amazon
-    - collection_thumb
   Pebble:
     domain: pebblecart.com
+    platform: shopify
     collection_url: https://www.pebblecart.com/collections/powerbanks
-    default_warranty: 6 Months
     retail_order:
     - reliance
     qualifier_tokens:
@@ -32,34 +27,23 @@ brands:
     - Mini
     - Lite
     - Go
-    image_tier_order:
-    - brand_product
-    - retail
-    - amazon
-    - collection_thumb
   Portronics:
     domain: portronics.com
-    collection_url: https://www.portronics.com/collections/powerbanks
-    default_warranty: 1 Year
-    retail_order:
-    - reliance
+    platform: shopify
     qualifier_tokens:
-    - Max
-    - Ultra
-    - Plus
-    - Pro
     - Mini
-    - Lite
-    - Go
-    image_tier_order:
-    - brand_product
-    - retail
-    - amazon
-    - collection_thumb
+    - Wireless
+    - Air
+    - B12
+    - Stride
+    - Uno
+    - Pro
+    - Plus
+    - Max
   Urbn:
     domain: urbnworld.com
+    platform: shopify
     collection_url: https://urbnworld.com/collections/power-banks
-    default_warranty: 1 Year
     retail_order:
     - reliance
     qualifier_tokens:
@@ -74,15 +58,17 @@ brands:
     - Pro
     - Plus
     - Max
-    image_tier_order:
-    - brand_product
-    - retail
-    - amazon
-    - collection_thumb
+    - Arc
+    - Air
+    - Beat
+    - Nano
+    - Sprint
+    - Super
+    - Wireless
   EVM:
     domain: evmzone.com
+    platform: magento
     collection_url: https://evmzone.com/evm-products/powerbank.html
-    default_warranty: 2 Years
     retail_order:
     - reliance
     qualifier_tokens:
@@ -95,11 +81,6 @@ brands:
     - Ultra
     - Lite
     - Go
-    image_tier_order:
-    - brand_product
-    - retail
-    - amazon
-    - collection_thumb
   _default:
     retail_order:
     - reliance
@@ -111,14 +92,25 @@ brands:
     - Mini
     - Lite
     - Go
-    image_tier_order:
-    - brand_product
-    - retail
-    - amazon
-    - collection_thumb
   Ambrane:
     domain: ambraneindia.com
     platform: shopify
     qualifier_tokens:
     - Pro
     - Plus
+  Glow Gadget:
+    domain: glowgadgets.in
+    platform: shopify
+    qualifier_tokens:
+    - Plus
+    - Pro
+    - Max
+    - Mini
+    collection_url: https://glowgadgets.in/collections/powerbanks
+  Wangari:
+    domain: wangariworld.com
+    platform: shopify
+    qualifier_tokens:
+    - '2.0'
+    - QI
+    collection_url: https://wangariworld.com/collections/all

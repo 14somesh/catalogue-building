@@ -54,3 +54,8 @@ Thumbs.db
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Scratch scripts & temporary screenshots
+scratch/
+screenshots/
+screenshot_*.png

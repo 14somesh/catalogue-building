@@ -41,6 +41,7 @@ BOILERPLATE_PHRASES = [
     "privacy policy"
 ]
 
+
 CACHE_DIR = "cache"
 
 
@@ -75,7 +76,12 @@ def load_brand_defaults(brand: str, config_path: str = "config/brand_defaults.ya
             with open(config_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
                 brands_dict = data.get("brands", {})
-                return brands_dict.get(brand, brands_dict.get("_default", {}))
+                if brand in brands_dict:
+                    return brands_dict[brand]
+                for b_name, b_val in brands_dict.items():
+                    if b_name.lower() == str(brand).lower():
+                        return b_val
+                return brands_dict.get("_default", {})
         except Exception as e:
             logger.warning(f"Failed loading brand defaults from {config_path}: {e}")
     return {}
@@ -90,13 +96,23 @@ def normalize_model_tokens(text: str) -> Set[str]:
     t = re.sub(r'([a-zA-Z]+)(\d+)', r'\1 \2', t)
     t = re.sub(r'(\d+)([a-zA-Z]+)', r'\1 \2', t)
     words = re.findall(r'[a-zA-Z0-9]+', t.lower())
-    return set(words)
+    token_set = set(words)
+    if "10" in token_set:
+        token_set.add("10000")
+    if "10000" in token_set:
+        token_set.add("10")
+    if "20" in token_set:
+        token_set.add("20000")
+    if "20000" in token_set:
+        token_set.add("20")
+    return token_set
 
 
 def extract_model_name_portion(title: str, brand: str = "") -> str:
     """
     Extracts the core model name portion of a candidate title string before capacity,
-    wattage, or descriptive category keywords. Handles multiple leading capacities/wattages cleanly.
+    wattage, or descriptive category keywords. Handles multiple leading capacities/wattages cleanly,
+    and splits on title delimiters like ' - ', ' | ', ' / ', ' – ', ' — '.
     """
     cleaned = title
     if brand:
@@ -105,8 +121,15 @@ def extract_model_name_portion(title: str, brand: str = "") -> str:
     # Strip ALL leading capacities and wattages (e.g. '10000 mAh 15 W ...')
     cleaned = re.sub(r'^(?:\s*(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b))+\s*', '', cleaned, flags=re.IGNORECASE).strip()
     
+    # If title has a clear marketing delimiter like ' - ' or ' | ' or ' – ' or ' — ', take the leading part
+    delim_match = re.search(r'\s+[-|–—/]\s+', cleaned)
+    if delim_match:
+        leading_part = cleaned[:delim_match.start()].strip()
+        if leading_part:
+            cleaned = leading_part
+
     # Split on capacity, wattage, or generic category keywords
-    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*(?:\.\d+)?|certified|magnetic|wireless|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
     m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
     if m:
         leading_part = cleaned[:m.start()].strip()
@@ -131,7 +154,7 @@ def score_candidate_match(
     Returns (score, is_valid, diagnostic_reason).
     """
     brand_lower = brand.lower() if brand else ""
-    stopwords = {"pb", brand_lower, "powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and", "in", "for"}
+    stopwords = {"pb", brand_lower, "powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and", "in", "for", "customized", "custom", "suction"}
     
     # 1. Target tokens
     target_model_part = extract_model_name_portion(target_model_name, brand=brand)
@@ -154,7 +177,7 @@ def score_candidate_match(
         primary_target_tokens = target_tokens
 
     if not target_tokens.issubset(cand_all_tokens) and not primary_target_tokens.issubset(cand_all_tokens):
-        return -1.0, False, "Target tokens missing in candidate"
+        return -1.0, False, f"Target tokens {primary_target_tokens} missing in candidate '{candidate_title}'"
         
     # Qualifier token check
     is_valid_q, reason_q = reject_qualifier_mismatch(target_model_name, candidate_title, qualifier_tokens, brand=brand)
@@ -217,7 +240,13 @@ def extract_leading_model_segment(title: str, brand: str = "") -> str:
     # Strip ALL leading capacities and wattages (e.g. '10000 mAh 15 W ...')
     cleaned = re.sub(r'^(?:\s*(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b))+\s*', '', cleaned, flags=re.IGNORECASE).strip()
     
-    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
+    delim_match = re.search(r'\s+[-|–—/]\s+', cleaned)
+    if delim_match:
+        leading_part = cleaned[:delim_match.start()].strip()
+        if leading_part:
+            cleaned = leading_part
+
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*(?:\.\d+)?|certified|magnetic|wireless|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
     m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
     if m:
         leading_part = cleaned[:m.start()].strip()
@@ -237,6 +266,418 @@ def reject_qualifier_mismatch(
     When matching a candidate page to a row, only compares qualifier tokens in the
     LEADING MODEL NAME SEGMENT of the candidate title (before capacity, wattage,
     or descriptor words). Also treats '+' and 'Plus' as equivalent tokens.
+    Returns (is_valid, rejection_reason).
+    """
+    if not qualifier_tokens:
+        return True, None
+        
+    cand_lead = extract_leading_model_segment(candidate_title, brand=brand)
+    target_tokens = normalize_model_tokens(target_model_name)
+    cand_tokens = normalize_model_tokens(cand_lead)
+    
+    for q in qualifier_tokens:
+        q_norm_set = normalize_model_tokens(q)
+        target_has = q_norm_set.issubset(target_tokens)
+        cand_has = q_norm_set.issubset(cand_tokens)
+        
+        if cand_has and not target_has:
+            reason = f"Qualifier token mismatch in model segment '{cand_lead}': candidate contains '{q}' but target Model_Name '{target_model_name}' does not."
+            return False, reason
+            
+    return True, None
+
+
+def save_brand_domain_default(
+    brand: str,
+    domain: str,
+    platform: str = "shopify",
+    collection_url: Optional[str] = None,
+    config_path: str = "config/brand_defaults.yaml"
+) -> bool:
+    """
+    Persists a verified brand website domain and optional collection URL to config/brand_defaults.yaml.
+    """
+    if not os.path.exists(config_path):
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        if "brands" not in data:
+            data["brands"] = {}
+
+        if brand not in data["brands"]:
+            data["brands"][brand] = {}
+
+        data["brands"][brand]["domain"] = domain
+        data["brands"][brand]["platform"] = platform
+        if collection_url:
+            data["brands"][brand]["collection_url"] = collection_url
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+
+        logger.info(f"Successfully saved verified domain '{domain}' (platform={platform}) for brand '{brand}' to {config_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed saving brand domain for '{brand}' to {config_path}: {e}")
+        return False
+
+
+def verify_brand_storefront(
+    domain: str,
+    brand: str,
+    model_names: List[str]
+) -> Tuple[bool, Optional[str], Optional[str], List[str]]:
+    """
+    Verifies that a candidate domain is an authentic storefront selling this brand's products.
+    1. Checks if it is a parked / squatter domain or reseller directory.
+    2. Cross-checks against the actual product model names from the price sheet.
+    Returns (is_verified, platform, collection_url, matched_models).
+    """
+    from urllib.parse import urlparse
+    import requests
+
+    clean_domain = domain.strip().lower().replace("http://", "").replace("https://", "").replace("www.", "").rstrip("/")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # 1. Try Shopify products.json index (fastest, most authoritative)
+    try:
+        pjson_url = f"https://{clean_domain}/products.json?limit=250"
+        r = requests.get(pjson_url, headers=headers, timeout=(2.0, 3.0))
+        if r.status_code == 200:
+            data = r.json()
+            prods = data.get("products", [])
+            if prods:
+                titles = [p.get("title", "") for p in prods]
+                matched = []
+                for m in model_names:
+                    m_clean = m.strip()
+                    if not m_clean:
+                        continue
+                    pattern = r'\b' + re.escape(m_clean) + r'\b'
+                    if any(re.search(pattern, t, re.IGNORECASE) for t in titles):
+                        matched.append(m)
+
+                if matched:
+                    # Check collections for category
+                    coll_url = f"https://{clean_domain}/collections/power-bank"
+                    try:
+                        cr = requests.head(coll_url, headers=headers, timeout=(1.5, 2.0))
+                        if cr.status_code != 200:
+                            coll_url = f"https://{clean_domain}/collections/powerbanks"
+                            cr2 = requests.head(coll_url, headers=headers, timeout=(1.5, 2.0))
+                            if cr2.status_code != 200:
+                                coll_url = f"https://{clean_domain}/collections/all"
+                    except Exception:
+                        coll_url = f"https://{clean_domain}/collections/all"
+
+                    logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED as Shopify store for '{brand}' with matched models: {matched}")
+                    return True, "shopify", coll_url, matched
+    except Exception as e:
+        logger.debug(f"products.json check failed for {clean_domain}: {e}")
+
+    # 2. Try Homepage / Sitemap HTML check
+    try:
+        home_url = f"https://{clean_domain}/"
+        r = requests.get(home_url, headers=headers, timeout=(2.0, 3.0))
+        if r.status_code == 200:
+            text_lower = r.text.lower()
+            
+            # Parked / Squatter / Domain sale signature checks
+            parked_signatures = [
+                "buy this domain", "domain for sale", "hugedomains", "godaddy", "dan.com",
+                "sedo", "namecheap", "is parked", "domain parking", "this web page is parked"
+            ]
+            if any(p in text_lower for p in parked_signatures):
+                logger.warning(f"[Domain Verification] Domain '{clean_domain}' REJECTED: Parked/Squatter domain detected.")
+                return False, None, None, []
+
+            # Check if brand name and at least one model name appear on the storefront
+            matched = []
+            for m in model_names:
+                m_clean = m.strip()
+                if not m_clean:
+                    continue
+                pattern = r'\b' + re.escape(m_clean) + r'\b'
+                if re.search(pattern, text_lower, re.IGNORECASE):
+                    matched.append(m)
+
+            if matched:
+                logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED via homepage for '{brand}' with matched models: {matched}")
+                return True, "generic", None, matched
+            else:
+                logger.debug(f"[Domain Verification] Domain '{clean_domain}' reachable but 0 models matched.")
+    except Exception as e:
+        logger.debug(f"Homepage check failed for {clean_domain}: {e}")
+
+    return False, None, None, []
+
+
+def discover_and_verify_brand_domain(
+    brand: str,
+    model_names: List[str],
+    category: str = "Powerbank",
+    config_path: str = "config/brand_defaults.yaml"
+) -> Dict[str, Any]:
+    """
+    AUTONOMOUS BRAND DOMAIN DISCOVERY:
+    Runs when no domain is configured for a brand. Probes standard candidate domains,
+    verifies they are real storefronts selling the brand's products, and cross-checks
+    against models from the price sheet. If verified, persists to brand_defaults.yaml.
+    """
+    clean_brand = brand.strip()
+    if not clean_brand:
+        return {"domain": None, "verified": False}
+
+    existing_cfg = load_brand_defaults(clean_brand, config_path=config_path)
+    existing_domain = existing_cfg.get("domain")
+    if existing_domain and not existing_cfg.get("waf_blocked"):
+        return {
+            "domain": existing_domain,
+            "platform": existing_cfg.get("platform", "shopify"),
+            "collection_url": existing_cfg.get("collection_url"),
+            "verified": True
+        }
+
+    # Generate candidate domains
+    slug_simple = re.sub(r'[^a-zA-Z0-9]', '', clean_brand.lower())
+    slug_hyphen = re.sub(r'[^a-zA-Z0-9]+', '-', clean_brand.lower()).strip('-')
+
+    base_slugs = [slug_simple]
+    if slug_simple.endswith("s"):
+        base_slugs.append(slug_simple[:-1])
+    else:
+        base_slugs.append(slug_simple + "s")
+    if slug_hyphen != slug_simple:
+        base_slugs.extend([slug_hyphen, slug_hyphen + "s"])
+
+    extensions = [
+        ".in",
+        ".com",
+        ".co.in",
+        "india.com",
+        "india.in",
+        "world.com",
+        "cart.com",
+        "zone.com",
+        "store.in",
+        "shop.in",
+        "tech.in",
+        "lifestyle.com"
+    ]
+
+    candidates = []
+    for ext in extensions:
+        for s in base_slugs:
+            cand = f"{s}{ext}" if ext.startswith(".") else f"{s}{ext}"
+            if cand not in candidates:
+                candidates.append(cand)
+
+    logger.info(f"Initiating autonomous domain discovery for '{clean_brand}' against {len(candidates)} candidate domains...")
+
+    for cand_domain in candidates:
+        is_verified, platform, coll_url, matched = verify_brand_storefront(cand_domain, clean_brand, model_names)
+        if is_verified:
+            save_brand_domain_default(clean_brand, cand_domain, platform=platform or "shopify", collection_url=coll_url, config_path=config_path)
+            return {
+                "domain": cand_domain,
+                "platform": platform,
+                "collection_url": coll_url,
+                "verified": True,
+                "matched_models": matched
+            }
+
+    logger.info(f"Domain discovery completed for '{clean_brand}': No verified storefront discovered.")
+    return {"domain": None, "verified": False}
+
+
+def resolve_any_url_to_product(
+    manual_url: str,
+    target_model_name: str,
+    brand: str = "",
+    qualifier_tokens: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    UNIVERSAL MANUAL URL RESOLVER:
+    Accepts ANY URL (single product page, collection/category listing, site root, or search result).
+    1. Fetches and classifies the page by content.
+    2. If single product: returns direct product URL for immediate extraction.
+    3. If listing/collection/search: extracts all product links, scores candidates against target_model_name.
+    4. If site root: discovers collections / products.json and matches against target_model_name.
+    5. Learns and persists verified brand domain to brand_defaults.yaml.
+    6. Returns detailed diagnostic metadata.
+    """
+    from urllib.parse import urlparse, urljoin
+    from bs4 import BeautifulSoup
+    import requests
+
+    clean_url = manual_url.strip()
+    if not clean_url.startswith("http://") and not clean_url.startswith("https://"):
+        clean_url = f"https://{clean_url}"
+
+    parsed = urlparse(clean_url)
+    domain = parsed.netloc.replace("www.", "").lower()
+    path = parsed.path.rstrip("/")
+    query = parsed.query
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    try:
+        r = requests.get(clean_url, headers=headers, timeout=10)
+    except Exception as e:
+        return {
+            "success": False,
+            "error_type": "unreachable",
+            "message": f"URL is unreachable ({e}): {clean_url}",
+            "direct_product_url": None,
+            "domain": domain
+        }
+
+    if r.status_code in (401, 403, 429) or (r.status_code == 200 and ("cf-challenge" in r.text.lower() or "challenge-running" in r.text.lower())):
+        return {
+            "success": False,
+            "error_type": "blocked",
+            "message": f"URL is blocked by anti-bot challenge (HTTP {r.status_code}): {clean_url}",
+            "direct_product_url": None,
+            "domain": domain
+        }
+
+    if r.status_code != 200:
+        return {
+            "success": False,
+            "error_type": "http_error",
+            "message": f"Server returned HTTP {r.status_code} for URL: {clean_url}",
+            "direct_product_url": None,
+            "domain": domain
+        }
+
+    html = r.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Learn and persist domain if verified
+    is_ver, plat, coll, _ = verify_brand_storefront(domain, brand or domain, [target_model_name])
+    if is_ver and brand:
+        save_brand_domain_default(brand, domain, platform=plat or "shopify", collection_url=coll)
+
+    # 1. Check if Site Root / Homepage
+    is_root = (path == "" or path == "/" or path == "/index.html" or path == "/home")
+
+    # 2. Check if Search Page or Collection Page
+    is_search = ("search" in path or "q=" in query)
+    is_collection = ("/collections/" in path or "/category/" in path or "/shop/" in path or "/c/" in path or "/catalog/" in path)
+
+    # 3. Check for product links on page
+    product_links: List[Tuple[str, str]] = [] # (title, full_url)
+
+    # 3a. If Shopify, query products.json
+    try:
+        pjson_r = requests.get(f"https://{domain}/products.json?limit=250", headers=headers, timeout=4)
+        if pjson_r.status_code == 200:
+            pj_data = pjson_r.json()
+            for p in pj_data.get("products", []):
+                p_title = p.get("title", "")
+                p_handle = p.get("handle", "")
+                if p_handle:
+                    p_url = f"https://{domain}/products/{p_handle}"
+                    product_links.append((p_title, p_url))
+    except Exception:
+        pass
+
+    # 3b. Also extract all <a href="..."> links from HTML
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        full_a_url = urljoin(clean_url, href)
+        a_title = a.get_text(strip=True)
+        # Check if URL looks like a product URL
+        if re.search(r'/(?:products|product|item|p|pd)/[^/?#]+', href, re.I):
+            if full_a_url not in [pl[1] for pl in product_links]:
+                product_links.append((a_title or href.split("/")[-1].replace("-", " "), full_a_url))
+
+    # Single product check: if page declares og:type=product, has add-to-cart form/button, or matches product URL pattern
+    og_type = soup.find("meta", property=re.compile(r"^og:type$", re.I))
+    is_og_product = bool(og_type and "product" in (og_type.get("content") or "").lower())
+    has_buy_button = bool(
+        soup.find(["button", "input", "form"], id=re.compile(r"add[-_]?to[-_]?cart|product_addtocart_form", re.I))
+        or soup.find(["button", "input", "form"], class_=re.compile(r"add[-_]to[-_]cart|buy[-_]now", re.I))
+    )
+    is_direct_product = (
+        (is_og_product and not is_collection and not is_root and not is_search)
+        or (re.search(r'/(?:products?|item|p|pd)/[^/?#]+', path, re.I) and not is_collection and not is_root and not is_search)
+        or (has_buy_button and not is_collection and not is_root and not is_search)
+    )
+
+    if is_direct_product:
+        return {
+            "success": True,
+            "page_type": "single_product",
+            "direct_product_url": clean_url,
+            "domain": domain,
+            "message": f"Direct product page resolved: {clean_url}"
+        }
+
+    # Listing / Collection / Site Root / Search Page handling
+    if product_links:
+        # Score candidate matches against target_model_name
+        scored_candidates = []
+        for cand_title, cand_url in product_links:
+            score, valid, reason = score_candidate_match(
+                target_model_name, cand_title, cand_url, brand=brand, qualifier_tokens=qualifier_tokens
+            )
+            if valid and score >= 100.0:
+                scored_candidates.append((score, cand_title, cand_url))
+
+        if scored_candidates:
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_title, best_url = scored_candidates[0]
+            logger.info(f"[Universal URL Resolver] Matched '{target_model_name}' to '{best_title}' ({best_url}) with score {best_score:.1f}")
+            return {
+                "success": True,
+                "page_type": "listing_match",
+                "direct_product_url": best_url,
+                "domain": domain,
+                "matched_title": best_title,
+                "message": f"Matched model '{target_model_name}' to listing item '{best_title}': {best_url}"
+            }
+        else:
+            # Listing had no match
+            sample_titles = [pl[0] for pl in product_links if pl[0] and len(pl[0]) > 2][:5]
+            titles_str = ", ".join(f"'{t}'" for t in sample_titles) if sample_titles else "none named"
+            return {
+                "success": False,
+                "error_type": "listing_no_match",
+                "page_type": "listing",
+                "total_products_on_page": len(product_links),
+                "closest_names": sample_titles,
+                "domain": domain,
+                "direct_product_url": None,
+                "message": f"That page lists {len(product_links)} products ({titles_str}), but none matched model '{target_model_name}'."
+            }
+
+    # Fallback if no product links were discoverable on the page
+    return {
+        "success": False,
+        "error_type": "no_products_found",
+        "page_type": "generic_page",
+        "domain": domain,
+        "direct_product_url": None,
+        "message": f"No product listings or specifications found on page: {clean_url}"
+    }
+
+
+def reject_qualifier_mismatch(
+    target_model_name: str,
+    candidate_title: str,
+    qualifier_tokens: Optional[List[str]] = None,
+    brand: Optional[str] = None
+) -> Tuple[bool, Optional[str]]:
+    """
+    STRICT QUALIFIER GUARD:
+    Rejects any candidate title containing a qualifier token that does NOT appear in target_model_name.
     Returns (is_valid, rejection_reason).
     """
     tokens = qualifier_tokens or DEFAULT_QUALIFIER_TOKENS
@@ -288,18 +729,30 @@ def is_boilerplate_bullet(text: str) -> Tuple[bool, Optional[str]]:
 # ==============================================================================
 
 def fetch_shopify_catalogue(domain: str, timeout: int = 15) -> List[Dict[str, Any]]:
-    """Fetches and caches the full Shopify products catalogue (up to 250 items)."""
+    """Fetches and caches the full Shopify products catalogue with pagination support."""
     cache_key = f"shopify_cat_{domain}"
 
     def _fetch():
-        url = f"https://www.{domain}/products.json?limit=250"
-        try:
-            r = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
-            if r.status_code == 200:
-                return r.json().get("products", [])
-        except Exception as e:
-            logger.warning(f"Error fetching Shopify catalogue for {domain}: {e}")
-        return []
+        all_products = []
+        page = 1
+        while page <= 5:  # Up to 1,250 products
+            url = f"https://www.{domain}/products.json?limit=250&page={page}"
+            try:
+                r = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+                if r.status_code == 200:
+                    prods = r.json().get("products", [])
+                    if not prods:
+                        break
+                    all_products.extend(prods)
+                    if len(prods) < 250:
+                        break
+                    page += 1
+                else:
+                    break
+            except Exception as e:
+                logger.warning(f"Error fetching Shopify catalogue for {domain} (page {page}): {e}")
+                break
+        return all_products
 
     return get_cached_json(cache_key, _fetch) or []
 
@@ -500,14 +953,14 @@ def search_retail_croma(
     return None
 
 
-def fetch_and_parse_url(url: str, tier: int = 1, timeout: int = 15) -> ParserResult:
+def fetch_and_parse_url(url: str, tier: int = 1, timeout: int = 15, platform: Optional[str] = None) -> ParserResult:
     """
     Fetches a URL, dispatches to the appropriate parser, and returns ParserResult.
     Detects 401/403/429 (Blocked), 404/410/Soft-404 (Delisted), and extracts specs/images.
     Hard timeout of 15s enforced.
     """
-    logger.info(f"[Tier {tier}] Fetching URL: {url}")
-    parser = get_parser_for_url(url)
+    logger.info(f"[Tier {tier}] Fetching URL: {url} (platform={platform or 'auto'})")
+    parser = get_parser_for_url(url, platform=platform)
     
     try:
         response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)

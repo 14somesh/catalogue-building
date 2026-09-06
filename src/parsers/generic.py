@@ -1,65 +1,244 @@
 import re
 import json
 import logging
-import requests
-from typing import Dict, Any, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from typing import Dict, Any, List, Optional, Set
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
 
-from src.parsers.base import BaseBrandParser, ParserResult
+from src.parsers.base import BaseParser, ParserResult
 from src.parsers.brochure import parse_specs_from_text
-from src.utils.scraper import (
-    DEFAULT_HEADERS,
-    clean_html_text,
-    extract_model_name_portion,
-    normalize_model_tokens,
-    score_candidate_match,
-)
 
 logger = logging.getLogger("generic_parser")
 
 
-def detect_ecommerce_platform(domain_or_url: str) -> Tuple[str, Optional[str]]:
+def clean_html_text(html: str) -> str:
+    """Strips noisy tags and returns clean text from HTML."""
+    if not html:
+        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "svg"]):
+        tag.decompose()
+    return soup.get_text(separator=" ", strip=True)
+
+
+class GenericParser(BaseParser):
     """
-    Detects the e-commerce platform of a website (Shopify, WooCommerce, Magento, or Custom).
-    Returns (platform_name, diagnostic_detail).
+    Generic brand parser supporting WooCommerce, Magento, BigCommerce, and custom storefronts.
+    Extracts product title, specifications, and maximum-resolution product images
+    using JSON-LD schemas, microdata, structured spec tables, and semantic HTML fallbacks.
     """
-    url = domain_or_url if domain_or_url.startswith("http") else f"https://{domain_or_url}"
-    try:
-        r = requests.get(url, headers=DEFAULT_HEADERS, timeout=10, allow_redirects=True)
-        headers_str = str(r.headers).lower()
-        html = r.text.lower()
 
-        # 1. Shopify Detection
-        if "shopify" in headers_str or "cdn.shopify.com" in html or "myshopify.com" in html:
-            return "shopify", "Detected via Shopify CDN / headers"
+    @property
+    def name(self) -> str:
+        return "generic"
 
-        # 2. WooCommerce Detection
-        if "woocommerce" in html or "wp-content/plugins/woocommerce" in html or 'name="generator" content="woocommerce' in html:
-            return "woocommerce", "Detected via WooCommerce meta / plugin scripts"
+    @property
+    def capabilities(self) -> Set[str]:
+        return {"specs", "images"}
 
-        # 3. Magento Detection
-        if "mage/" in html or "magento" in html or "mage-init" in html or "text/x-magento-init" in html:
-            return "magento", "Detected via Magento scripts / x-magento-init"
+    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1) -> ParserResult:
+        if status_code in (401, 403, 429):
+            return ParserResult(success=False, status_code=status_code, url=url, is_blocked=True, tier=tier, error=f"HTTP {status_code} Blocked")
+        if status_code in (404, 410):
+            return ParserResult(success=False, status_code=status_code, url=url, is_delisted=True, tier=tier, error=f"HTTP {status_code} Delisted")
+        if status_code != 200:
+            return ParserResult(success=False, status_code=status_code, url=url, tier=tier, error=f"HTTP {status_code}")
 
-        # 4. BigCommerce
-        if "cdn11.bigcommerce.com" in html or "bigcommerce" in html:
-            return "bigcommerce", "Detected via BigCommerce CDN / assets"
+        soup = BeautifulSoup(html, "html.parser")
 
-        # Unknown / Custom
-        logger.warning(f"[Platform Detection] WARNING: Could not identify e-commerce platform for '{domain_or_url}'. Operating in generic fallback mode (JSON-LD + Sitemap).")
-        return "custom", "Platform could not be determined; using generic JSON-LD + Sitemap parser"
+        # Soft 404 check
+        title_el = soup.find("title")
+        page_title = title_el.get_text().strip() if title_el else ""
+        if any(w in page_title.lower() for w in ["404", "not found", "page not found", "error 404"]):
+            return ParserResult(success=False, status_code=404, url=url, is_delisted=True, tier=tier, error="Soft 404 page title")
 
-    except Exception as e:
-        logger.warning(f"[Platform Detection] Probe failed for '{domain_or_url}': {e}. Defaulting to generic parser.")
-        return "custom", f"Probe error: {e}"
+        # 1. Product Title
+        product_title = None
+        h1 = (
+            soup.find("h1", class_=re.compile(r"product.*title|title|entry-title", re.I)) or
+            soup.find("h1")
+        )
+        if h1:
+            product_title = h1.get_text().strip()
+        elif soup.find("meta", property="og:title"):
+            product_title = soup.find("meta", property="og:title").get("content", "").strip()
+
+        # 2. Extract Specifications & Images from JSON-LD
+        specs: Dict[str, str] = {}
+        mrp: Optional[float] = None
+        candidate_images: List[str] = []
+        json_ld_desc = ""
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "{}")
+                items = data if isinstance(data, list) else [data]
+                if isinstance(data, dict) and "@graph" in data:
+                    items.extend(data["@graph"])
+
+                for item in items:
+                    if isinstance(item, dict) and item.get("@type") in ("Product", "IndividualProduct"):
+                        if not product_title and item.get("name"):
+                            product_title = str(item["name"]).strip()
+
+                        # Description
+                        json_ld_desc = item.get("description") or ""
+
+                        # Structured attributes
+                        for prop in item.get("additionalProperty", []):
+                            if isinstance(prop, dict):
+                                n = str(prop.get("name", "")).lower()
+                                v = str(prop.get("value", "")).strip()
+                                if "capacity" in n and "capacity" not in specs:
+                                    specs["capacity"] = v
+                                elif "output" in n and "output" not in specs:
+                                    specs["output"] = v
+                                elif "port" in n and "ports" not in specs:
+                                    specs["ports"] = v
+                                elif "weight" in n and "weight" not in specs:
+                                    specs["weight"] = v
+                                elif "warranty" in n and "warranty" not in specs:
+                                    specs["warranty"] = v
+
+                        # Price / MRP
+                        offers = item.get("offers")
+                        if isinstance(offers, dict):
+                            p_val = offers.get("price") or offers.get("highPrice")
+                            if p_val:
+                                try:
+                                    mrp = float(str(p_val).replace(",", ""))
+                                except ValueError:
+                                    pass
+                        elif isinstance(offers, list) and len(offers) > 0:
+                            p_val = offers[0].get("price")
+                            if p_val:
+                                try:
+                                    mrp = float(str(p_val).replace(",", ""))
+                                except ValueError:
+                                    pass
+
+                        # Images
+                        img_field = item.get("image")
+                        if isinstance(img_field, list):
+                            for u in img_field:
+                                if isinstance(u, str) and u.startswith("http"):
+                                    candidate_images.append(u)
+                                elif isinstance(u, dict) and u.get("url"):
+                                    candidate_images.append(u["url"])
+                        elif isinstance(img_field, str) and img_field.startswith("http"):
+                            candidate_images.append(img_field)
+                        elif isinstance(img_field, dict) and img_field.get("url"):
+                            candidate_images.append(img_field["url"])
+            except Exception:
+                continue
+
+        # Strip noisy elements before HTML text extraction
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "svg"]):
+            tag.decompose()
+        for noisy_cls in ["site-footer", "footer", "site-header", "header", "related-products", "product-recommendations"]:
+            for el in soup.find_all(class_=re.compile(noisy_cls, re.I)):
+                el.decompose()
+
+        # 3. HTML Description & Spec Table Extraction
+        spec_text_blocks = []
+        for table_el in soup.find_all(["table", "dl", "div", "section"], class_=re.compile(r"woocommerce-product-attributes|product-attributes|specification|tech-spec|spec|attribute|detail", re.I)):
+            spec_text_blocks.append(clean_html_text(str(table_el)))
+
+        desc_container = soup.find(["div", "section"], class_=re.compile(r"woocommerce-product-details__short-description|product-description|description|entry-content", re.I))
+        desc_text = clean_html_text(str(desc_container)) if desc_container else ""
+
+        full_text = f"{product_title or ''}\n{desc_text}\n{json_ld_desc}\n" + "\n".join(spec_text_blocks)
+        parsed_specs = parse_specs_from_text(full_text)
+        for k, v in parsed_specs.items():
+            if k not in specs or not specs[k]:
+                specs[k] = v
+
+        # Fallback MRP from HTML price tags if not found in JSON-LD
+        if not mrp:
+            price_el = soup.find(["span", "div", "p"], class_=re.compile(r"woocommerce-Price-amount|regular-price|mrp|price", re.I))
+            if price_el:
+                price_match = re.search(r'[\d,]+(?:\.\d{2})?', price_el.get_text())
+                if price_match:
+                    try:
+                        mrp = float(price_match.group(0).replace(",", ""))
+                    except ValueError:
+                        pass
+
+        # 4. High-Resolution HTML Image Extraction
+        for img in soup.find_all("img"):
+            high_res_url = (
+                img.get("data-zoom-image") or
+                img.get("data-large-img") or
+                img.get("data-high-res") or
+                img.get("data-master") or
+                img.get("data-src") or
+                img.get("src")
+            )
+            if high_res_url:
+                full_u = urljoin(url, high_res_url)
+                if (
+                    full_u not in candidate_images
+                    and not any(ign in full_u.lower() for ign in ["logo", "icon", "badge", "payment", "arrow", "rating", "avatar", "sprite"])
+                    and full_u.startswith("http")
+                ):
+                    candidate_images.append(full_u)
+
+            # Parse srcset for largest resolution image
+            srcset = img.get("srcset")
+            if srcset:
+                parts = [p.strip().split() for p in srcset.split(",") if p.strip()]
+                if parts:
+                    def get_width(item):
+                        if len(item) > 1 and item[1].endswith("w"):
+                            try:
+                                return int(item[1][:-1])
+                            except ValueError:
+                                return 0
+                        return 0
+                    sorted_srcs = sorted(parts, key=get_width, reverse=True)
+                    best_src = sorted_srcs[0][0]
+                    full_u = urljoin(url, best_src)
+                    if (
+                        full_u not in candidate_images
+                        and not any(ign in full_u.lower() for ign in ["logo", "icon", "badge"])
+                        and full_u.startswith("http")
+                    ):
+                        candidate_images.append(full_u)
+
+        # OpenGraph image fallback
+        og_img = soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            full_u = urljoin(url, og_img["content"])
+            if full_u not in candidate_images and full_u.startswith("http"):
+                candidate_images.append(full_u)
+
+        field_sources = {k: url for k in specs}
+        field_tiers = {k: tier for k in specs}
+
+        return ParserResult(
+            success=len(specs) >= 2 or len(candidate_images) > 0,
+            status_code=200,
+            url=url,
+            title=product_title,
+            description_text=desc_text,
+            specs=specs,
+            mrp=mrp,
+            image_urls=candidate_images,
+            field_sources=field_sources,
+            field_tiers=field_tiers,
+            tier=tier
+        )
 
 
-class GenericBrandParser(BaseBrandParser):
+import xml.etree.ElementTree as ET
+import requests
+from typing import Tuple
+
+
+class GenericBrandParser:
     """
-    Generic brand parser supporting WooCommerce, Magento, BigCommerce, and custom web stores.
-    Discovers products via XML Sitemaps and extracts specs and high-res images via JSON-LD + HTML.
+    Brand-level search helper for generic storefronts (WooCommerce, Magento, custom).
+    Discovers product URLs from XML Sitemaps.
     """
 
     def __init__(self, brand_domain: str, brand_name: str, config: Optional[dict] = None):
@@ -78,21 +257,22 @@ class GenericBrandParser(BaseBrandParser):
             f"https://{self.brand_domain}/product-sitemap.xml",
             f"https://{self.brand_domain}/sitemap-products.xml",
             f"https://{self.brand_domain}/sitemap.xml",
-            f"https://www.google.com/sitemap.xml",
         ]
 
         discovered = []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        }
         for sm_url in sitemap_candidates:
             try:
-                r = requests.get(sm_url, headers=DEFAULT_HEADERS, timeout=8)
+                r = requests.get(sm_url, headers=headers, timeout=8)
                 if r.status_code == 200 and ("<urlset" in r.text or "<sitemapindex" in r.text):
-                    # Parse XML
                     root = ET.fromstring(r.content)
                     # Check for sub-sitemaps
                     for sitemap_tag in root.findall("{*}sitemap"):
                         loc = sitemap_tag.find("{*}loc")
                         if loc is not None and loc.text and "product" in loc.text.lower():
-                            sub_r = requests.get(loc.text, headers=DEFAULT_HEADERS, timeout=8)
+                            sub_r = requests.get(loc.text, headers=headers, timeout=8)
                             if sub_r.status_code == 200:
                                 sub_root = ET.fromstring(sub_r.content)
                                 for u in sub_root.findall("{*}url"):
@@ -105,7 +285,7 @@ class GenericBrandParser(BaseBrandParser):
                         loc = u.find("{*}loc")
                         if loc is not None and loc.text:
                             url_text = loc.text.strip()
-                            if any(k in url_text.lower() for k in ["/product/", "/p/", "-power-bank", "-powerbank", "/item/"]):
+                            if any(k in url_text.lower() for k in ["/product/", "/p/", "-power-bank", "-powerbank", "/item/", "/evm-products/"]):
                                 discovered.append(url_text)
 
                     if discovered:
@@ -122,6 +302,7 @@ class GenericBrandParser(BaseBrandParser):
         Searches discovered sitemap URLs for target product model.
         Returns (url, matched_title, score).
         """
+        from src.utils.scraper import score_candidate_match
         urls = self._discover_sitemap_urls()
         if not urls:
             return None
@@ -130,7 +311,7 @@ class GenericBrandParser(BaseBrandParser):
         best_score = -1.0
 
         for url in urls:
-            slug = url.split("/")[-1].split("?")[0].replace("-", " ")
+            slug = url.split("/")[-1].split("?")[0].replace("-", " ").replace(".html", "")
             score, is_valid, reason = score_candidate_match(
                 model_name, slug, url, brand=self.brand_name, qualifier_tokens=qualifier_tokens
             )
@@ -140,141 +321,3 @@ class GenericBrandParser(BaseBrandParser):
 
         return best_match
 
-    def parse_product_page(self, url: str, target_model_name: str) -> ParserResult:
-        """
-        Parses a generic e-commerce product page via JSON-LD + HTML fallback.
-        Extracts specifications and maximum-resolution product images.
-        """
-        try:
-            r = requests.get(url, headers=DEFAULT_HEADERS, timeout=12)
-            if r.status_code != 200:
-                return ParserResult(success=False, raw_specs={}, error_message=f"HTTP {r.status_code}")
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            raw_specs = {}
-            candidate_images = []
-
-            # 1. Parse JSON-LD Product Schemas
-            for script in soup.find_all("script", type="application/ld+json"):
-                try:
-                    data = json.loads(script.string or "{}")
-                    items = data if isinstance(data, list) else [data]
-                    if isinstance(data, dict) and "@graph" in data:
-                        items.extend(data["@graph"])
-
-                    for item in items:
-                        if isinstance(item, dict) and item.get("@type") in ("Product", "IndividualProduct"):
-                            # Specs from JSON-LD
-                            desc = item.get("description") or ""
-                            specs_from_desc = parse_specs_from_text(desc)
-                            raw_specs.update(specs_from_desc)
-
-                            # Structured attributes
-                            for prop in item.get("additionalProperty", []):
-                                if isinstance(prop, dict):
-                                    name = str(prop.get("name", "")).lower()
-                                    val = str(prop.get("value", "")).strip()
-                                    if "capacity" in name and "capacity" not in raw_specs:
-                                        raw_specs["capacity"] = val
-                                    elif "output" in name and "output" not in raw_specs:
-                                        raw_specs["output"] = val
-                                    elif "port" in name and "ports" not in raw_specs:
-                                        raw_specs["ports"] = val
-                                    elif "weight" in name and "weight" not in raw_specs:
-                                        raw_specs["weight"] = val
-
-                            # High-res Images from JSON-LD
-                            img_field = item.get("image")
-                            if isinstance(img_field, list):
-                                for u in img_field:
-                                    if isinstance(u, str) and u.startswith("http"):
-                                        candidate_images.append(u)
-                                    elif isinstance(u, dict) and u.get("url"):
-                                        candidate_images.append(u["url"])
-                            elif isinstance(img_field, str) and img_field.startswith("http"):
-                                candidate_images.append(img_field)
-                            elif isinstance(img_field, dict) and img_field.get("url"):
-                                candidate_images.append(img_field["url"])
-                except Exception:
-                    continue
-
-            # 2. HTML Text / Spec Table Fallback
-            if len(raw_specs) < 3:
-                # Look for WooCommerce or standard specification tables
-                spec_tables = soup.find_all(["table", "dl", "div"], class_=re.compile(r"spec|attribute|tech|detail", re.I))
-                spec_text = ""
-                for st in spec_tables:
-                    spec_text += "\n" + clean_html_text(str(st))
-                if not spec_text:
-                    spec_text = clean_html_text(r.text)
-                
-                table_specs = parse_specs_from_text(spec_text)
-                for k, v in table_specs.items():
-                    if k not in raw_specs or not raw_specs[k]:
-                        raw_specs[k] = v
-
-            # 3. High-Resolution HTML Image Extraction
-            # Check for data-zoom-image, data-large-img, og:image, srcset
-            for img in soup.find_all("img"):
-                high_res_url = (
-                    img.get("data-zoom-image") or
-                    img.get("data-large-img") or
-                    img.get("data-high-res") or
-                    img.get("data-master") or
-                    img.get("data-src")
-                )
-                if high_res_url:
-                    full_u = urljoin(url, high_res_url)
-                    if full_u not in candidate_images and not any(ign in full_u.lower() for ign in ["logo", "icon", "badge"]):
-                        candidate_images.append(full_u)
-
-                # Parse srcset for largest resolution descriptor
-                srcset = img.get("srcset")
-                if srcset:
-                    parts = [p.strip().split() for p in srcset.split(",") if p.strip()]
-                    if parts:
-                        # Sort by descriptor width
-                        def get_width(item):
-                            if len(item) > 1 and item[1].endswith("w"):
-                                try:
-                                    return int(item[1][:-1])
-                                except ValueError:
-                                    return 0
-                            return 0
-                        sorted_srcs = sorted(parts, key=get_width, reverse=True)
-                        best_src = sorted_srcs[0][0]
-                        full_u = urljoin(url, best_src)
-                        if full_u not in candidate_images and not any(ign in full_u.lower() for ign in ["logo", "icon", "badge"]):
-                            candidate_images.append(full_u)
-
-            # og:image fallback
-            og_img = soup.find("meta", property="og:image")
-            if og_img and og_img.get("content"):
-                full_u = urljoin(url, og_img["content"])
-                if full_u not in candidate_images:
-                    candidate_images.append(full_u)
-
-            image_url = candidate_images[0] if candidate_images else None
-
-            # Apply brand default warranty if missing
-            default_warranty = self.config.get("default_warranty")
-            if "warranty" not in raw_specs and default_warranty:
-                raw_specs["warranty"] = default_warranty
-
-            field_sources = {k: url for k in raw_specs}
-            field_tiers = {k: 1 for k in raw_specs}
-
-            return ParserResult(
-                success=len(raw_specs) >= 2,
-                raw_specs=raw_specs,
-                field_sources=field_sources,
-                field_tiers=field_tiers,
-                image_url=image_url,
-                image_source="brand-product-page-generic" if image_url else None,
-                image_tier=1 if image_url else None,
-                all_images=candidate_images
-            )
-
-        except Exception as e:
-            logger.error(f"[Generic Parser] Failed parsing {url}: {e}")
-            return ParserResult(success=False, raw_specs={}, error_message=str(e))
