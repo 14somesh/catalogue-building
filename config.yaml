@@ -27,7 +27,8 @@ validation_rules:
   title_max_chars: 40
   subtitle_max_chars: 80
   bullet_max_chars: 58       # Measured wrap cliff to keep bullets <= 3 lines @ 12.5px font size
-  required_bullets: 4
+  min_bullets: 2
+  max_bullets: 4
 
 llm:
   providers:
@@ -45,13 +46,6 @@ search:
   provider: "gemini_grounding"   # Options: "gemini_grounding", "duckduckgo"
   max_results: 3
   timeout_secs: 15
-  official_domains:
-    stuffcool: "stuffcool.com"
-    anker: "anker.com"
-    ambrane: "ambraneindia.com"
-    portronics: "portronics.com"
-    urbrn: "urbnworld.com"
-    duracell: "duracell.in"
 
 company:
   name: "VIANET"

@@ -30,6 +30,7 @@ from src.jobs import (
     list_jobs,
     enqueue_job,
     BrandLockedError,
+    get_active_job_for_brand,
     set_main_event_loop,
     register_subscriber,
     unregister_subscriber,
@@ -405,8 +406,8 @@ class ConfirmBrandRequest(BaseModel):
     brand_name: Optional[str] = None
     brand_code: Optional[str] = None
     category: Optional[str] = "Powerbank"
-    domain: Optional[str] = ""
-    platform: Optional[str] = "shopify"
+    domain: Optional[str] = None
+    platform: Optional[str] = None
     column_mapping: Optional[Dict[str, str]] = None
     qualifier_tokens: Optional[List[Any]] = None
     dp_column_explanation: Optional[str] = None
@@ -427,6 +428,22 @@ def confirm_brand_onboarding(brand: str, body: ConfirmBrandRequest) -> Dict[str,
     if not body.rows:
         raise HTTPException(status_code=400, detail="At least one product row must be submitted to confirm.")
 
+    # Guard: Detect duplicate Display_Name across submitted rows
+    seen_dns = set()
+    dup_dns = set()
+    for r in body.rows:
+        dn = (r.display_name or r.model_name or "").strip().lower()
+        if dn:
+            if dn in seen_dns:
+                dup_dns.add(r.display_name or r.model_name)
+            else:
+                seen_dns.add(dn)
+    if dup_dns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Duplicate Display_Name detected: {', '.join(sorted(dup_dns))}. Each product must have a unique Display_Name."
+        )
+
     payload = {
         "brand_name": target_brand,
         "brand_code": body.brand_code,
@@ -442,7 +459,15 @@ def confirm_brand_onboarding(brand: str, body: ConfirmBrandRequest) -> Dict[str,
     try:
         job_id = enqueue_job(job_type="confirm", brand=target_brand, payload=payload)
     except BrandLockedError as err:
-        raise HTTPException(status_code=409, detail=str(err))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(err),
+                "brand": getattr(err, "brand", target_brand),
+                "active_job_id": getattr(err, "active_job_id", None),
+                "started_at": getattr(err, "started_at", None)
+            }
+        )
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err))
 
@@ -606,7 +631,35 @@ def start_brand_collection(
             "stream_url": f"/jobs/{job_id}/stream"
         }
     except BrandLockedError as err:
-        raise HTTPException(status_code=409, detail=str(err))
+        active_id = getattr(err, "active_job_id", None)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(err),
+                "brand": getattr(err, "brand", clean_brand),
+                "active_job_id": active_id,
+                "stream_url": f"/jobs/{active_id}/stream" if active_id else None,
+                "started_at": getattr(err, "started_at", None)
+            }
+        )
+
+
+@app.get("/brands/{brand}/active-job")
+def get_brand_active_job(brand: str) -> Dict[str, Any]:
+    """Returns any active (queued or running) job for the brand to enable stream reattachment."""
+    clean_brand = brand.strip()
+    active_job = get_active_job_for_brand(clean_brand)
+    if active_job:
+        return {
+            "active": True,
+            "job_id": active_job["id"],
+            "job_type": active_job.get("job_type"),
+            "status": active_job.get("status"),
+            "brand": active_job.get("brand"),
+            "created_at": active_job.get("created_at"),
+            "stream_url": f"/jobs/{active_job['id']}/stream"
+        }
+    return {"active": False, "job": None}
 
 
 class RetryBrandRequest(BaseModel):
@@ -1204,7 +1257,46 @@ def trigger_catalogue_build(body: Optional[BuildRequest] = None) -> Dict[str, An
             "stream_url": f"/jobs/{job_id}/stream"
         }
     except BrandLockedError as err:
-        raise HTTPException(status_code=409, detail=str(err))
+        active_id = getattr(err, "active_job_id", None)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": str(err),
+                "brand": getattr(err, "brand", brand_target or "combined"),
+                "active_job_id": active_id,
+                "stream_url": f"/jobs/{active_id}/stream" if active_id else None,
+                "started_at": getattr(err, "started_at", None)
+            }
+        )
+
+
+@app.get("/config")
+def get_catalogue_config() -> Dict[str, Any]:
+    """Returns current config.yaml settings including brand_order."""
+    config_path = "config.yaml"
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return {
+            "brand_order": cfg.get("brand_order", []),
+            "category": cfg.get("category", {}),
+            "validation_rules": cfg.get("validation_rules", {})
+        }
+    except Exception as e:
+        logger.error(f"Failed to read config.yaml: {e}")
+        return {"brand_order": [], "category": {}, "validation_rules": {}}
+
+
+@app.get("/categories")
+def list_categories() -> List[str]:
+    """Returns available product categories from config.yaml."""
+    try:
+        with open("config.yaml", "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        cat_name = cfg.get("category", {}).get("name", "Power Bank")
+        return [cat_name]
+    except Exception:
+        return ["Power Bank"]
 
 
 @app.get("/builds")
@@ -1341,23 +1433,23 @@ def get_brand_rows(brand: str) -> List[Dict[str, Any]]:
         failure_reason = derive_failure_reason(row_dict)
 
         results.append({
-            "Product_ID": row_dict.get("Product_ID"),
-            "Model_Name": row_dict.get("Model_Name"),
-            "Display_Name": prod.get("display_name"),
-            "Status": row_dict.get("Status", "Pending"),
-            "DP": dp_val,
-            "MRP": mrp_val,
-            "Source_URL": row_dict.get("Source_URL"),
-            "Image_Status": row_dict.get("Image_Status", "missing"),
-            "Flags": row_dict.get("Flags"),
-            "Failure_Reason": failure_reason,
-            "Attempts": row_dict.get("Attempts", 0),
-            "Category": row_dict.get("Category", "Powerbank"),
-            "Brochure_PDF": row_dict.get("Brochure_PDF"),
-            "Override_Title": row_dict.get("Override_Title"),
-            "Override_DP": row_dict.get("Override_DP"),
-            "Override_MRP": row_dict.get("Override_MRP"),
-            "Override_Image_Path": row_dict.get("Override_Image_Path")
+            "product_id": row_dict.get("Product_ID"),
+            "model_name": row_dict.get("Model_Name"),
+            "display_name": prod.get("display_name"),
+            "status": row_dict.get("Status", "Pending"),
+            "dp": dp_val,
+            "mrp": mrp_val,
+            "source_url": row_dict.get("Source_URL"),
+            "image_status": row_dict.get("Image_Status", "missing"),
+            "flags": row_dict.get("Flags"),
+            "failure_reason": failure_reason,
+            "attempts": row_dict.get("Attempts", 0),
+            "category": row_dict.get("Category", "Powerbank"),
+            "brochure_pdf": row_dict.get("Brochure_PDF"),
+            "override_title": row_dict.get("Override_Title"),
+            "override_dp": row_dict.get("Override_DP"),
+            "override_mrp": row_dict.get("Override_MRP"),
+            "override_image_path": row_dict.get("Override_Image_Path")
         })
 
     return results

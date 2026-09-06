@@ -20,7 +20,11 @@ SUPPORTED_JOB_TYPES = {"ingest", "confirm", "collect", "build", "retry", "rerun_
 
 class BrandLockedError(Exception):
     """Raised when an operation cannot be enqueued because a job for the brand is already active."""
-    pass
+    def __init__(self, message: str, brand: str = "", active_job_id: str = "", started_at: Optional[str] = None):
+        super().__init__(message)
+        self.brand = brand
+        self.active_job_id = active_job_id
+        self.started_at = started_at
 
 
 @contextmanager
@@ -259,12 +263,47 @@ def enqueue_job(
         conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         try:
-            if norm_brand:
+            if job_type == "build":
+                cur = conn.cursor()
+                if norm_brand:
+                    cur.execute(
+                        """
+                        SELECT id, status, created_at FROM jobs
+                        WHERE job_type = 'build' AND LOWER(brand) = LOWER(?) AND status IN ('queued', 'running')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (norm_brand,)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, status, created_at FROM jobs
+                        WHERE job_type = 'build' AND (brand IS NULL OR brand = '') AND status IN ('queued', 'running')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """
+                    )
+                conflict = cur.fetchone()
+                if conflict:
+                    conn.execute("ROLLBACK")
+                    created_time = conflict["created_at"]
+                    time_str = f"started {created_time[11:16]} UTC" if created_time and len(created_time) >= 16 else "in progress"
+                    target_str = f"for '{norm_brand}'" if norm_brand else "combined catalogue"
+                    clean_msg = f"A catalogue build {target_str} is already {conflict['status']} ({time_str})."
+                    raise BrandLockedError(
+                        clean_msg,
+                        brand=norm_brand or "combined",
+                        active_job_id=conflict["id"],
+                        started_at=created_time
+                    )
+            elif norm_brand:
                 cur = conn.cursor()
                 cur.execute(
                     """
-                    SELECT id, status FROM jobs
+                    SELECT id, status, created_at FROM jobs
                     WHERE LOWER(brand) = LOWER(?) AND status IN ('queued', 'running')
+                    ORDER BY created_at DESC
                     LIMIT 1
                     """,
                     (norm_brand,)
@@ -272,8 +311,14 @@ def enqueue_job(
                 conflict = cur.fetchone()
                 if conflict:
                     conn.execute("ROLLBACK")
+                    created_time = conflict["created_at"]
+                    time_str = f"started {created_time[11:16]} UTC" if created_time and len(created_time) >= 16 else "in progress"
+                    clean_msg = f"Collection for '{norm_brand}' is already running ({time_str})."
                     raise BrandLockedError(
-                        f"Brand '{norm_brand}' is locked by job '{conflict['id']}' (status: {conflict['status']})"
+                        clean_msg,
+                        brand=norm_brand,
+                        active_job_id=conflict["id"],
+                        started_at=created_time
                     )
 
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -505,17 +550,17 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                     )
                     tier_val = updated_row.get("Tier_Title") or updated_row.get("Tier_Spec_Capacity") or 1
                     retried_rows.append({
-                        "Product_ID": updated_row.get("Product_ID"),
-                        "Model_Name": updated_row.get("Model_Name"),
-                        "Display_Name": updated_row.get("Display_Name"),
-                        "Status": updated_row.get("Status"),
-                        "Source_URL": updated_row.get("Source_URL"),
-                        "Tier": tier_val,
-                        "Image_Status": updated_row.get("Image_Status", "missing"),
-                        "Attempts": updated_row.get("Attempts", 0),
-                        "Fix_Log": updated_row.get("Fix_Log"),
-                        "Flags": updated_row.get("Flags"),
-                        "Failure_Reason": derive_failure_reason(updated_row)
+                        "product_id": updated_row.get("Product_ID"),
+                        "model_name": updated_row.get("Model_Name"),
+                        "display_name": updated_row.get("Display_Name"),
+                        "status": updated_row.get("Status"),
+                        "source_url": updated_row.get("Source_URL"),
+                        "tier": tier_val,
+                        "image_status": updated_row.get("Image_Status", "missing"),
+                        "attempts": updated_row.get("Attempts", 0),
+                        "fix_log": updated_row.get("Fix_Log"),
+                        "flags": updated_row.get("Flags"),
+                        "failure_reason": derive_failure_reason(updated_row)
                     })
                 except Exception as row_err:
                     logger.error(f"Failed to retry product '{pid}': {row_err}")
@@ -635,6 +680,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
         elif job_type == "manual_source":
             from src.run_brand import re_run_product, derive_failure_reason
             from src.utils.excel_handler import load_catalogue_data, save_catalogue_data
+            from src.utils.scraper import resolve_any_url_to_product, load_brand_defaults
 
             payload = {}
             if "payload_json" in job.keys() and job["payload_json"]:
@@ -648,73 +694,112 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             if not pid or not source_url:
                 raise ValueError("Job type 'manual_source' requires 'product_id' and 'url'.")
 
-            progress_cb({
-                "stage": "manual_source_set",
-                "product_id": pid,
-                "current": 1,
-                "total": 1,
-                "message": f"Setting Product_URL for {pid} to: {source_url}"
-            })
-
             excel_path = "data/catalogue_data.xlsx"
             df = load_catalogue_data(excel_path)
             mask = df["Product_ID"].astype(str).str.lower() == pid.strip().lower()
             if not mask.any():
                 raise ValueError(f"Product_ID '{pid}' not found in {excel_path}")
-            df.loc[mask, "Product_URL"] = source_url
-            save_catalogue_data(df, excel_path)
+
+            model_name = str(df.loc[mask, "Model_Name"].iloc[0] or "").strip()
+            brand_cfg = load_brand_defaults(brand)
+            qualifiers = brand_cfg.get("qualifier_tokens", ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"])
 
             progress_cb({
-                "stage": "row_start",
+                "stage": "manual_source_eval",
                 "product_id": pid,
                 "current": 1,
                 "total": 1,
-                "message": f"Re-running product {pid} using provided manual URL"
+                "message": f"Classifying and resolving URL for '{model_name}': {source_url}"
             })
 
-            updated_row = re_run_product(
-                product_id=pid,
-                progress_callback=lambda evt: progress_cb({
-                    "stage": evt.get("stage", "row_progress"),
+            # Run Universal URL Resolver
+            resolved = resolve_any_url_to_product(source_url, model_name, brand=brand, qualifier_tokens=qualifiers)
+            learned_domain = resolved.get("domain")
+
+            if not resolved.get("success"):
+                diag_msg = resolved.get("message", f"Failed to resolve URL: {source_url}")
+                logger.warning(f"[{pid}] Manual source resolution failed: {diag_msg}")
+                # Update row flags with honest diagnostic
+                df.loc[mask, "Flags"] = f"Manual URL Resolution: {diag_msg}"
+                save_catalogue_data(df, excel_path)
+                result = {
+                    "product_id": pid,
+                    "brand": brand,
+                    "manual_url": source_url,
+                    "learned_domain": learned_domain,
+                    "success": False,
+                    "message": diag_msg,
+                    "updated_row": {
+                        "product_id": pid,
+                        "model_name": model_name,
+                        "status": "Skipped",
+                        "failure_reason": diag_msg
+                    }
+                }
+            else:
+                direct_url = resolved.get("direct_product_url") or source_url
+                df.loc[mask, "Product_URL"] = direct_url
+                save_catalogue_data(df, excel_path)
+
+                progress_cb({
+                    "stage": "row_start",
                     "product_id": pid,
                     "current": 1,
                     "total": 1,
-                    "message": evt.get("message", "")
+                    "message": f"Scraping product specs from: {direct_url}"
                 })
-            )
 
-            tier_val = updated_row.get("Tier_Title") or updated_row.get("Tier_Spec_Capacity") or 1
-            fail_reason = derive_failure_reason(updated_row)
-            is_success = updated_row.get("Status") in ("Ready_For_Review", "Approved")
+                updated_row = re_run_product(
+                    product_id=pid,
+                    progress_callback=lambda evt: progress_cb({
+                        "stage": evt.get("stage", "row_progress"),
+                        "product_id": pid,
+                        "current": 1,
+                        "total": 1,
+                        "message": evt.get("message", "")
+                    })
+                )
 
-            row_summary = {
-                "Product_ID": updated_row.get("Product_ID"),
-                "Model_Name": updated_row.get("Model_Name"),
-                "Display_Name": updated_row.get("Display_Name"),
-                "Status": updated_row.get("Status"),
-                "Source_URL": updated_row.get("Source_URL"),
-                "Product_URL": source_url,
-                "Tier": tier_val,
-                "Image_Status": updated_row.get("Image_Status", "missing"),
-                "Attempts": updated_row.get("Attempts", 0),
-                "Fix_Log": updated_row.get("Fix_Log"),
-                "Flags": updated_row.get("Flags"),
-                "Failure_Reason": fail_reason
-            }
+                tier_val = updated_row.get("Tier_Title") or updated_row.get("Tier_Spec_Capacity") or 1
+                fail_reason = derive_failure_reason(updated_row)
+                is_success = updated_row.get("Status") in ("Ready_For_Review", "Approved")
 
-            if is_success:
-                msg = f"Collection succeeded with manual URL: {source_url}"
-            else:
-                msg = f"Collection attempted with manual URL '{source_url}', but failed: {fail_reason or updated_row.get('Flags')}"
+                row_summary = {
+                    "product_id": updated_row.get("Product_ID"),
+                    "model_name": updated_row.get("Model_Name"),
+                    "display_name": updated_row.get("Display_Name"),
+                    "status": updated_row.get("Status"),
+                    "source_url": updated_row.get("Source_URL"),
+                    "product_url": direct_url,
+                    "tier": tier_val,
+                    "image_status": updated_row.get("Image_Status", "missing"),
+                    "attempts": updated_row.get("Attempts", 0),
+                    "fix_log": updated_row.get("Fix_Log"),
+                    "flags": updated_row.get("Flags"),
+                    "failure_reason": fail_reason
+                }
 
-            result = {
-                "product_id": pid,
-                "brand": brand,
-                "manual_url": source_url,
-                "success": is_success,
-                "message": msg,
-                "updated_row": row_summary
-            }
+                if is_success:
+                    img_st = updated_row.get("Image_Status", "ok")
+                    if img_st in ("missing", "needs-better-image"):
+                        msg = f"Specifications collected successfully from {direct_url}. Image status: {img_st} (upload image in Stage 4)."
+                    elif direct_url != source_url:
+                        msg = f"Matched to '{resolved.get('matched_title', direct_url)}' and collected specifications successfully."
+                    else:
+                        msg = f"Collected specifications and image successfully from: {direct_url}"
+                else:
+                    msg = f"Scraped '{direct_url}' but specifications incomplete: {fail_reason or updated_row.get('Flags')}"
+
+                result = {
+                    "product_id": pid,
+                    "brand": brand,
+                    "manual_url": source_url,
+                    "direct_product_url": direct_url,
+                    "learned_domain": learned_domain,
+                    "success": is_success,
+                    "message": msg,
+                    "updated_row": row_summary
+                }
 
         elif job_type == "build":
             import importlib
@@ -1108,4 +1193,24 @@ def stop_worker() -> None:
         _worker_event.set()
         _worker_thread.join(timeout=5.0)
         logger.info("Stopped background catalogue job worker.")
+
+
+def get_active_job_for_brand(brand: str, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
+    """Returns the active (queued or running) job record for a brand, if any."""
+    if not brand or not brand.strip():
+        return None
+    with get_db_connection(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM jobs
+            WHERE LOWER(brand) = LOWER(?) AND status IN ('queued', 'running')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (brand.strip(),)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     _worker_thread = None

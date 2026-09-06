@@ -25,7 +25,9 @@ export default defineConfig({
       '/images': 'http://127.0.0.1:8000',
       '/dist': 'http://127.0.0.1:8000',
       '/brochures': 'http://127.0.0.1:8000',
-      '/validate': 'http://127.0.0.1:8000'
+      '/validate': 'http://127.0.0.1:8000',
+      '/config': 'http://127.0.0.1:8000',
+      '/categories': 'http://127.0.0.1:8000'
     }
   }
 })

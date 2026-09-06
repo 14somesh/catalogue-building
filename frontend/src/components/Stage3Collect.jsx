@@ -54,6 +54,7 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
   const [isCancelling, setIsCancelling] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [techDetails, setTechDetails] = useState(null);
 
   // Manual URL modal
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -108,8 +109,8 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
             const rowsData = await rRes.json();
             setRunningRows(
               rowsData.map((r, idx) => ({
-                product_id: r.Product_ID || `row-${idx}`,
-                name: r.Display_Name || r.Model_Name,
+                product_id: r.product_id || `row-${idx}`,
+                name: r.display_name || r.model_name || r.title,
                 status: 'waiting',
                 source: '',
               }))
@@ -120,18 +121,56 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
           // fallback placeholder rows
         }
 
-        // Start collect job: POST /brands/{brand}/collect
+        // 1. Check if there is already an active job for this brand (e.g. page refresh or back navigation)
+        try {
+          const activeRes = await fetch(`/brands/${encodeURIComponent(brand)}/active-job`);
+          if (activeRes.ok) {
+            const activeData = await activeRes.json();
+            if (activeData.active && activeData.job_id) {
+              if (unmounted) return;
+              setJobId(activeData.job_id);
+              if (activeData.created_at) {
+                setStartTime(new Date(activeData.created_at).getTime());
+              }
+              connectStream(activeData.job_id);
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('Active job check error:', e);
+        }
+
+        // 2. Start collect job: POST /brands/{brand}/collect
         const colRes = await fetch(`/brands/${encodeURIComponent(brand)}/collect`, {
           method: 'POST',
         });
         const colData = await colRes.json();
 
         if (colRes.status === 409) {
-          throw new Error(colData.detail || `Brand '${brand}' is currently locked by an active job.`);
+          const detail = colData.detail;
+          const activeId = colData.active_job_id || (typeof detail === 'object' ? detail.active_job_id : null);
+          if (activeId) {
+            if (unmounted) return;
+            setJobId(activeId);
+            if (typeof detail === 'object' && detail.started_at) {
+              setStartTime(new Date(detail.started_at).getTime());
+            }
+            connectStream(activeId);
+            return;
+          }
+          const plainMsg = typeof detail === 'object' && detail.message
+            ? detail.message
+            : (typeof detail === 'string' ? detail : `Collection for '${brand}' is already running.`);
+          const tech = typeof detail === 'object' && detail.active_job_id ? `Job ID: ${detail.active_job_id}` : null;
+          setErrorMsg(plainMsg);
+          setTechDetails(tech);
+          return;
         }
 
         if (!colRes.ok) {
-          throw new Error(colData.detail || 'Failed to start collection run.');
+          const detail = colData.detail;
+          const plainMsg = typeof detail === 'string' ? detail : 'Failed to start collection run.';
+          throw new Error(plainMsg);
         }
 
         if (unmounted) return;
@@ -275,20 +314,20 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
         const failed = [];
 
         reviewRows.forEach((r) => {
-          const isSuccess = r.Status === 'Ready_For_Review' || r.Status === 'Approved';
+          const isSuccess = r.status === 'Ready_For_Review' || r.status === 'Approved';
           if (isSuccess) {
-            const isGoodImage = r.Image_Status === 'ready' || r.Image_Status === 'downloaded' || !r.Flags?.toLowerCase().includes('low');
+            const isGoodImage = r.image_status === 'ready' || r.image_status === 'downloaded' || !r.flags?.toLowerCase().includes('low');
             found.push({
-              product_id: r.Product_ID,
-              name: r.Display_Name || r.Model_Name,
-              source: formatSourceLabel(r.Source_URL),
+              product_id: r.product_id,
+              name: r.title || r.model_name,
+              source: formatSourceLabel(r.source_url),
               imageQuality: isGoodImage ? 'Good' : 'Low quality',
             });
           } else {
             failed.push({
-              product_id: r.Product_ID,
-              name: r.Display_Name || r.Model_Name,
-              reason: r.Failure_Reason || 'Not found across available sources',
+              product_id: r.product_id,
+              name: r.title || r.model_name,
+              reason: r.failure_reason || 'Not found across available sources',
             });
           }
         });
@@ -300,19 +339,19 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
         const found = [];
         const failed = [];
         result.rows.forEach((r) => {
-          const isSuccess = r.Status === 'Ready_For_Review' || r.Status === 'Approved';
+          const isSuccess = r.status === 'Ready_For_Review' || r.status === 'Approved';
           if (isSuccess) {
             found.push({
-              product_id: r.Product_ID,
-              name: r.Display_Name || r.Model_Name,
-              source: formatSourceLabel(r.Source_URL),
-              imageQuality: r.Image_Status !== 'low_res' ? 'Good' : 'Low quality',
+              product_id: r.product_id,
+              name: r.display_name || r.model_name || r.title,
+              source: formatSourceLabel(r.source_url),
+              imageQuality: r.image_status !== 'low_res' ? 'Good' : 'Low quality',
             });
           } else {
             failed.push({
-              product_id: r.Product_ID,
-              name: r.Display_Name || r.Model_Name,
-              reason: r.Failure_Reason || 'Not found',
+              product_id: r.product_id,
+              name: r.display_name || r.model_name || r.title,
+              reason: r.failure_reason || 'Not found',
             });
           }
         });
