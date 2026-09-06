@@ -1,6 +1,9 @@
 import os
 import re
 import sys
+import time
+import io
+import zipfile
 import pandas as pd
 from typing import Dict, Any, Optional, Union, List
 from src.utils.logger import setup_logger
@@ -133,6 +136,34 @@ def validate_write_guard(row: Union[pd.Series, Dict[str, Any]]) -> None:
                 )
 
 
+class MissingCatalogueSheetError(Exception):
+    """Raised when the expected catalogue worksheet (e.g. 'CatalogueData') is missing from the Excel file."""
+    pass
+
+
+def _verify_sheet_exists(file_or_bytes: Any, sheet_name: str, file_path_for_msg: str = "data/catalogue_data.xlsx") -> None:
+    """Verifies that sheet_name exists in the Excel workbook, raising MissingCatalogueSheetError if not."""
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(file_or_bytes, read_only=True)
+        sheet_names = wb.sheetnames
+        wb.close()
+        if sheet_name not in sheet_names:
+            raise MissingCatalogueSheetError(
+                f"\n"
+                f"================================================================================\n"
+                f"[ERROR] Required worksheet '{sheet_name}' is missing in '{file_path_for_msg}'!\n"
+                f"Available sheets: {sheet_names}.\n"
+                f"This happens if the file was overwritten by a raw df.to_excel() call bypassing\n"
+                f"save_catalogue_data(). Always use save_catalogue_data() to preserve the schema.\n"
+                f"================================================================================\n"
+            )
+    except MissingCatalogueSheetError:
+        raise
+    except Exception as e:
+        logger.warning(f"Could not pre-verify sheet names in '{file_path_for_msg}': {e}")
+
+
 def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name: str = "CatalogueData") -> pd.DataFrame:
     """
     Safely reads the catalogue data from Excel, checking for file locks and validating schema columns.
@@ -142,6 +173,8 @@ def load_catalogue_data(file_path: str = "data/catalogue_data.xlsx", sheet_name:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Catalogue data file not found at: {file_path}")
         
+    _verify_sheet_exists(file_path, sheet_name, file_path)
+
     logger.info(f"Loading catalogue data from {file_path} (sheet: {sheet_name})...")
     df = pd.read_excel(file_path, sheet_name=sheet_name)
     
@@ -173,6 +206,7 @@ def load_catalogue_data_readonly(
     """
     import io
     import time
+    import zipfile
 
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Catalogue data file not found at: {file_path}")
@@ -182,6 +216,9 @@ def load_catalogue_data_readonly(
         try:
             with open(file_path, "rb") as f:
                 content = f.read()
+
+            _verify_sheet_exists(io.BytesIO(content), sheet_name, file_path)
+
             df = pd.read_excel(io.BytesIO(content), sheet_name=sheet_name)
 
             missing_cols = [col for col in EXPECTED_COLUMNS if col not in df.columns]
@@ -195,7 +232,9 @@ def load_catalogue_data_readonly(
                     df[col] = df[col].astype("object")
 
             return df
-        except (PermissionError, IOError, OSError) as e:
+        except MissingCatalogueSheetError:
+            raise
+        except (PermissionError, IOError, OSError, zipfile.BadZipFile, Exception) as e:
             last_err = e
             time.sleep(retry_delay * (attempt + 1))
 
@@ -204,7 +243,8 @@ def load_catalogue_data_readonly(
 
 def save_catalogue_data(df: pd.DataFrame, file_path: str = "data/catalogue_data.xlsx", sheet_name: str = "CatalogueData") -> None:
     """
-    Safely writes DataFrame back to Excel with lock checking and Write Guard enforcement.
+    Safely writes DataFrame back to Excel with lock checking, Write Guard enforcement,
+    and atomic file replacement to prevent concurrent reads from seeing partial writes.
     """
     check_file_lock(file_path)
     
@@ -215,9 +255,19 @@ def save_catalogue_data(df: pd.DataFrame, file_path: str = "data/catalogue_data.
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     
     logger.info(f"Saving {len(df)} rows to {file_path}...")
-    with pd.ExcelWriter(file_path, engine="openpyxl", mode="w") as writer:
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
-    logger.info(f"Successfully saved catalogue data to {file_path}")
+    temp_path = f"{file_path}.tmp_{os.getpid()}_{int(time.time()*1000)}.xlsx"
+    try:
+        with pd.ExcelWriter(temp_path, engine="openpyxl", mode="w") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        os.replace(temp_path, file_path)
+        logger.info(f"Successfully saved catalogue data to {file_path}")
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+        raise
 
 
 def get_effective_value(row: Union[pd.Series, Dict[str, Any]], field: str) -> Any:

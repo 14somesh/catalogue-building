@@ -77,16 +77,7 @@ def attempt_auto_fix(
     brand = updated.get("Brand", "")
     model_name = updated.get("Model_Name", "")
 
-    # Auto-Fix 1: Missing Warranty -> Apply brand default from config
-    if any("spec fields empty" in f for f in hard_flags) or is_empty_value(updated.get("Raw_Spec_Warranty")):
-        default_warr = brand_defaults.get("default_warranty", "1 Year Manufacturer Warranty")
-        updated["Raw_Spec_Warranty"] = default_warr
-        updated["Source_Spec_Warranty"] = "brand-default-policy"
-        updated["Tier_Spec_Warranty"] = 1
-        log = f"Attempt {attempt_num}: Applied brand default warranty '{default_warr}'"
-        return updated, True, log
-
-    # Auto-Fix 2: Bullet over 60 chars -> Deterministic word-boundary truncation (cuts LLM calls)
+    # Auto-Fix 1: Bullet over 60 chars -> Deterministic word-boundary truncation (cuts LLM calls)
     if any("exceeds 60-character" in f for f in hard_flags):
         for b_idx in range(1, 5):
             b_val = str(updated.get(f"Raw_Bullet_{b_idx}") or "").strip()
@@ -96,20 +87,18 @@ def attempt_auto_fix(
         log = f"Attempt {attempt_num}: Truncated bullets to satisfy <=60 char limit"
         return updated, True, log
 
-    # Auto-Fix 3: Boilerplate bullets -> Redraft targeting clean specs only
-    if any("Boilerplate detected" in f for f in hard_flags):
-        specs = {
-            "capacity": str(updated.get("Raw_Spec_Capacity") or ""),
-            "output": str(updated.get("Raw_Spec_Output") or ""),
-            "ports": str(updated.get("Raw_Spec_Ports") or ""),
-            "weight": str(updated.get("Raw_Spec_Weight") or ""),
-            "warranty": str(updated.get("Raw_Spec_Warranty") or ""),
-        }
+    # Auto-Fix 2: Boilerplate or warranty bullets -> Discard invalid bullets without padding
+    if any("Boilerplate detected" in f or "Disallowed warranty claim" in f for f in hard_flags):
         for b_idx in range(1, 5):
             b_val = str(updated.get(f"Raw_Bullet_{b_idx}") or "").strip()
-            if is_boilerplate_bullet(b_val)[0]:
-                updated[f"Raw_Bullet_{b_idx}"] = f"Features {specs.get('capacity', 'fast charging')} power"
-        log = f"Attempt {attempt_num}: Replaced boilerplate bullets with clean spec text"
+            if b_val:
+                is_bp = is_boilerplate_bullet(b_val)[0]
+                is_warr = bool(re.search(r'\b(warrant|guarantee)\b', b_val, re.I))
+                if is_bp or is_warr:
+                    updated[f"Raw_Bullet_{b_idx}"] = None
+                    updated[f"Source_Bullet_{b_idx}"] = None
+                    updated[f"Tier_Bullet_{b_idx}"] = None
+        log = f"Attempt {attempt_num}: Dropped invalid/warranty bullets (retaining verified bullets)"
         return updated, True, log
 
     # Auto-Fix 4: Sibling / Capacity Mismatch -> Re-search via collection page

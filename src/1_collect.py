@@ -35,7 +35,6 @@ from src.parsers.base import ParserResult
 from src.utils.logger import setup_logger
 
 logger = setup_logger("collect")
-BLOCKED_BRAND_DOMAINS: Set[str] = set()
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -107,12 +106,12 @@ def find_product_on_brand_collection(
 
 def is_specs_insufficient(specs: Dict[str, str]) -> Tuple[bool, int, List[str]]:
     """
-    Checks if a spec dictionary has > 2 of 5 required specs empty.
-    Required specs: capacity, output, ports, weight, warranty.
+    Checks if a spec dictionary has fewer than 3 of 4 required specs populated.
+    Required specs: capacity, output, ports, weight.
     """
-    required_keys = ["capacity", "output", "ports", "weight", "warranty"]
+    required_keys = ["capacity", "output", "ports", "weight"]
     missing = [k for k in required_keys if not specs.get(k) or is_empty_value(specs.get(k))]
-    return (len(missing) > 2), len(missing), missing
+    return (len(missing) > 1), len(missing), missing
 
 
 def execute_vision_fallback_for_page(
@@ -230,7 +229,7 @@ def execute_spec_escalation(
     Merges data across tiers: Tier 0 outranks web tiers; later tiers only fill missing gaps.
     """
     qualifier_tokens = brand_cfg.get("qualifier_tokens", ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"])
-    brand_domain = brand_cfg.get("domain", f"{brand.lower()}.com")
+    brand_domain = brand_cfg.get("domain")
     cfg = config or {}
 
     combined_res: Optional[ParserResult] = None
@@ -295,12 +294,33 @@ def execute_spec_escalation(
             return combined_res, combined_provenance
         logger.info(f"[{product_id}] Tier 0 Brochure yielded partial specs ({missing_count}/5 empty: {missing_keys}). Escalating to Tier 1 to fill gaps...")
 
-    # Check if brand domain was previously blocked by bot challenge
-    if brand_domain in BLOCKED_BRAND_DOMAINS:
-        logger.warning(f"[{product_id}] Brand domain '{brand_domain}' is flagged as BLOCKED by bot challenge. Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
+    # Check if brand domain is configured; if not, run autonomous domain discovery
+    if not brand_domain:
+        from src.utils.scraper import discover_and_verify_brand_domain
+        disc = discover_and_verify_brand_domain(brand, [model_name])
+        if disc.get("verified") and disc.get("domain"):
+            brand_domain = disc["domain"]
+            brand_cfg["domain"] = disc["domain"]
+            brand_cfg["platform"] = disc.get("platform", "shopify")
+            if disc.get("collection_url"):
+                brand_cfg["collection_url"] = disc["collection_url"]
+
+    if not brand_domain:
+        logger.info(f"[{product_id}] No verified brand domain configured for '{brand}'. Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
+    elif brand_cfg.get("waf_blocked"):
+        logger.warning(f"[{product_id}] Brand domain '{brand_domain}' is flagged as WAF-blocked ({brand_cfg.get('waf_reason', 'Bot Challenge')}). Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
     else:
         # ==================== TIER 1: Brand Product Page (Shopify Direct / Generic JSON-LD & Sitemap) ====================
-        tier1_url = manual_url if manual_url and manual_url.startswith("http") else None
+        tier1_url = None
+        if manual_url and manual_url.startswith("http"):
+            from src.utils.scraper import resolve_any_url_to_product
+            resolved = resolve_any_url_to_product(manual_url, model_name, brand=brand, qualifier_tokens=qualifier_tokens)
+            if resolved.get("success") and resolved.get("direct_product_url"):
+                tier1_url = resolved["direct_product_url"]
+                logger.info(f"[{product_id}] Universal URL resolver matched '{manual_url}' -> {tier1_url}")
+            else:
+                logger.warning(f"[{product_id}] Universal URL resolver could not resolve '{manual_url}': {resolved.get('message')}")
+
         if not tier1_url:
             # 1a. Try Shopify direct index
             tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls)
@@ -317,18 +337,21 @@ def execute_spec_escalation(
                 except Exception as e:
                     logger.debug(f"[{product_id}] Generic parser search failed: {e}")
 
+        brand_platform = brand_cfg.get("platform")
         if tier1_url:
             logger.info(f"[{product_id}] Executing Tier 1 (Brand Product Page): {tier1_url}")
-            res = fetch_and_parse_url(tier1_url, tier=1)
+            res = fetch_and_parse_url(tier1_url, tier=1, platform=brand_platform)
             if res.is_blocked:
-                BLOCKED_BRAND_DOMAINS.add(brand_domain)
-                logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned HTTP 403 / Bot Challenge. Marking brand as BLOCKED and escalating to Tier 3 Retail.")
+                from src.utils.profiler import record_waf_block
+                record_waf_block(brand, domain=brand_domain, reason="HTTP 403 / Bot Challenge")
+                brand_cfg["waf_blocked"] = True
+                logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned HTTP 403 / Bot Challenge. Persisted WAF block and escalating to Tier 3 Retail.")
             elif res.success and res.specs:
                 combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-1: brand-page ({tier1_url})")
                 is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
                 if not is_thin:
                     return combined_res, combined_provenance
-                logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count}/5 empty: {missing_keys}). Checking Vision Fallback...")
+                logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count}/4 empty: {missing_keys}). Checking Vision Fallback...")
             
             # VISION FALLBACK Tier 1: Fires if HTML returned 200 but specs are missing / thin
             if res.status_code == 200:
@@ -338,7 +361,7 @@ def execute_spec_escalation(
                     is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
                     if not is_thin:
                         return combined_res, combined_provenance
-                    logger.warning(f"[{product_id}] Tier 1 Vision yielded partial specs ({missing_count}/5 empty). Escalating to Tier 2...")
+                    logger.warning(f"[{product_id}] Tier 1 Vision yielded partial specs ({missing_count}/4 empty). Escalating to Tier 2...")
                 else:
                     logger.warning(f"[{product_id}] Tier 1 Vision yielded no specs. Escalating to Tier 2...")
             elif not res.is_blocked:
@@ -349,20 +372,22 @@ def execute_spec_escalation(
 
         # ==================== TIER 2: Brand Collection Page ====================
         collection_url = brand_cfg.get("collection_url")
-        if collection_url and brand_domain not in BLOCKED_BRAND_DOMAINS:
+        if collection_url and not brand_cfg.get("waf_blocked"):
             logger.info(f"[{product_id}] Executing Tier 2 (Brand Collection Page): {collection_url}")
             tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls)
             if tier2_prod_url:
-                res = fetch_and_parse_url(tier2_prod_url, tier=2)
+                res = fetch_and_parse_url(tier2_prod_url, tier=2, platform=brand_platform)
                 if res.is_blocked:
-                    BLOCKED_BRAND_DOMAINS.add(brand_domain)
-                    logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned HTTP 403 / Bot Challenge. Marking brand as BLOCKED.")
+                    from src.utils.profiler import record_waf_block
+                    record_waf_block(brand, domain=brand_domain, reason="HTTP 403 / Bot Challenge")
+                    brand_cfg["waf_blocked"] = True
+                    logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned HTTP 403 / Bot Challenge. Persisted WAF block.")
                 elif res.success and res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-2: brand-collection ({tier2_prod_url})")
                     is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
                     if not is_thin:
                         return combined_res, combined_provenance
-                    logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count}/5 empty). Checking Vision Fallback...")
+                    logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count}/4 empty). Checking Vision Fallback...")
                 
                 # VISION FALLBACK Tier 2
                 if res.status_code == 200:
@@ -446,11 +471,12 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         }, False, f"[{product_id}] SKIPPED: All tiers exhausted"
 
     # Call LLM ONLY to draft bullets and subtitle from verified product text
+    clean_specs = {k: v for k, v in parser_res.specs.items() if k in ("capacity", "output", "ports", "weight") and v}
     llm_copy, provider_used = draft_bullets_and_subtitle(
         brand=brand,
         model_name=model_name,
         product_description_block=parser_res.description_text or "",
-        specs=parser_res.specs,
+        specs=clean_specs,
         llm_config=config.get("llm", {})
     )
 
@@ -475,9 +501,9 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
             "Raw_Spec_Weight": specs.get("weight"),
             "Source_Spec_Weight": parser_res.field_sources.get("weight") or (source_url if specs.get("weight") else None),
             "Tier_Spec_Weight": parser_res.field_tiers.get("weight", tier) if specs.get("weight") else None,
-            "Raw_Spec_Warranty": specs.get("warranty") or brand_defaults.get("default_warranty"),
-            "Source_Spec_Warranty": parser_res.field_sources.get("warranty") or (source_url if specs.get("warranty") else ("brand-default-policy" if brand_defaults.get("default_warranty") else None)),
-            "Tier_Spec_Warranty": parser_res.field_tiers.get("warranty", tier),
+            "Raw_Spec_Warranty": None,
+            "Source_Spec_Warranty": None,
+            "Tier_Spec_Warranty": None,
             "Status": "Deferred",
             "LLM_Provider": None,
             "Flags": "Deferred: LLM copy drafting failed due to infrastructure error",
@@ -487,12 +513,14 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
             updates["Image_URL"] = parser_res.image_urls[0]
         return updates, False, f"[{product_id}] DEFERRED: Specs collected via {provenance}, LLM drafting failed"
 
-    # Boilerplate detector check on drafted bullets
+    # Boilerplate detector check on drafted bullets - drop instead of inventing/padding
     for b_key in ["bullet_1", "bullet_2", "bullet_3", "bullet_4"]:
-        is_bp, bp_phrase = is_boilerplate_bullet(llm_copy.get(b_key, ""))
-        if is_bp:
-            logger.warning(f"[{product_id}] Boilerplate detected in {b_key} ('{bp_phrase}'). Regenerating...")
-            llm_copy[b_key] = f"Equipped with {parser_res.specs.get('capacity', 'fast-charging')} power"
+        b_val = llm_copy.get(b_key)
+        if b_val:
+            is_bp, bp_phrase = is_boilerplate_bullet(str(b_val))
+            if is_bp:
+                logger.warning(f"[{product_id}] Boilerplate detected in {b_key} ('{bp_phrase}'). Dropping...")
+                llm_copy[b_key] = None
 
     source_url = parser_res.url
     tier = parser_res.tier
@@ -528,21 +556,21 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         "Raw_Spec_Weight": specs.get("weight"),
         "Source_Spec_Weight": parser_res.field_sources.get("weight") or (source_url if specs.get("weight") else None),
         "Tier_Spec_Weight": parser_res.field_tiers.get("weight", tier) if specs.get("weight") else None,
-        "Raw_Spec_Warranty": specs.get("warranty") or brand_defaults.get("default_warranty"),
-        "Source_Spec_Warranty": parser_res.field_sources.get("warranty") or (source_url if specs.get("warranty") else ("brand-default-policy" if brand_defaults.get("default_warranty") else None)),
-        "Tier_Spec_Warranty": parser_res.field_tiers.get("warranty", tier),
+        "Raw_Spec_Warranty": None,
+        "Source_Spec_Warranty": None,
+        "Tier_Spec_Warranty": None,
         "Raw_Bullet_1": llm_copy.get("bullet_1"),
-        "Source_Bullet_1": source_url,
-        "Tier_Bullet_1": tier,
+        "Source_Bullet_1": source_url if llm_copy.get("bullet_1") else None,
+        "Tier_Bullet_1": tier if llm_copy.get("bullet_1") else None,
         "Raw_Bullet_2": llm_copy.get("bullet_2"),
-        "Source_Bullet_2": source_url,
-        "Tier_Bullet_2": tier,
-        "Raw_Bullet_3": llm_copy.get("bullet_3"),
-        "Source_Bullet_3": source_url,
-        "Tier_Bullet_3": tier,
-        "Raw_Bullet_4": llm_copy.get("bullet_4"),
-        "Source_Bullet_4": source_url,
-        "Tier_Bullet_4": tier,
+        "Source_Bullet_2": source_url if llm_copy.get("bullet_2") else None,
+        "Tier_Bullet_2": tier if llm_copy.get("bullet_2") else None,
+        "Raw_Bullet_3": llm_copy.get("bullet_3") or None,
+        "Source_Bullet_3": source_url if llm_copy.get("bullet_3") else None,
+        "Tier_Bullet_3": tier if llm_copy.get("bullet_3") else None,
+        "Raw_Bullet_4": llm_copy.get("bullet_4") or None,
+        "Source_Bullet_4": source_url if llm_copy.get("bullet_4") else None,
+        "Tier_Bullet_4": tier if llm_copy.get("bullet_4") else None,
         "LLM_Provider": provider_used,
         "Flags": None,
         "Fix_Log": f"Collected via {provenance}"

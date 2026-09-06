@@ -66,8 +66,8 @@ class ProductCopySchema(BaseModel):
     subtitle: str = Field(description="Engaging subtitle or key capability statement (max 80 characters)")
     bullet_1: str = Field(description="Sales bullet point 1 (MUST be <= 60 characters)")
     bullet_2: str = Field(description="Sales bullet point 2 (MUST be <= 60 characters)")
-    bullet_3: str = Field(description="Sales bullet point 3 (MUST be <= 60 characters)")
-    bullet_4: str = Field(description="Sales bullet point 4 (MUST be <= 60 characters)")
+    bullet_3: Optional[str] = Field(default=None, description="Sales bullet point 3 (optional, <= 60 characters, or null if unsupported)")
+    bullet_4: Optional[str] = Field(default=None, description="Sales bullet point 4 (optional, <= 60 characters, or null if unsupported)")
 
 
 class SemanticAuditSchema(BaseModel):
@@ -91,7 +91,6 @@ class VisionExtractedSpecsSchema(BaseModel):
     output: Optional[str] = Field(default=None, description="Max power output e.g. '22.5W Fast Charging' or '15W Wireless'")
     ports: Optional[str] = Field(default=None, description="Input/output port configuration e.g. 'Type-C, USB-A'")
     weight: Optional[str] = Field(default=None, description="Weight of the product e.g. '195g' or '220g'")
-    warranty: Optional[str] = Field(default=None, description="Warranty term e.g. '6 Months' or '1 Year'")
 
 
 class ImageQualityAuditSchema(BaseModel):
@@ -258,26 +257,31 @@ BANNED_ADJECTIVES = [
 
 SHARED_SYSTEM_PROMPT = (
     "You are an expert technical product copywriter for a corporate gifting catalogue.\n"
-    "Your single task is to write 4 concise sales bullet points and an engaging subtitle "
+    "Your single task is to write between 2 and 4 concise sales bullet points and an engaging subtitle "
     "based strictly on the provided verified product specifications and description.\n\n"
     "STRICT COPYWRITING CONSTRAINTS:\n"
-    "1. LEAD WITH A NUMBER OR SPEC: When a spec or number exists in the source text (e.g. 10000mAh, 20W PD, 185g, 3 ports), "
+    "1. VARIABLE BULLETS (MIN 2, MAX 4): Write only bullets supported by the source text, between 2 and 4 bullets total. "
+    "bullet_1 and bullet_2 are REQUIRED. bullet_3 and bullet_4 are OPTIONAL (leave null if no further factual features exist). "
+    "NEVER invent or pad a bullet to reach a count. 2 real bullets beat four where two are invented.\n"
+    "2. STRICTLY NO WARRANTY OR GUARANTEE: Never write warranty, guarantee, replacement policy, or repair claims into any bullet or subtitle. "
+    "Warranty terms must NEVER appear in catalogue copy.\n"
+    "3. LEAD WITH A NUMBER OR SPEC: When a spec or number exists in the source text (e.g. 10000mAh, 20W PD, 185g, 3 ports), "
     "lead the bullet point directly with that number or specification.\n"
-    "2. NO MARKETING ADJECTIVES: Never use subjective marketing adjectives (premium, amazing, ultimate, perfect, "
+    "4. NO MARKETING ADJECTIVES: Never use subjective marketing adjectives (premium, amazing, ultimate, perfect, "
     "revolutionary, cutting-edge, seamless, incredible, exceptional, best, unbeatable, stunning).\n"
-    "3. NEVER REPEAT BRAND NAME: Never include or repeat the brand name inside any bullet point or subtitle.\n"
-    "4. CASING & PUNCTUATION: Write in clean sentence case. Every bullet point and subtitle MUST end with a terminal period ('.').\n"
-    "5. EXACT LENGTH CONSTRAINT: Every bullet point MUST be between 40 and 60 characters total.\n"
-    "6. SUBTITLE LIMIT: Subtitle must be at most 80 characters and end with a terminal period.\n"
-    "7. ZERO HALLUCINATION: Only make claims directly verified by the provided text. Never invent specs or features.\n"
-    "8. OUTPUT FORMAT: Return valid JSON strictly matching this schema:\n"
+    "5. NEVER REPEAT BRAND NAME: Never include or repeat the brand name inside any bullet point or subtitle.\n"
+    "6. CASING & PUNCTUATION: Write in clean sentence case. Every bullet point and subtitle MUST end with a terminal period ('.').\n"
+    "7. EXACT LENGTH CONSTRAINT: Every bullet point MUST be between 40 and 60 characters total.\n"
+    "8. SUBTITLE LIMIT: Subtitle must be at most 80 characters and end with a terminal period.\n"
+    "9. ZERO HALLUCINATION: Only make claims directly verified by the provided text. Never invent specs or features.\n"
+    "10. OUTPUT FORMAT: Return valid JSON strictly matching this schema:\n"
     "{\n"
     '  "title": "Clean model title <= 40 chars",\n'
     '  "subtitle": "Informative capability subtitle <= 80 chars ending with a period.",\n'
     '  "bullet_1": "Leading spec bullet point <= 60 chars.",\n'
     '  "bullet_2": "Leading spec bullet point <= 60 chars.",\n'
-    '  "bullet_3": "Leading spec bullet point <= 60 chars.",\n'
-    '  "bullet_4": "Leading spec bullet point <= 60 chars."\n'
+    '  "bullet_3": "Optional 3rd bullet <= 60 chars or null.",\n'
+    '  "bullet_4": "Optional 4th bullet <= 60 chars or null."\n'
     "}"
 )
 
@@ -382,13 +386,27 @@ def post_process_copy_payload(raw_copy: Dict[str, Any], brand: str) -> Tuple[Dic
     if not sub_valid:
         all_valid = False
 
-    # 3. Clean Bullets 1 to 4 (max 60 chars)
-    for b_key in ["bullet_1", "bullet_2", "bullet_3", "bullet_4"]:
-        b_raw = str(raw_copy.get(b_key, "")).strip()
-        b_clean, b_valid = clean_and_normalize_text(b_raw, brand, max_chars=60, min_chars=20)
+    # 3. Clean Bullets (Floor is 2, Max is 4; bullet_3 and bullet_4 are optional)
+    for b_key in ["bullet_1", "bullet_2"]:
+        b_raw = str(raw_copy.get(b_key, "") or "").strip()
+        b_clean, b_valid = clean_and_normalize_text(b_raw, brand, max_chars=60, min_chars=15)
+        if b_clean and re.search(r'\b(warrant|guarantee)\b', b_clean, re.I):
+            b_clean = ""
+            b_valid = False
         processed[b_key] = b_clean
         if not b_valid:
             all_valid = False
+
+    for b_key in ["bullet_3", "bullet_4"]:
+        b_raw = str(raw_copy.get(b_key, "") or "").strip()
+        if b_raw and b_raw.lower() not in ("none", "null", ""):
+            b_clean, b_valid = clean_and_normalize_text(b_raw, brand, max_chars=60, min_chars=15)
+            if b_clean and not re.search(r'\b(warrant|guarantee)\b', b_clean, re.I) and b_valid:
+                processed[b_key] = b_clean
+            else:
+                processed[b_key] = None
+        else:
+            processed[b_key] = None
 
     return processed, all_valid
 
@@ -402,7 +420,7 @@ def _build_copy_prompts(brand: str, model_name: str, product_description_block: 
         f"--- VERIFIED PRODUCT DESCRIPTION BLOCK ---\n"
         f"{product_description_block[:1500]}\n"
         f"------------------------------------------\n\n"
-        "Draft the title, subtitle, and 4 sales bullets according to the strict copywriting constraints in JSON format."
+        "Draft the title, subtitle, and 2 to 4 sales bullets (minimum 2 supported by text, strictly NO warranty) according to the strict copywriting constraints in JSON format."
     )
     return SHARED_SYSTEM_PROMPT, user_prompt
 
