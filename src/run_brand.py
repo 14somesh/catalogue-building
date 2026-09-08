@@ -244,6 +244,7 @@ def resolve_brand_url_collisions(
     brand_name: str,
     config: dict,
     brand_defaults: dict,
+    category: Optional[str] = None,
     enable_semantic_audit: bool = False
 ) -> pd.DataFrame:
     """
@@ -252,13 +253,15 @@ def resolve_brand_url_collisions(
     1. Score both rows against the Source_URL using score_candidate_match.
     2. Keep the higher-scoring row (closer match).
     3. Clear the lower-scoring row and re-collect it with exclude_urls = {colliding_url}.
-    4. Repeat until no duplicate Source_URLs exist within the brand.
+    4. Repeat until no duplicate Source_URLs exist within the brand (and category).
     """
     from src.utils.scraper import score_candidate_match
     import importlib
     collect_mod = importlib.import_module("src.1_collect")
 
     brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
+    if category and str(category).strip():
+        brand_mask = brand_mask & (df["Category"].astype(str).str.strip().str.lower() == str(category).strip().lower())
     
     max_passes = 5
     for pass_num in range(max_passes):
@@ -344,6 +347,7 @@ def execute_automatic_llm_post_run_review(
     brand_name: str,
     config: dict,
     brand_defaults: dict,
+    category: Optional[str] = None,
     max_review_reruns: int = 2
 ) -> pd.DataFrame:
     """
@@ -366,6 +370,8 @@ def execute_automatic_llm_post_run_review(
     from src.utils.llm_client import audit_row_post_run
     
     brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
+    if category and str(category).strip():
+        brand_mask = brand_mask & (df["Category"].astype(str).str.strip().str.lower() == str(category).strip().lower())
     brand_indices = df[brand_mask].index
 
     logger.info(f"[Step 5.5] Starting Automatic Post-Run LLM Review for brand '{brand_name}' ({len(brand_indices)} rows)...")
@@ -568,6 +574,7 @@ def derive_failure_reason(row: Dict[str, Any]) -> Optional[str]:
 
 def run_brand(
     brand_name: str,
+    category: Optional[str] = None,
     config_path: str = "config.yaml",
     enable_semantic_audit: bool = False,
     return_summary: bool = False,
@@ -585,9 +592,11 @@ def run_brand(
 
     df = load_catalogue_data(excel_path)
     brand_mask = df["Brand"].astype(str).str.strip().str.lower() == brand_name.strip().lower()
+    if category and str(category).strip():
+        brand_mask = brand_mask & (df["Category"].astype(str).str.strip().str.lower() == str(category).strip().lower())
     
     if not brand_mask.any():
-        logger.error(f"No products found for brand '{brand_name}' in {excel_path}")
+        logger.error(f"No products found for brand '{brand_name}' (category='{category}') in {excel_path}")
         raise ValueError(f"Brand '{brand_name}' not found in catalogue data.")
 
     # ==================== PRE-FLIGHT DUPLICATE DETECTION ====================
@@ -685,6 +694,8 @@ def run_brand(
                 progress_callback({
                     "stage": "row_done",
                     "product_id": pid,
+                    "status": processed_row.get("Status"),
+                    "source": processed_row.get("Source_URL") or processed_row.get("Product_URL"),
                     "current": i,
                     "total": total_brand_rows,
                     "message": f"Finished product {i}/{total_brand_rows}: {pid} -> {processed_row.get('Status')}"
@@ -769,7 +780,7 @@ def run_brand(
             "total": total_brand_rows,
             "message": "Resolving URL collisions within brand"
         })
-    df = resolve_brand_url_collisions(df, brand_name, config, brand_defaults, enable_semantic_audit=enable_semantic_audit)
+    df = resolve_brand_url_collisions(df, brand_name, config, brand_defaults, category=category, enable_semantic_audit=enable_semantic_audit)
 
     # ==================== STEP 5.5: AUTOMATIC POST-RUN LLM REVIEW ====================
     if progress_callback:
@@ -780,7 +791,7 @@ def run_brand(
             "total": total_brand_rows,
             "message": "Executing automatic post-run LLM review"
         })
-    df = execute_automatic_llm_post_run_review(df, brand_name, config, brand_defaults)
+    df = execute_automatic_llm_post_run_review(df, brand_name, config, brand_defaults, category=category)
 
     save_catalogue_data(df, excel_path)
     

@@ -225,6 +225,11 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
         except sqlite3.OperationalError:
             pass
 
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN category TEXT;")
+        except sqlite3.OperationalError:
+            pass
+
         # Startup crash recovery: mark stale running jobs as failed
         now_iso = datetime.now(timezone.utc).isoformat()
         cur = conn.cursor()
@@ -246,18 +251,21 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
 def enqueue_job(
     job_type: str,
     brand: Optional[str] = None,
+    category: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
     db_path: str = DEFAULT_DB_PATH
 ) -> str:
     """
-    Enqueues a job in the SQLite store with Brand Lock enforcement.
-    Rejects the job if another job is already queued or running for the same brand.
+    Enqueues a job in the SQLite store with Brand+Category Lock enforcement.
+    Rejects the job if another job is already queued or running for the same (brand, category).
     """
     if job_type not in SUPPORTED_JOB_TYPES:
         types_str = ", ".join(sorted(SUPPORTED_JOB_TYPES))
         raise ValueError(f"Unsupported job_type: '{job_type}'. Allowed types: {types_str}")
 
     norm_brand = brand.strip() if brand and brand.strip() else None
+    norm_category = (category or (payload.get("category") if isinstance(payload, dict) else None) or "").strip()
+    norm_category = norm_category if norm_category else None
 
     with get_db_connection(db_path) as conn:
         conn.isolation_level = None
@@ -265,7 +273,17 @@ def enqueue_job(
         try:
             if job_type == "build":
                 cur = conn.cursor()
-                if norm_brand:
+                if norm_brand and norm_category:
+                    cur.execute(
+                        """
+                        SELECT id, status, created_at FROM jobs
+                        WHERE job_type = 'build' AND LOWER(brand) = LOWER(?) AND (category IS NULL OR LOWER(category) = LOWER(?)) AND status IN ('queued', 'running')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (norm_brand, norm_category)
+                    )
+                elif norm_brand:
                     cur.execute(
                         """
                         SELECT id, status, created_at FROM jobs
@@ -289,7 +307,8 @@ def enqueue_job(
                     conn.execute("ROLLBACK")
                     created_time = conflict["created_at"]
                     time_str = f"started {created_time[11:16]} UTC" if created_time and len(created_time) >= 16 else "in progress"
-                    target_str = f"for '{norm_brand}'" if norm_brand else "combined catalogue"
+                    cat_str = f" ({norm_category})" if norm_category else ""
+                    target_str = f"for '{norm_brand}'{cat_str}" if norm_brand else "combined catalogue"
                     clean_msg = f"A catalogue build {target_str} is already {conflict['status']} ({time_str})."
                     raise BrandLockedError(
                         clean_msg,
@@ -299,21 +318,33 @@ def enqueue_job(
                     )
             elif norm_brand:
                 cur = conn.cursor()
-                cur.execute(
-                    """
-                    SELECT id, status, created_at FROM jobs
-                    WHERE LOWER(brand) = LOWER(?) AND status IN ('queued', 'running')
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                    """,
-                    (norm_brand,)
-                )
+                if norm_category:
+                    cur.execute(
+                        """
+                        SELECT id, status, created_at FROM jobs
+                        WHERE LOWER(brand) = LOWER(?) AND LOWER(COALESCE(category, '')) = LOWER(?) AND status IN ('queued', 'running')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (norm_brand, norm_category)
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, status, created_at FROM jobs
+                        WHERE LOWER(brand) = LOWER(?) AND status IN ('queued', 'running')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (norm_brand,)
+                    )
                 conflict = cur.fetchone()
                 if conflict:
                     conn.execute("ROLLBACK")
                     created_time = conflict["created_at"]
                     time_str = f"started {created_time[11:16]} UTC" if created_time and len(created_time) >= 16 else "in progress"
-                    clean_msg = f"Collection for '{norm_brand}' is already running ({time_str})."
+                    cat_str = f" [{norm_category}]" if norm_category else ""
+                    clean_msg = f"Collection for '{norm_brand}'{cat_str} is already running ({time_str})."
                     raise BrandLockedError(
                         clean_msg,
                         brand=norm_brand,
@@ -329,13 +360,13 @@ def enqueue_job(
 
             conn.execute(
                 """
-                INSERT INTO jobs (id, job_type, brand, status, progress_current, progress_total, message, payload_json, created_at)
-                VALUES (?, ?, ?, 'queued', 0, 0, '', ?, ?)
+                INSERT INTO jobs (id, job_type, brand, category, status, progress_current, progress_total, message, payload_json, created_at)
+                VALUES (?, ?, ?, ?, 'queued', 0, 0, '', ?, ?)
                 """,
-                (job_id, job_type, norm_brand, payload_str, now_iso)
+                (job_id, job_type, norm_brand, norm_category, payload_str, now_iso)
             )
             conn.execute("COMMIT")
-            logger.info(f"Enqueued job '{job_id}' (type={job_type}, brand={norm_brand})")
+            logger.info(f"Enqueued job '{job_id}' (type={job_type}, brand={norm_brand}, category={norm_category})")
         except Exception:
             try:
                 conn.execute("ROLLBACK")
@@ -431,6 +462,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
     job_id = job["id"]
     job_type = job["job_type"]
     brand = job["brand"]
+    job_category = job["category"] if "category" in job.keys() else None
 
     def progress_cb(event: Dict[str, Any]) -> None:
         try:
@@ -453,8 +485,18 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             if not brand:
                 raise ValueError("Job type 'collect' requires a brand name.")
 
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                try:
+                    payload = json.loads(job["payload_json"])
+                except Exception:
+                    pass
+
+            category = payload.get("category")
+
             result = run_brand(
                 brand_name=brand,
+                category=category,
                 return_summary=True,
                 progress_callback=progress_cb,
                 check_cancellation=lambda: is_job_cancellation_requested(job_id)
@@ -506,9 +548,12 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 except Exception:
                     pass
 
+            category = payload.get("category")
             specified_pids = payload.get("product_ids") or []
             df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
             brand_mask = df["Brand"].astype(str).str.lower() == brand.lower()
+            if category and str(category).strip():
+                brand_mask = brand_mask & (df["Category"].astype(str).str.strip().str.lower() == str(category).strip().lower())
 
             if specified_pids:
                 spec_set = set(str(p).strip().lower() for p in specified_pids)
@@ -522,7 +567,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             cancelled_early = False
             start_time = time.time()
 
-            logger.info(f"Job '{job_id}' retrying {total} failed rows for brand '{brand}': {target_pids}")
+            logger.info(f"Job '{job_id}' retrying {total} failed rows for brand '{brand}' (category='{category}'): {target_pids}")
 
             for idx, pid in enumerate(target_pids, 1):
                 if is_job_cancellation_requested(job_id):
@@ -537,6 +582,7 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                     "message": f"Retrying product {idx}/{total}: {pid}"
                 })
 
+                updated_row = None
                 try:
                     updated_row = re_run_product(
                         product_id=pid,
@@ -568,6 +614,8 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 progress_cb({
                     "stage": "row_done",
                     "product_id": pid,
+                    "status": updated_row.get("Status") if updated_row else "failed",
+                    "source": (updated_row.get("Source_URL") or updated_row.get("Product_URL")) if updated_row else None,
                     "current": idx,
                     "total": total,
                     "message": f"Completed retry {idx}/{total}: {pid}"
@@ -806,9 +854,18 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             import pypdfium2 as pdfium
             from src.utils.excel_handler import load_catalogue_data_readonly
 
+            payload = {}
+            if "payload_json" in job.keys() and job["payload_json"]:
+                try:
+                    payload = json.loads(job["payload_json"])
+                except Exception:
+                    pass
+
+            target_category = payload.get("category") or job_category
             build_mod = importlib.import_module("src.4_build")
             out_pdf = build_mod.build_catalogue(
                 brand=brand,
+                category=target_category,
                 progress_callback=progress_cb
             )
             clean_pdf_path = out_pdf.replace("\\", "/")
@@ -825,15 +882,14 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                     logger.warning(f"Failed to read page count for {out_pdf}: {err}")
 
             df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
-            approved_mask = df["Status"] == "Approved"
+            target_mask = df["Status"] == "Approved"
             if brand:
-                brand_mask = df["Brand"].astype(str).str.lower() == brand.lower()
-                target_df = df[approved_mask & brand_mask]
-                brand_count = 1 if not target_df.empty else 0
-            else:
-                target_df = df[approved_mask]
-                brand_count = int(target_df["Brand"].nunique())
+                target_mask = target_mask & (df["Brand"].astype(str).str.lower() == brand.lower())
+            if target_category and str(target_category).strip():
+                target_mask = target_mask & (df["Category"].astype(str).str.strip().str.lower() == str(target_category).strip().lower())
 
+            target_df = df[target_mask]
+            brand_count = 1 if (brand and not target_df.empty) else int(target_df["Brand"].nunique())
             product_count = len(target_df)
 
             result = {
@@ -843,7 +899,8 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 "product_count": product_count,
                 "brand_count": brand_count,
                 "file_size": file_size,
-                "brand": brand
+                "brand": brand,
+                "category": target_category
             }
 
         elif job_type == "ingest":
@@ -1005,8 +1062,8 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 products=products
             )
 
-            progress_cb({"stage": "register_config", "message": f"Updating brand_defaults.yaml for '{brand_name}'..."})
-            register_brand_config(inference)
+            progress_cb({"stage": "register_config", "message": f"Updating brand_defaults.yaml for '{brand_name}' [{category_name}]..."})
+            register_brand_config(inference, category=category_name)
 
             progress_cb({"stage": "append_excel", "message": f"Writing {len(products)} rows to catalogue_data.xlsx..."})
             count, created_rows = append_products_to_catalogue(inference, category=category_name)
@@ -1195,21 +1252,38 @@ def stop_worker() -> None:
         logger.info("Stopped background catalogue job worker.")
 
 
-def get_active_job_for_brand(brand: str, db_path: str = DEFAULT_DB_PATH) -> Optional[Dict[str, Any]]:
-    """Returns the active (queued or running) job record for a brand, if any."""
+def get_active_job_for_brand(
+    brand: str,
+    category: Optional[str] = None,
+    db_path: str = DEFAULT_DB_PATH
+) -> Optional[Dict[str, Any]]:
+    """Returns the active (queued or running) job record for a brand and optional category, if any."""
     if not brand or not brand.strip():
         return None
+    clean_brand = brand.strip().lower()
+    clean_category = category.strip().lower() if category and category.strip() else None
     with get_db_connection(db_path) as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT * FROM jobs
-            WHERE LOWER(brand) = LOWER(?) AND status IN ('queued', 'running')
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (brand.strip(),)
-        )
+        if clean_category:
+            cur.execute(
+                """
+                SELECT * FROM jobs
+                WHERE LOWER(brand) = ? AND LOWER(COALESCE(category, '')) = ? AND status IN ('queued', 'running')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (clean_brand, clean_category)
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM jobs
+                WHERE LOWER(brand) = ? AND status IN ('queued', 'running')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (clean_brand,)
+            )
         row = cur.fetchone()
         return dict(row) if row else None
 
