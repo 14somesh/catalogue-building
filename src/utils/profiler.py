@@ -271,7 +271,7 @@ def record_waf_block(
 def profile_brand(
     brand: str,
     model_names: List[str],
-    category: str = "Powerbank",
+    category: Optional[str] = None,
     existing_domain: Optional[str] = None,
     config_path: str = "config/brand_defaults.yaml"
 ) -> Dict[str, Any]:
@@ -286,8 +286,13 @@ def profile_brand(
     Writes to brand_defaults.yaml and returns structured diagnostic report.
     """
     clean_brand = brand.strip()
+    if not category or not str(category).strip():
+        raise ValueError("Category is required for profiling brand defaults. Writing category-scoped keys at the brand root is prohibited.")
+    clean_category = str(category).strip()
+
     report = {
         "brand": clean_brand,
+        "category": clean_category,
         "domain": None,
         "platform": None,
         "collection_url": None,
@@ -297,8 +302,8 @@ def profile_brand(
         "not_found": []
     }
 
-    # Load existing config if present
-    existing_cfg = load_brand_defaults(clean_brand, config_path=config_path)
+    # Load existing config for this brand and category
+    existing_cfg = load_brand_defaults(clean_brand, category=clean_category, config_path=config_path)
 
     # Check if brand is known to be WAF blocked
     if existing_cfg.get("waf_blocked"):
@@ -309,7 +314,7 @@ def profile_brand(
     # a) Domain
     domain = existing_domain or existing_cfg.get("domain")
     if not domain and not report["waf_blocked"]:
-        disc = discover_and_verify_brand_domain(clean_brand, model_names, category=category, config_path=config_path)
+        disc = discover_and_verify_brand_domain(clean_brand, model_names, category=clean_category, config_path=config_path)
         domain = disc.get("domain")
 
     if domain:
@@ -330,7 +335,7 @@ def profile_brand(
         report["found"].append(f"Platform: {platform}")
 
         # c) Collection URL
-        collection_url = discover_collection_url(domain, platform, category=category)
+        collection_url = discover_collection_url(domain, platform, category=clean_category)
         if collection_url:
             report["collection_url"] = collection_url
             report["found"].append(f"Collection URL: {collection_url}")
@@ -344,7 +349,7 @@ def profile_brand(
     report["qualifier_tokens"] = combined_tokens
     report["found"].append(f"Qualifier tokens ({len(combined_tokens)} tokens): {', '.join(combined_tokens)}")
 
-    # Persist all learned metadata to config/brand_defaults.yaml
+    # Persist learned metadata to config/brand_defaults.yaml strictly partitioned by category
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     cfg = {}
     if os.path.exists(config_path):
@@ -355,22 +360,32 @@ def profile_brand(
         cfg["brands"] = {}
 
     brand_entry = cfg["brands"].get(clean_brand, {})
-    brand_entry["domain"] = domain
-    brand_entry["platform"] = platform
-    if collection_url:
-        brand_entry["collection_url"] = collection_url
-    brand_entry["qualifier_tokens"] = combined_tokens
+    if domain:
+        brand_entry["domain"] = domain
+    if platform:
+        brand_entry["platform"] = platform
 
-    # Remove dead image_tier_order or default_warranty if present
-    if "image_tier_order" in brand_entry:
-        del brand_entry["image_tier_order"]
-    if "default_warranty" in brand_entry:
-        del brand_entry["default_warranty"]
+    if "categories" not in brand_entry or not isinstance(brand_entry["categories"], dict):
+        brand_entry["categories"] = {}
+
+    cat_entry = brand_entry["categories"].get(clean_category, {})
+    if collection_url:
+        cat_entry["collection_url"] = collection_url
+    if combined_tokens:
+        cat_entry["qualifier_tokens"] = combined_tokens
+
+    brand_entry["categories"][clean_category] = cat_entry
+
+    # Guard: Never allow category-scoped keys or obsolete keys at the brand root
+    brand_entry.pop("collection_url", None)
+    brand_entry.pop("qualifier_tokens", None)
+    brand_entry.pop("image_tier_order", None)
+    brand_entry.pop("default_warranty", None)
 
     cfg["brands"][clean_brand] = brand_entry
 
     with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, sort_keys=False, default_flow_style=False)
+        yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
 
-    logger.info(f"[Profiler] Successfully completed brand profiling for '{clean_brand}' and saved to {config_path}")
+    logger.info(f"[Profiler] Successfully completed brand profiling for '{clean_brand}' [{clean_category}] and saved to {config_path}")
     return report

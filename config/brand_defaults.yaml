@@ -2,115 +2,146 @@ brands:
   Stuffcool:
     domain: stuffcool.com
     platform: shopify
-    collection_url: https://www.stuffcool.com/collections/power-bank
     retail_order:
     - reliance
-    qualifier_tokens:
-    - Max
-    - Ultra
-    - Plus
-    - Pro
-    - Mini
-    - Lite
-    - Go
+    categories:
+      Powerbank:
+        collection_url: https://www.stuffcool.com/collections/power-bank
+        qualifier_tokens:
+        - Max
+        - Ultra
+        - Plus
+        - Pro
+        - Mini
+        - Lite
+        - Go
   Pebble:
     domain: pebblecart.com
     platform: shopify
-    collection_url: https://www.pebblecart.com/collections/powerbanks
     retail_order:
     - reliance
-    qualifier_tokens:
-    - Max
-    - Ultra
-    - Plus
-    - Pro
-    - Mini
-    - Lite
-    - Go
+    categories:
+      Powerbank:
+        collection_url: https://www.pebblecart.com/collections/powerbanks
+        qualifier_tokens:
+        - Max
+        - Ultra
+        - Plus
+        - Pro
+        - Mini
+        - Lite
+        - Go
+      TWS:
+        collection_url: https://pebblecart.com/collections/all
+        qualifier_tokens:
+        - Buds
   Portronics:
     domain: portronics.com
     platform: shopify
-    qualifier_tokens:
-    - Mini
-    - Wireless
-    - Air
-    - B12
-    - Stride
-    - Uno
-    - Pro
-    - Plus
-    - Max
+    retail_order:
+    - reliance
+    categories:
+      Powerbank:
+        collection_url: https://www.portronics.com/collections/powerbanks
+        qualifier_tokens:
+        - Mini
+        - Wireless
+        - Air
+        - B12
+        - Stride
+        - Uno
+        - Pro
+        - Plus
+        - Max
   Urbn:
     domain: urbnworld.com
     platform: shopify
-    collection_url: https://urbnworld.com/collections/power-banks
     retail_order:
     - reliance
-    qualifier_tokens:
-    - MagSafe
-    - MagTag
-    - Mag
-    - Qi2
-    - Tag
-    - Mini
-    - Ultra
-    - Volt
-    - Pro
-    - Plus
-    - Max
-    - Arc
-    - Air
-    - Beat
-    - Nano
-    - Sprint
-    - Super
-    - Wireless
+    categories:
+      Powerbank:
+        collection_url: https://urbnworld.com/collections/power-banks
+        qualifier_tokens:
+        - MagSafe
+        - MagTag
+        - Mag
+        - Qi2
+        - Tag
+        - Mini
+        - Ultra
+        - Volt
+        - Pro
+        - Plus
+        - Max
+        - Arc
+        - Air
+        - Beat
+        - Nano
+        - Sprint
+        - Super
+        - Wireless
   EVM:
     domain: evmzone.com
     platform: magento
-    collection_url: https://evmzone.com/evm-products/powerbank.html
     retail_order:
     - reliance
-    qualifier_tokens:
-    - Pro
-    - Plus
-    - Mini
-    - Neo
-    - Ace
-    - Max
-    - Ultra
-    - Lite
-    - Go
-  _default:
-    retail_order:
-    - reliance
-    qualifier_tokens:
-    - Max
-    - Ultra
-    - Plus
-    - Pro
-    - Mini
-    - Lite
-    - Go
+    categories:
+      Powerbank:
+        collection_url: https://evmzone.com/evm-products/powerbank.html
+        qualifier_tokens:
+        - Pro
+        - Plus
+        - Mini
+        - Neo
+        - Ace
+        - Max
+        - Ultra
+        - Lite
+        - Go
   Ambrane:
     domain: ambraneindia.com
     platform: shopify
-    qualifier_tokens:
-    - Pro
-    - Plus
+    retail_order:
+    - reliance
+    categories:
+      Powerbank:
+        collection_url: https://ambraneindia.com/collections/powerbanks
+        qualifier_tokens:
+        - Pro
+        - Plus
   Glow Gadget:
     domain: glowgadgets.in
     platform: shopify
-    qualifier_tokens:
-    - Plus
-    - Pro
-    - Max
-    - Mini
-    collection_url: https://glowgadgets.in/collections/powerbanks
+    retail_order:
+    - reliance
+    categories:
+      Powerbank:
+        collection_url: https://glowgadgets.in/collections/powerbanks
+        qualifier_tokens:
+        - Plus
+        - Pro
+        - Max
+        - Mini
   Wangari:
     domain: wangariworld.com
     platform: shopify
-    qualifier_tokens:
-    - '2.0'
-    - QI
-    collection_url: https://wangariworld.com/collections/all
+    retail_order:
+    - reliance
+    categories:
+      Powerbank:
+        collection_url: https://wangariworld.com/collections/all
+        qualifier_tokens:
+        - '2.0'
+  _default:
+    retail_order:
+    - reliance
+    categories:
+      Powerbank:
+        qualifier_tokens:
+        - Max
+        - Ultra
+        - Plus
+        - Pro
+        - Mini
+        - Lite
+        - Go

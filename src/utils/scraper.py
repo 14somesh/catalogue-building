@@ -69,19 +69,57 @@ def get_cached_json(cache_key: str, fetch_fn) -> Optional[Any]:
     return data
 
 
-def load_brand_defaults(brand: str, config_path: str = "config/brand_defaults.yaml") -> dict:
-    """Loads brand configuration defaults (collection URL, retail order, qualifier tokens)."""
+def load_brand_defaults(
+    brand: str,
+    category: Optional[str] = None,
+    config_path: str = "config/brand_defaults.yaml"
+) -> dict:
+    """
+    Loads brand configuration defaults.
+    If category is provided, merges category-specific settings (qualifier_tokens, collection_url)
+    over the shared brand defaults.
+    """
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
                 brands_dict = data.get("brands", {})
+                brand_entry = None
                 if brand in brands_dict:
-                    return brands_dict[brand]
-                for b_name, b_val in brands_dict.items():
-                    if b_name.lower() == str(brand).lower():
-                        return b_val
-                return brands_dict.get("_default", {})
+                    brand_entry = brands_dict[brand]
+                else:
+                    for b_name, b_val in brands_dict.items():
+                        if b_name.lower() == str(brand).lower():
+                            brand_entry = b_val
+                            break
+
+                default_entry = brands_dict.get("_default", {})
+                base = dict(default_entry)
+                if brand_entry:
+                    base.update(brand_entry)
+
+                categories_dict = base.get("categories") or (brand_entry.get("categories") if brand_entry else {}) or {}
+                cat_entry = None
+                if category and categories_dict:
+                    clean_cat = str(category).strip().lower()
+                    for c_name, c_val in categories_dict.items():
+                        if c_name.lower() == clean_cat:
+                            cat_entry = c_val
+                            break
+                    if not cat_entry:
+                        for c_name, c_val in categories_dict.items():
+                            if c_name.lower() == "powerbank":
+                                cat_entry = c_val
+                                break
+                        if not cat_entry and categories_dict:
+                            cat_entry = next(iter(categories_dict.values()))
+
+                if cat_entry and isinstance(cat_entry, dict):
+                    resolved = dict(base)
+                    resolved.update(cat_entry)
+                    return resolved
+
+                return base
         except Exception as e:
             logger.warning(f"Failed loading brand defaults from {config_path}: {e}")
     return {}
@@ -292,13 +330,19 @@ def save_brand_domain_default(
     domain: str,
     platform: str = "shopify",
     collection_url: Optional[str] = None,
+    category: Optional[str] = None,
     config_path: str = "config/brand_defaults.yaml"
 ) -> bool:
     """
-    Persists a verified brand website domain and optional collection URL to config/brand_defaults.yaml.
+    Persists a verified brand website domain (shared) and optional collection URL (category-scoped) to config/brand_defaults.yaml.
     """
     if not os.path.exists(config_path):
         return False
+    if collection_url and (not category or not str(category).strip()):
+        raise ValueError("Saving collection_url requires a category. Writing category-scoped keys at the brand root is prohibited.")
+
+    clean_category = str(category).strip() if category and str(category).strip() else None
+
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
@@ -306,18 +350,34 @@ def save_brand_domain_default(
         if "brands" not in data:
             data["brands"] = {}
 
-        if brand not in data["brands"]:
+        if brand not in data["brands"] or not isinstance(data["brands"][brand], dict):
             data["brands"][brand] = {}
 
-        data["brands"][brand]["domain"] = domain
-        data["brands"][brand]["platform"] = platform
-        if collection_url:
-            data["brands"][brand]["collection_url"] = collection_url
+        brand_entry = data["brands"][brand]
+        if domain:
+            brand_entry["domain"] = domain
+        if platform:
+            brand_entry["platform"] = platform
+
+        if collection_url and clean_category:
+            if "categories" not in brand_entry or not isinstance(brand_entry["categories"], dict):
+                brand_entry["categories"] = {}
+            cat_entry = brand_entry["categories"].get(clean_category, {})
+            cat_entry["collection_url"] = collection_url
+            brand_entry["categories"][clean_category] = cat_entry
+
+        # Guard: Never allow category-scoped keys or obsolete keys at the brand root
+        brand_entry.pop("collection_url", None)
+        brand_entry.pop("qualifier_tokens", None)
+        brand_entry.pop("image_tier_order", None)
+        brand_entry.pop("default_warranty", None)
+
+        data["brands"][brand] = brand_entry
 
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False)
 
-        logger.info(f"Successfully saved verified domain '{domain}' (platform={platform}) for brand '{brand}' to {config_path}")
+        logger.info(f"Successfully saved verified domain '{domain}' (platform={platform}, category={clean_category}) for brand '{brand}' to {config_path}")
         return True
     except Exception as e:
         logger.error(f"Failed saving brand domain for '{brand}' to {config_path}: {e}")
@@ -481,7 +541,7 @@ def discover_and_verify_brand_domain(
     for cand_domain in candidates:
         is_verified, platform, coll_url, matched = verify_brand_storefront(cand_domain, clean_brand, model_names)
         if is_verified:
-            save_brand_domain_default(clean_brand, cand_domain, platform=platform or "shopify", collection_url=coll_url, config_path=config_path)
+            save_brand_domain_default(clean_brand, cand_domain, platform=platform or "shopify", collection_url=coll_url, category=category, config_path=config_path)
             return {
                 "domain": cand_domain,
                 "platform": platform,
