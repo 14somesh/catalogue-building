@@ -67,18 +67,22 @@ export function Stage5Build({ buildTarget, onBack, onStartNewBrand }) {
       if (brandsRes.ok) {
         const brands = await brandsRes.json();
         if (brands && brands.length > 0) {
-          const approvedBrands = brands
-            .filter(b => (b.status_counts?.Approved || 0) > 0)
-            .map(b => b.brand);
-          
+          const approvedBrands = [
+            ...new Set(
+              brands
+                .filter((b) => (b.status_counts?.Approved || 0) > 0)
+                .map((b) => b.brand)
+            ),
+          ];
+
           const totalApproved = brands.reduce(
             (sum, b) => sum + (b.status_counts?.Approved || 0),
             0
           );
-          setCatalogueMeta(prev => ({
+          setCatalogueMeta((prev) => ({
             ...prev,
-            brandCount: brands.length,
-            productCount: totalApproved || prev.productCount
+            brandCount: new Set(brands.map((b) => b.brand)).size,
+            productCount: totalApproved || prev.productCount,
           }));
 
           // Check if any approved brand is missing from brand_order

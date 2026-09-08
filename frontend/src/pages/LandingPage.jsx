@@ -30,7 +30,7 @@ export function LandingPage({ onStartBuilding }) {
         }
 
         if (isMounted) {
-          const brandsLive = brandsData.length;
+          const brandsLive = new Set(brandsData.map((b) => b.brand)).size;
           // Count approved products across brands
           const approvedProducts = brandsData.reduce(
             (sum, b) => sum + (b.status_counts?.Approved || 0),

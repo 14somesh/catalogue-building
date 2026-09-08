@@ -1433,22 +1433,30 @@ def list_built_catalogues() -> List[Dict[str, Any]]:
 # ==============================================================================
 
 @app.get("/brands")
-def list_brands() -> List[Dict[str, Any]]:
+def list_brands(
+    category: Optional[str] = Query(None, description="Optional category filter")
+) -> List[Dict[str, Any]]:
     """
-    Lists all brands in the catalogue with row counts grouped by status.
+    Lists all brands in the catalogue with row counts grouped by status, per category.
+    If category is provided, filters to that category.
     Uses non-blocking read snapshot so it never locks or blocks jobs.
     """
     df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
     if df.empty:
         return []
 
-    unique_brands = df["Brand"].dropna().unique()
+    clean_category = category.strip() if category and category.strip() else None
+    if clean_category:
+        df = df[df["Category"].astype(str).str.strip().str.lower() == clean_category.lower()]
+        if df.empty:
+            return []
+
+    if "Category" not in df.columns:
+        df["Category"] = "Powerbank"
+
+    # Group by (Brand, Category) preserving original appearance order
     brand_list = []
-
-    for brand_name in unique_brands:
-        brand_mask = df["Brand"].astype(str).str.lower() == str(brand_name).lower()
-        b_df = df[brand_mask]
-
+    for (brand_name, cat_name), b_df in df.groupby(["Brand", "Category"], sort=False):
         status_counts = {
             "Approved": int((b_df["Status"] == "Approved").sum()),
             "Ready_For_Review": int((b_df["Status"] == "Ready_For_Review").sum()),
@@ -1463,6 +1471,7 @@ def list_brands() -> List[Dict[str, Any]]:
 
         brand_list.append({
             "brand": str(brand_name),
+            "category": str(cat_name),
             "total_rows": len(b_df),
             "status_counts": status_counts,
             "brochure_path": brochure_path if brochure_path and not is_empty_value(brochure_path) else None

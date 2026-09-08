@@ -91,5 +91,29 @@ class TestCategoryDimension(unittest.TestCase):
         with self.assertRaises(BrandLockedError):
             enqueue_job("collect", "Pebble", category="Powerbank", payload={})
 
+    def test_7_list_brands_grouping_and_filtering(self):
+        client = TestClient(app)
+        # Test GET /brands returns separate entries for Pebble Powerbank and Pebble TWS
+        resp = client.get("/brands")
+        self.assertEqual(resp.status_code, 200)
+        brands = resp.json()
+        pebble_entries = [b for b in brands if b["brand"].lower() == "pebble"]
+        self.assertEqual(len(pebble_entries), 2)
+        pb_entry = next(b for b in pebble_entries if b["category"].lower() == "powerbank")
+        tws_entry = next(b for b in pebble_entries if b["category"].lower() == "tws")
+        self.assertEqual(pb_entry["total_rows"], 7)
+        self.assertEqual(tws_entry["total_rows"], 3)
+
+        # Test GET /brands?category=TWS returns only TWS entries
+        resp_tws = client.get("/brands?category=TWS")
+        self.assertEqual(resp_tws.status_code, 200)
+        tws_brands = resp_tws.json()
+        for b in tws_brands:
+            self.assertEqual(b["category"], "TWS")
+        self.assertEqual(len(tws_brands), 1)
+        self.assertEqual(tws_brands[0]["brand"], "Pebble")
+        self.assertEqual(tws_brands[0]["total_rows"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

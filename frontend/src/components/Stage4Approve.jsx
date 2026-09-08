@@ -274,7 +274,8 @@ export function Stage4Approve({
         throw new Error(err.detail || 'Failed to revert image');
       }
       // Refetch row
-      const revRes = await fetch(`/brands/${encodeURIComponent(brand)}/review`);
+      const reviewUrl = `/brands/${encodeURIComponent(brand)}/review${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+      const revRes = await fetch(reviewUrl);
       if (revRes.ok) {
         const revData = await revRes.json();
         const updated = revData.find(x => x.product_id === productId);
