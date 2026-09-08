@@ -245,7 +245,13 @@ def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:
     return candidates
 
 
-def search_amazon_for_image(product_id: str, brand: str, model_name: str, marketplace_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+def search_amazon_for_image(
+    product_id: str,
+    brand: str,
+    model_name: str,
+    marketplace_url: Optional[str] = None,
+    category: Optional[str] = None
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Tier 3 Image Helper: Searches Amazon India listings via Playwright for master product images ONLY.
     """
@@ -278,7 +284,7 @@ def search_amazon_for_image(product_id: str, brand: str, model_name: str, market
             page.goto(search_url, wait_until='domcontentloaded', timeout=15000)
             items = page.locator('div[data-component-type="s-search-result"]')
             
-            brand_defaults = load_brand_defaults(brand)
+            brand_defaults = load_brand_defaults(brand, category=category)
             qualifier_tokens = brand_defaults.get("qualifier_tokens", ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"])
             
             for i in range(min(5, items.count())):
@@ -313,7 +319,8 @@ def execute_image_tier_escalation(
     image_url: Optional[str],
     marketplace_url: Optional[str],
     dest_path: str,
-    product_page_url: Optional[str] = None
+    product_page_url: Optional[str] = None,
+    category: Optional[str] = None
 ) -> Tuple[str, Optional[str], Optional[int]]:
     """
     Executes the autonomous Image Tier Chain with integrated Visual AI Review Gate:
@@ -363,8 +370,8 @@ def execute_image_tier_escalation(
                     })
 
     # Tier 3: Amazon India Fallback (Images Only)
-    logger.info(f"[{product_id}] [Tier 3 Image] Searching Amazon fallback for {brand} {model_name}...")
-    amz_url, amz_src = search_amazon_for_image(product_id, brand, model_name, marketplace_url)
+    logger.info(f"[{product_id}] [Tier 3 Image] Searching Amazon fallback for {brand} {model_name} [{category}]...")
+    amz_url, amz_src = search_amazon_for_image(product_id, brand, model_name, marketplace_url, category=category)
     if amz_url:
         logger.info(f"[{product_id}] Found Amazon candidate image: {amz_url} ({amz_src})")
         approved, score, rejection = download_and_verify_image_candidate(
@@ -423,10 +430,11 @@ def process_images(config_path: str = "config.yaml", target_pids: Optional[list]
         prod_url = str(row_dict.get("Product_URL", "")).strip() if not is_empty_value(row_dict.get("Product_URL")) else None
         brand = str(row_dict.get("Brand", "")).strip()
         model_name = str(row_dict.get("Model_Name", "")).strip()
+        category = str(row_dict.get("Category", "")).strip() or None
         marketplace_url = str(row_dict.get("Marketplace_URL", "")).strip() if not is_empty_value(row_dict.get("Marketplace_URL")) else None
 
         status, img_source, img_tier = execute_image_tier_escalation(
-            product_id, brand, model_name, image_url, marketplace_url, image_path, product_page_url=prod_url
+            product_id, brand, model_name, image_url, marketplace_url, image_path, product_page_url=prod_url, category=category
         )
 
         df.at[idx, "Image_Status"] = status

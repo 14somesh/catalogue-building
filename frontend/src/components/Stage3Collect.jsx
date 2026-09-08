@@ -30,6 +30,7 @@ function formatRuntime(seconds) {
 
 export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
   const brand = collectionTarget?.brand || '';
+  const category = collectionTarget?.category || '';
   const initialCount = collectionTarget?.rowCount || 0;
 
   // Job & collection state
@@ -102,9 +103,10 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
         setStageState('running');
         setStartTime(Date.now());
 
-        // First pre-populate running rows from existing rows if available
+        // First pre-populate running rows from existing rows if available (scoped to category)
         try {
-          const rRes = await fetch(`/brands/${encodeURIComponent(brand)}/rows`);
+          const rowsUrl = `/brands/${encodeURIComponent(brand)}/rows${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+          const rRes = await fetch(rowsUrl);
           if (rRes.ok && !unmounted) {
             const rowsData = await rRes.json();
             setRunningRows(
@@ -140,8 +142,9 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
           console.warn('Active job check error:', e);
         }
 
-        // 2. Start collect job: POST /brands/{brand}/collect
-        const colRes = await fetch(`/brands/${encodeURIComponent(brand)}/collect`, {
+        // 2. Start collect job: POST /brands/{brand}/collect (scoped to category)
+        const colUrl = `/brands/${encodeURIComponent(brand)}/collect${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+        const colRes = await fetch(colUrl, {
           method: 'POST',
         });
         const colData = await colRes.json();
@@ -305,8 +308,9 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
     }
 
     try {
-      // Pull review data to get clean final found and failed lists
-      const revRes = await fetch(`/brands/${encodeURIComponent(brand)}/review`);
+      // Pull review data to get clean final found and failed lists (scoped to category)
+      const revUrl = `/brands/${encodeURIComponent(brand)}/review${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+      const revRes = await fetch(revUrl);
       if (revRes.ok) {
         const reviewRows = await revRes.json();
 
@@ -382,7 +386,8 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
     setIsRetrying(true);
     setErrorMsg('');
     try {
-      const retryRes = await fetch(`/brands/${encodeURIComponent(brand)}/retry`, {
+      const retryUrl = `/brands/${encodeURIComponent(brand)}/retry${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+      const retryRes = await fetch(retryUrl, {
         method: 'POST',
       });
       const retryData = await retryRes.json();
@@ -696,6 +701,7 @@ export function Stage3Collect({ collectionTarget, onBack, onContinue }) {
                 onClick={() =>
                   onContinue({
                     brand,
+                    category,
                     foundRows,
                     count: foundRows.length,
                   })

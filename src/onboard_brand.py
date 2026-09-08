@@ -543,8 +543,39 @@ def verify_storefront_domain(domain: Optional[str]) -> Tuple[Optional[str], Opti
         return None, None
 
 
-def register_brand_config(inference: BrandInferenceSchema, config_path: str = "config/brand_defaults.yaml") -> None:
-    """Updates config/brand_defaults.yaml with the inferred brand configuration."""
+def derive_category_prefix(category: str) -> str:
+    """Derives a standard uppercase prefix for Product_ID based on category."""
+    cat_clean = str(category or "Powerbank").strip()
+    cat_upper = cat_clean.upper()
+    prefix_map = {
+        "POWERBANK": "PB",
+        "POWERBANKS": "PB",
+        "TWS": "TWS",
+        "EARBUDS": "TWS",
+        "SMARTWATCH": "SW",
+        "SMARTWATCHES": "SW",
+        "CHARGER": "CH",
+        "CHARGERS": "CH",
+        "CABLE": "CB",
+        "CABLES": "CB",
+        "SPEAKER": "SPK",
+        "SPEAKERS": "SPK",
+        "AUDIO": "AUD",
+        "ACCESSORY": "ACC",
+        "ACCESSORIES": "ACC"
+    }
+    if cat_upper in prefix_map:
+        return prefix_map[cat_upper]
+    clean_alpha = re.sub(r'[^A-Za-z0-9]', '', cat_clean).upper()
+    return clean_alpha[:3] if clean_alpha else "PRD"
+
+
+def register_brand_config(
+    inference: BrandInferenceSchema,
+    category: Optional[str] = None,
+    config_path: str = "config/brand_defaults.yaml"
+) -> None:
+    """Updates config/brand_defaults.yaml with the inferred brand and category configuration."""
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     if os.path.exists(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
@@ -552,27 +583,48 @@ def register_brand_config(inference: BrandInferenceSchema, config_path: str = "c
     else:
         brand_cfg = {}
 
-    brand_slug = inference.brand_name.lower().replace(" ", "_")
+    if "brands" not in brand_cfg or not isinstance(brand_cfg["brands"], dict):
+        brand_cfg["brands"] = {}
+
+    cat_name = category or getattr(inference, "category", None) or "Powerbank"
+    clean_brand = inference.brand_name.strip()
+    
+    # Locate existing brand entry (case-insensitive)
+    existing_key = None
+    for k in brand_cfg["brands"]:
+        if k.lower() == clean_brand.lower():
+            existing_key = k
+            break
+
+    target_key = existing_key or clean_brand
+    current_entry = brand_cfg["brands"].get(target_key, {})
+
+    # Update shared brand properties if newly inferred domain exists
+    if inference.domain:
+        current_entry["domain"] = inference.domain
+    if inference.platform:
+        current_entry["platform"] = inference.platform
+
+    # Extract qualifier tokens
     token_list = []
     for q in inference.qualifier_tokens:
         tok = q.token if hasattr(q, "token") else (q.get("token") if isinstance(q, dict) and "token" in q else str(q))
-        if tok not in token_list:
+        if tok and tok not in token_list:
             token_list.append(tok)
 
-    brand_entry = {
-        "domain": inference.domain if inference.domain else None,
-        "platform": inference.platform if (inference.domain and inference.platform) else None,
-        "qualifier_tokens": token_list
-    }
+    if "categories" not in current_entry or not isinstance(current_entry["categories"], dict):
+        current_entry["categories"] = {}
 
-    if "brands" in brand_cfg and isinstance(brand_cfg["brands"], dict):
-        brand_cfg["brands"][inference.brand_name] = brand_entry
-    else:
-        brand_cfg[brand_slug] = brand_entry
+    cat_entry = current_entry["categories"].get(cat_name, {})
+    if token_list:
+        cat_entry["qualifier_tokens"] = token_list
+
+    current_entry["categories"][cat_name] = cat_entry
+    brand_cfg["brands"][target_key] = current_entry
 
     with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(brand_cfg, f, sort_keys=False, default_flow_style=False)
-    logger.info(f"Registered '{inference.brand_name}' defaults in {config_path}")
+        yaml.safe_dump(brand_cfg, f, sort_keys=False, default_flow_style=False)
+    logger.info(f"Registered '{clean_brand}' [{cat_name}] defaults in {config_path}")
 
 
 def append_products_to_catalogue(
@@ -582,35 +634,42 @@ def append_products_to_catalogue(
 ) -> Tuple[int, List[Dict[str, Any]]]:
     """
     Appends or updates newly onboarded product rows in the master Excel catalogue idempotently.
-    If a row already exists for that brand and model name, updates it in-place instead of creating a duplicate.
+    Matches rows on (Brand + Category + Model_Name).
+    Assigns sequential Product_IDs with dynamic category prefix for new rows without collisions.
     """
     df = load_catalogue_data(excel_path)
     cat = category or getattr(inference, "category", None) or "Powerbank"
     clean_brand = inference.brand_name.strip()
+    cat_prefix = derive_category_prefix(cat)
     
-    # Determine starting sequence number using max + 1 across existing rows for this brand
     existing_brand_mask = df["Brand"].astype(str).str.strip().str.lower() == clean_brand.lower()
     brand_df = df[existing_brand_mask]
 
+    # Find maximum existing sequence number for this brand and prefix pattern
+    pattern = re.compile(rf"^{re.escape(cat_prefix)}-{re.escape(inference.brand_code)}-(\d+)$", re.IGNORECASE)
     existing_seqs = []
     for raw_pid in brand_df["Product_ID"].dropna():
-        match = re.search(r"(\d+)$", str(raw_pid).strip())
-        if match:
+        m = pattern.search(str(raw_pid).strip())
+        if m:
             try:
-                existing_seqs.append(int(match.group(1)))
+                existing_seqs.append(int(m.group(1)))
             except ValueError:
                 continue
 
     next_seq = max(existing_seqs) + 1 if existing_seqs else 1
-    all_existing_pids = set(df["Product_ID"].dropna().astype(str).str.strip())
+    all_existing_pids = set(df["Product_ID"].dropna().astype(str).str.strip().str.lower())
 
     result_rows = []
     new_rows_to_append = []
 
     for p in inference.products:
         clean_model = p.model_name.strip()
-        # Check if an existing row matches this brand and model_name
-        model_match_mask = existing_brand_mask & (df["Model_Name"].astype(str).str.strip().str.lower() == clean_model.lower())
+        # Check if an existing row matches this brand, category, AND model_name
+        model_match_mask = (
+            existing_brand_mask
+            & (df["Category"].astype(str).str.strip().str.lower() == cat.strip().lower())
+            & (df["Model_Name"].astype(str).str.strip().str.lower() == clean_model.lower())
+        )
         
         if model_match_mask.any():
             # Update existing row in place idempotently
@@ -631,14 +690,14 @@ def append_products_to_catalogue(
                 
             updated_dict = df.loc[match_idx].to_dict()
             result_rows.append(updated_dict)
-            logger.info(f"Updated existing row for '{clean_brand}' - '{clean_model}' ({existing_pid}) in {excel_path}")
+            logger.info(f"Updated existing row for '{clean_brand}' [{cat}] - '{clean_model}' ({existing_pid}) in {excel_path}")
         else:
-            # Assign next sequential Product_ID
-            pid = f"PB-{inference.brand_code}-{next_seq:03d}"
-            while pid in all_existing_pids:
+            # Assign next sequential Product_ID using dynamic category prefix
+            pid = f"{cat_prefix}-{inference.brand_code}-{next_seq:03d}"
+            while pid.lower() in all_existing_pids:
                 next_seq += 1
-                pid = f"PB-{inference.brand_code}-{next_seq:03d}"
-            all_existing_pids.add(pid)
+                pid = f"{cat_prefix}-{inference.brand_code}-{next_seq:03d}"
+            all_existing_pids.add(pid.lower())
             next_seq += 1
 
             row_dict = {
@@ -662,5 +721,5 @@ def append_products_to_catalogue(
         combined_df = df
 
     save_catalogue_data(combined_df, excel_path)
-    logger.info(f"Processed {len(result_rows)} rows ({len(new_rows_to_append)} new, {len(result_rows) - len(new_rows_to_append)} updated) for brand '{clean_brand}' to {excel_path}")
+    logger.info(f"Processed {len(result_rows)} rows ({len(new_rows_to_append)} new, {len(result_rows) - len(new_rows_to_append)} updated) for brand '{clean_brand}' [{cat}] to {excel_path}")
     return len(result_rows), result_rows

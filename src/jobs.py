@@ -749,7 +749,8 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
                 raise ValueError(f"Product_ID '{pid}' not found in {excel_path}")
 
             model_name = str(df.loc[mask, "Model_Name"].iloc[0] or "").strip()
-            brand_cfg = load_brand_defaults(brand)
+            cat_val = str(df.loc[mask, "Category"].iloc[0] or "").strip() or None
+            brand_cfg = load_brand_defaults(brand, category=cat_val)
             qualifiers = brand_cfg.get("qualifier_tokens", ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"])
 
             progress_cb({
@@ -908,7 +909,6 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             from src.run_brand import load_config
             cfg = load_config("config.yaml")
             llm_config = cfg.get("llm", {})
-            category_name = cfg.get("category", {}).get("name", "powerbank")
 
             payload = {}
             if "payload_json" in job.keys() and job["payload_json"]:
@@ -922,7 +922,10 @@ def _execute_claimed_job(job: sqlite3.Row, db_path: str) -> None:
             file_path = payload.get("file_path")
             pasted_text = payload.get("pasted_text")
 
-            category_name = payload.get("category") or cfg.get("category", {}).get("name", "Powerbank")
+            category_raw = payload.get("category") or job_category
+            if not category_raw or not str(category_raw).strip():
+                raise ValueError("Ingest job requires a 'category'. Please specify the category from Stage 1.")
+            category_name = str(category_raw).strip()
             brand_name = payload.get("brand") or job.get("brand") or ""
 
             if file_path:

@@ -492,7 +492,7 @@ def discover_and_verify_brand_domain(
     if not clean_brand:
         return {"domain": None, "verified": False}
 
-    existing_cfg = load_brand_defaults(clean_brand, config_path=config_path)
+    existing_cfg = load_brand_defaults(clean_brand, category=category, config_path=config_path)
     existing_domain = existing_cfg.get("domain")
     if existing_domain and not existing_cfg.get("waf_blocked"):
         return {

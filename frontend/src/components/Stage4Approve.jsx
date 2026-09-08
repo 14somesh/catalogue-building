@@ -24,6 +24,7 @@ export function Stage4Approve({
   onContinue
 }) {
   const brand = approvalTarget?.brand || 'Portronics';
+  const category = approvalTarget?.category || '';
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [globalError, setGlobalError] = useState('');
@@ -67,7 +68,8 @@ export function Stage4Approve({
       try {
         setLoading(true);
         setGlobalError('');
-        const res = await fetch(`/brands/${encodeURIComponent(brand)}/review`);
+        const reviewUrl = `/brands/${encodeURIComponent(brand)}/review${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+        const res = await fetch(reviewUrl);
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.detail || `Failed to load review data (status ${res.status})`);
@@ -101,7 +103,7 @@ export function Stage4Approve({
     return () => {
       unmounted = true;
     };
-  }, [brand, approvalTarget]);
+  }, [brand, category, approvalTarget]);
 
   // Approved count
   const approvedCount = rows.filter(r => r.status === 'Approved').length;
@@ -122,10 +124,11 @@ export function Stage4Approve({
   async function handleApproveAll() {
     try {
       setGlobalError('');
-      const res = await fetch(`/brands/${encodeURIComponent(brand)}/approve`, {
+      const approveUrl = `/brands/${encodeURIComponent(brand)}/approve${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+      const res = await fetch(approveUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
+        body: JSON.stringify({ category: category || undefined })
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -189,7 +192,8 @@ export function Stage4Approve({
         setRows(prev => prev.map(r => r.product_id === productId ? { ...r, ...data.updated_row } : r));
       } else {
         // Refetch review row
-        const revRes = await fetch(`/brands/${encodeURIComponent(brand)}/review`);
+        const reviewUrl = `/brands/${encodeURIComponent(brand)}/review${category ? `?category=${encodeURIComponent(category)}` : ''}`;
+        const revRes = await fetch(reviewUrl);
         if (revRes.ok) {
           const revData = await revRes.json();
           const updated = revData.find(x => x.product_id === productId);
@@ -893,7 +897,7 @@ export function Stage4Approve({
         <div className="stage-footer__right">
           <button
             className="btn-primary"
-            onClick={() => onContinue && onContinue({ brand, approvedCount, autoTrigger: true })}
+            onClick={() => onContinue && onContinue({ brand, category, approvedCount, autoTrigger: true })}
             disabled={approvedCount === 0}
           >
             Build {approvedCount} {approvedCount === 1 ? 'product' : 'products'}

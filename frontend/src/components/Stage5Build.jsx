@@ -3,6 +3,7 @@ import { DownloadIcon, RefreshIcon } from './Icons';
 import { ErrorDisplay } from './ErrorDisplay';
 
 export function Stage5Build({ buildTarget, onBack, onStartNewBrand }) {
+  const category = buildTarget?.category || '';
   const [latestBuild, setLatestBuild] = useState(null);
   const [catalogueMeta, setCatalogueMeta] = useState({
     pageCount: 27,
@@ -164,10 +165,15 @@ export function Stage5Build({ buildTarget, onBack, onStartNewBrand }) {
       setBuildStatusText('Compiling catalogue pages...');
 
       const orderToSend = overrideOrder || (brandOrder.length > 0 ? brandOrder : undefined);
+      const buildPayload = {};
+      if (orderToSend) buildPayload.brand_order = orderToSend;
+      if (buildTarget?.brand) buildPayload.brand = buildTarget.brand;
+      if (category) buildPayload.category = category;
+
       const res = await fetch('/build', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(orderToSend ? { brand_order: orderToSend } : {})
+        body: JSON.stringify(buildPayload)
       });
 
       if (res.status === 409) {

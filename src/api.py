@@ -503,12 +503,17 @@ def confirm_brand_onboarding(brand: str, body: ConfirmBrandRequest) -> Dict[str,
 # ==============================================================================
 
 @app.post("/brands/{brand}/brochure")
-async def attach_brand_brochure(brand: str, file: UploadFile = File(...)) -> Dict[str, Any]:
+async def attach_brand_brochure(
+    brand: str,
+    category: Optional[str] = Form(None),
+    file: UploadFile = File(...)
+) -> Dict[str, Any]:
     """
-    Accepts a PDF brochure upload for a brand.
-    Saves to brochures/{brand_slug}/{filename}.pdf and updates the Brochure_PDF column in Excel.
+    Accepts a PDF brochure upload for a brand and optional category.
+    Saves to brochures/{category_slug}/{brand_slug}/{filename}.pdf and updates the Brochure_PDF column in Excel.
     """
     clean_brand = brand.strip()
+    clean_category = category.strip() if category and category.strip() else None
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file uploaded.")
 
@@ -521,7 +526,8 @@ async def attach_brand_brochure(brand: str, file: UploadFile = File(...)) -> Dic
         raise HTTPException(status_code=413, detail="Brochure exceeds 25 MB limit.")
 
     brand_slug = slugify(clean_brand)
-    brand_brochure_dir = os.path.join(BROCHURE_DIR, brand_slug)
+    cat_slug = slugify(clean_category) if clean_category else "powerbank"
+    brand_brochure_dir = os.path.join(BROCHURE_DIR, cat_slug, brand_slug)
     os.makedirs(brand_brochure_dir, exist_ok=True)
 
     clean_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", file.filename)
@@ -533,20 +539,24 @@ async def attach_brand_brochure(brand: str, file: UploadFile = File(...)) -> Dic
     # Update Excel
     df = load_catalogue_data("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
         try:
             os.remove(dest_path)
         except Exception:
             pass
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     rel_path = dest_path
     df.loc[mask, "Brochure_PDF"] = rel_path
     save_catalogue_data(df, "data/catalogue_data.xlsx")
 
-    logger.info(f"Attached brochure '{rel_path}' to {mask.sum()} rows for brand '{clean_brand}'.")
+    logger.info(f"Attached brochure '{rel_path}' to {mask.sum()} rows for brand '{clean_brand}' (category='{clean_category}').")
     return {
         "brand": clean_brand,
+        "category": clean_category,
         "brochure_path": rel_path,
         "filename": clean_name,
         "attached_count": int(mask.sum())
@@ -554,29 +564,45 @@ async def attach_brand_brochure(brand: str, file: UploadFile = File(...)) -> Dic
 
 
 @app.get("/brands/{brand}/brochure")
-def get_brand_brochure(brand: str) -> Dict[str, Any]:
-    """Returns the currently attached brochure path for a brand."""
+def get_brand_brochure(
+    brand: str,
+    category: Optional[str] = Query(None)
+) -> Dict[str, Any]:
+    """Returns the currently attached brochure path for a brand and optional category."""
+    clean_brand = brand.strip()
+    clean_category = category.strip() if category and category.strip() else None
     df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
-    mask = df["Brand"].astype(str).str.lower() == brand.strip().lower()
+    mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     brochure_vals = df.loc[mask, "Brochure_PDF"].dropna()
     current_path = str(brochure_vals.iloc[0]).strip() if not brochure_vals.empty else None
     return {
-        "brand": brand.strip(),
+        "brand": clean_brand,
+        "category": clean_category,
         "brochure_path": current_path if current_path and not is_empty_value(current_path) else None
     }
 
 
 @app.delete("/brands/{brand}/brochure")
-def delete_brand_brochure(brand: str) -> Dict[str, Any]:
-    """Detaches and removes the brochure for a brand."""
+def delete_brand_brochure(
+    brand: str,
+    category: Optional[str] = Query(None)
+) -> Dict[str, Any]:
+    """Detaches and removes the brochure for a brand and optional category."""
     clean_brand = brand.strip()
+    clean_category = category.strip() if category and category.strip() else None
     df = load_catalogue_data("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     brochure_vals = df.loc[mask, "Brochure_PDF"].dropna()
     if not brochure_vals.empty:
@@ -590,9 +616,10 @@ def delete_brand_brochure(brand: str) -> Dict[str, Any]:
     df.loc[mask, "Brochure_PDF"] = None
     save_catalogue_data(df, "data/catalogue_data.xlsx")
 
-    logger.info(f"Detached brochure for brand '{clean_brand}'.")
+    logger.info(f"Detached brochure for brand '{clean_brand}' (category='{clean_category}').")
     return {
         "brand": clean_brand,
+        "category": clean_category,
         "brochure_path": None,
         "message": f"Brochure detached successfully from brand '{clean_brand}'."
     }
@@ -605,29 +632,35 @@ def delete_brand_brochure(brand: str) -> Dict[str, Any]:
 @app.post("/brands/{brand}/collect")
 def start_brand_collection(
     brand: str,
+    category: Optional[str] = Query(None, description="Optional category filter"),
     semantic_audit: bool = Query(False, description="Enable optional post-collection LLM semantic audit")
 ) -> Dict[str, Any]:
     """
-    Enqueues a 'collect' job for the specified brand. Respects Brand Lock.
+    Enqueues a 'collect' job for the specified brand and optional category. Respects Brand Lock.
     Writes live progress to the jobs store as each row is processed.
     Returns job_id immediately without blocking.
     """
     clean_brand = brand.strip()
+    clean_category = category.strip() if category and category.strip() else None
     df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     try:
         job_id = enqueue_job(
             job_type="collect",
             brand=clean_brand,
-            payload={"semantic_audit": semantic_audit}
+            payload={"semantic_audit": semantic_audit, "category": clean_category}
         )
         return {
             "job_id": job_id,
             "status": "queued",
             "brand": clean_brand,
+            "category": clean_category,
             "stream_url": f"/jobs/{job_id}/stream"
         }
     except BrandLockedError as err:
@@ -645,10 +678,14 @@ def start_brand_collection(
 
 
 @app.get("/brands/{brand}/active-job")
-def get_brand_active_job(brand: str) -> Dict[str, Any]:
-    """Returns any active (queued or running) job for the brand to enable stream reattachment."""
+def get_brand_active_job(
+    brand: str,
+    category: Optional[str] = Query(None, description="Optional category filter")
+) -> Dict[str, Any]:
+    """Returns any active (queued or running) job for the brand (and optional category) to enable stream reattachment."""
     clean_brand = brand.strip()
-    active_job = get_active_job_for_brand(clean_brand)
+    clean_category = category.strip() if category and category.strip() else None
+    active_job = get_active_job_for_brand(clean_brand, category=clean_category)
     if active_job:
         return {
             "active": True,
@@ -656,6 +693,7 @@ def get_brand_active_job(brand: str) -> Dict[str, Any]:
             "job_type": active_job.get("job_type"),
             "status": active_job.get("status"),
             "brand": active_job.get("brand"),
+            "category": active_job.get("category"),
             "created_at": active_job.get("created_at"),
             "stream_url": f"/jobs/{active_job['id']}/stream"
         }
@@ -663,6 +701,7 @@ def get_brand_active_job(brand: str) -> Dict[str, Any]:
 
 
 class RetryBrandRequest(BaseModel):
+    category: Optional[str] = Field(None, description="Optional category filter")
     product_ids: Optional[List[str]] = Field(
         None,
         description="Optional list of specific Product_IDs to retry. If omitted, retries all Blocked, Skipped, and Deferred rows for the brand."
@@ -670,25 +709,38 @@ class RetryBrandRequest(BaseModel):
 
 
 @app.post("/brands/{brand}/retry")
-def retry_failed_rows(brand: str, body: Optional[RetryBrandRequest] = None) -> Dict[str, Any]:
+def retry_failed_rows(
+    brand: str,
+    category: Optional[str] = Query(None, description="Optional category filter"),
+    body: Optional[RetryBrandRequest] = None
+) -> Dict[str, Any]:
     """
     Enqueues a 'retry' job for failed (Blocked, Skipped, Deferred) rows of a brand.
     Uses re_run_product from scratch for each row with Attempts reset.
     Respects Brand Lock and reports the identical per-row result structure as collect.
     """
     clean_brand = brand.strip()
+    target_category = (body.category if body and body.category else category)
+    clean_category = target_category.strip() if target_category and target_category.strip() else None
     df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
-    payload = {"product_ids": body.product_ids if body and body.product_ids else None}
+    payload = {
+        "product_ids": body.product_ids if body and body.product_ids else None,
+        "category": clean_category
+    }
     try:
         job_id = enqueue_job(job_type="retry", brand=clean_brand, payload=payload)
         return {
             "job_id": job_id,
             "status": "queued",
             "brand": clean_brand,
+            "category": clean_category,
             "stream_url": f"/jobs/{job_id}/stream"
         }
     except BrandLockedError as err:
@@ -815,7 +867,10 @@ def provide_manual_source_url(product_id: str, body: ManualSourceRequest) -> Dic
 # ==============================================================================
 
 @app.get("/brands/{brand}/review")
-def get_brand_review_data(brand: str) -> List[Dict[str, Any]]:
+def get_brand_review_data(
+    brand: str,
+    category: Optional[str] = Query(None, description="Optional category filter")
+) -> List[Dict[str, Any]]:
     """
     Returns everything the approval screen needs per row:
     Product_ID, Model_Name, resolved card title, subtitle, the 4 bullets, DP, MRP,
@@ -826,10 +881,14 @@ def get_brand_review_data(brand: str) -> List[Dict[str, Any]]:
     Does NOT include specs (specs are not rendered on the card).
     """
     clean_brand = brand.strip()
+    clean_category = category.strip() if category and category.strip() else None
     df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     brand_df = df[mask].sort_values(by="Product_ID", ascending=True)
     results = []
@@ -1135,6 +1194,7 @@ def skip_single_product(product_id: str) -> Dict[str, Any]:
 
 
 class BrandApproveRequest(BaseModel):
+    category: Optional[str] = Field(None, description="Optional category filter")
     product_ids: Optional[List[str]] = Field(
         None,
         description="Optional list of specific product_ids to approve. If omitted, approves all rows currently 'Ready_For_Review' for the brand."
@@ -1142,18 +1202,27 @@ class BrandApproveRequest(BaseModel):
 
 
 @app.post("/brands/{brand}/approve")
-def approve_brand_products(brand: str, body: Optional[BrandApproveRequest] = None) -> Dict[str, Any]:
+def approve_brand_products(
+    brand: str,
+    category: Optional[str] = Query(None, description="Optional category filter"),
+    body: Optional[BrandApproveRequest] = None
+) -> Dict[str, Any]:
     """
-    Approves products for a brand.
-    If product_ids is omitted: approves every row currently 'Ready_For_Review' for that brand.
+    Approves products for a brand (and optional category).
+    If product_ids is omitted: approves every row currently 'Ready_For_Review' for that brand/category.
     If product_ids is provided: approves the specified products.
     Reports which rows changed and which were left alone and why.
     """
     clean_brand = brand.strip()
+    target_category = (body.category if body and body.category else category)
+    clean_category = target_category.strip() if target_category and target_category.strip() else None
     df = load_catalogue_data("data/catalogue_data.xlsx")
     brand_mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        brand_mask = brand_mask & (df["Category"].astype(str).str.strip().str.lower() == clean_category.lower())
     if not brand_mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     specified_ids = set(str(p).strip().lower() for p in body.product_ids) if body and body.product_ids else None
     changed_rows = []
@@ -1203,6 +1272,7 @@ def approve_brand_products(brand: str, body: Optional[BrandApproveRequest] = Non
 
     return {
         "brand": clean_brand,
+        "category": clean_category,
         "approved_count": len(changed_rows),
         "changed_rows": changed_rows,
         "unchanged_rows": unchanged_rows
@@ -1215,6 +1285,7 @@ def approve_brand_products(brand: str, body: Optional[BrandApproveRequest] = Non
 
 class BuildRequest(BaseModel):
     brand: Optional[str] = Field(None, description="Optional brand name to compile single-brand catalogue")
+    category: Optional[str] = Field(None, description="Optional category filter to compile category catalogue")
     brand_order: Optional[List[str]] = Field(None, description="Optional explicit brand order list for combined catalogue")
 
 
@@ -1223,11 +1294,13 @@ def trigger_catalogue_build(body: Optional[BuildRequest] = None) -> Dict[str, An
     """
     Enqueues a 'build' job using build_catalogue with progress tracking.
     If brand is provided: compiles single-brand PDF.
+    If category is provided: compiles single-category PDF.
     If brand_order is provided: updates config.yaml so the order persists, then compiles combined PDF.
     If empty: compiles default combined PDF.
     Returns job_id immediately.
     """
     brand_target = body.brand.strip() if body and body.brand and body.brand.strip() else None
+    category_target = body.category.strip() if body and body.category and body.category.strip() else None
     brand_order = body.brand_order if body and body.brand_order else None
 
     # Update config.yaml if brand_order is provided
@@ -1248,12 +1321,14 @@ def trigger_catalogue_build(body: Optional[BuildRequest] = None) -> Dict[str, An
         job_id = enqueue_job(
             job_type="build",
             brand=brand_target,
-            payload={"brand": brand_target, "brand_order": brand_order}
+            category=category_target,
+            payload={"brand": brand_target, "category": category_target, "brand_order": brand_order}
         )
         return {
             "job_id": job_id,
             "status": "queued",
             "brand": brand_target,
+            "category": category_target,
             "stream_url": f"/jobs/{job_id}/stream"
         }
     except BrandLockedError as err:
@@ -1409,17 +1484,24 @@ def list_categories() -> List[str]:
 
 
 @app.get("/brands/{brand}/rows")
-def get_brand_rows(brand: str) -> List[Dict[str, Any]]:
+def get_brand_rows(
+    brand: str,
+    category: Optional[str] = Query(None, description="Optional category filter")
+) -> List[Dict[str, Any]]:
     """
     Returns all product rows for a brand with resolved display fields needed by the UI:
     Product_ID, Model_Name, Display_Name, Status, DP, MRP, Source_URL, Image_Status, Flags.
     Uses non-blocking read-only snapshot.
     """
     clean_brand = brand.strip()
+    clean_category = category.strip() if category and category.strip() else None
     df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
     mask = df["Brand"].astype(str).str.lower() == clean_brand.lower()
+    if clean_category:
+        mask = mask & (df["Category"].astype(str).str.lower() == clean_category.lower())
     if not mask.any():
-        raise HTTPException(status_code=404, detail=f"Brand '{clean_brand}' not found in catalogue data.")
+        detail_msg = f"Brand '{clean_brand}'" + (f" (category '{clean_category}')" if clean_category else "") + " not found in catalogue data."
+        raise HTTPException(status_code=404, detail=detail_msg)
 
     brand_df = df[mask].sort_values(by="Product_ID", ascending=True)
     results = []

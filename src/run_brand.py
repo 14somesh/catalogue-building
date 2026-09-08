@@ -70,7 +70,7 @@ def generate_run_report(brand: str, brand_rows: list, output_dir: str = "dist", 
     ]
 
     from src.utils.scraper import load_brand_defaults
-    b_cfg = load_brand_defaults(brand)
+    b_cfg = load_brand_defaults(brand, category=category)
     b_domain = b_cfg.get("domain")
     if not b_domain:
         report_lines.append("> [!NOTE]")
@@ -652,15 +652,15 @@ def run_brand(
                 "halt_reason": str(e)
             }
 
-    logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products, semantic audit={enable_semantic_audit})...")
-    brand_defaults = load_brand_defaults(brand_name)
+    logger.info(f"Starting autonomous pipeline run for brand '{brand_name}' ({brand_mask.sum()} products, category='{category}', semantic audit={enable_semantic_audit})...")
+    brand_defaults = load_brand_defaults(brand_name, category=category)
     if not brand_defaults.get("domain"):
         from src.utils.scraper import discover_and_verify_brand_domain
         brand_models = [str(df.loc[idx, "Model_Name"]).strip() for idx in brand_indices if not is_empty_value(df.loc[idx, "Model_Name"])]
-        disc = discover_and_verify_brand_domain(brand_name, brand_models)
+        disc = discover_and_verify_brand_domain(brand_name, brand_models, category=category)
         if disc.get("verified") and disc.get("domain"):
-            brand_defaults = load_brand_defaults(brand_name)
-            logger.info(f"[Pre-flight Discovery] Verified domain '{disc['domain']}' for brand '{brand_name}'")
+            brand_defaults = load_brand_defaults(brand_name, category=category)
+            logger.info(f"[Pre-flight Discovery] Verified domain '{disc['domain']}' for brand '{brand_name}' [{category}]")
 
     all_rows = [row.to_dict() for _, row in df.iterrows()]
     cancelled_early = False
@@ -795,7 +795,7 @@ def run_brand(
 
     save_catalogue_data(df, excel_path)
     
-    category_name = config.get("category", {}).get("name", "powerbank")
+    category_name = category if category and str(category).strip() else config.get("category", {}).get("name", "powerbank")
     brand_rows = [df.loc[idx].to_dict() for idx in df[brand_mask].index]
     report_path = generate_run_report(
         brand_name, brand_rows, output_dir=config.get("paths", {}).get("output_dir", "dist"), category=category_name
@@ -807,7 +807,7 @@ def run_brand(
     skipped_count = sum(1 for r in brand_rows if r.get("Status") == "Skipped")
     deferred_count = sum(1 for r in brand_rows if r.get("Status") == "Deferred")
 
-    logger.info(f"Brand run complete for '{brand_name}': {ready_count} Ready for Review | {approved_count} Approved | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
+    logger.info(f"Brand run complete for '{brand_name}' [{category_name}]: {ready_count} Ready for Review | {approved_count} Approved | {blocked_count} Blocked | {skipped_count} Skipped | {deferred_count} Deferred. Review report at: {report_path}")
 
     # ==================== STEP 5.5: FINAL PRESENTATION & QUESTION PROMPT ====================
     table_output = format_final_presentation_table(df, brand_name, category=category_name)
@@ -924,7 +924,8 @@ def re_run_product(
 
     # 3. Run process_row_loop for this row only
     brand = str(row_dict.get("Brand", "")).strip()
-    brand_defaults = load_brand_defaults(brand)
+    cat_val = str(row_dict.get("Category", "")).strip() or None
+    brand_defaults = load_brand_defaults(brand, category=cat_val)
     all_rows = [r.to_dict() for _, r in df.iterrows()]
     for r_idx, r in enumerate(all_rows):
         if str(r.get("Product_ID")).strip().lower() == product_id.strip().lower():

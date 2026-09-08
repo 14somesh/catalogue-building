@@ -261,6 +261,7 @@ def resolve_effective_dp_float(row: Any) -> float:
 def build_catalogue_pdf(
     config_path: str = "config.yaml",
     brand: Optional[str] = None,
+    category: Optional[str] = None,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
 ) -> str:
     """
@@ -289,6 +290,14 @@ def build_catalogue_pdf(
         df = df[df["Brand"].astype(str).str.lower() == brand.lower()]
         if df.empty:
             raise ValueError(f"No products found for brand '{brand}' in {excel_path}")
+
+    # Filter to category if specified
+    if category and str(category).strip():
+        clean_category = str(category).strip()
+        if "Category" in df.columns:
+            df = df[df["Category"].astype(str).str.strip().str.lower() == clean_category.lower()]
+            if df.empty:
+                raise ValueError(f"No products found for category '{clean_category}'" + (f" and brand '{brand}'" if brand else "") + f" in {excel_path}")
     
     # Build only approved rows (exclude Skipped, Blocked, Pending, Deferred, Ready_For_Review)
     df = df[df["Status"] == "Approved"]
@@ -327,8 +336,8 @@ def build_catalogue_pdf(
     logger.info(f"Brand ordering sequence: {ordered_brands}")
 
     # Detect category from active products in df if present
-    df_cat = None
-    if "Category" in df.columns:
+    df_cat = category if category and str(category).strip() else None
+    if not df_cat and "Category" in df.columns:
         cats = [str(c).strip() for c in df["Category"].dropna().unique() if str(c).strip()]
         if len(cats) == 1:
             df_cat = cats[0]

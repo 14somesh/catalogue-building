@@ -15,17 +15,23 @@ from src.utils.logger import setup_logger
 logger = setup_logger("brochure_parser")
 
 
-def find_brochure_pdfs(brand: str, brochure_override: Optional[str] = None) -> List[str]:
+def find_brochure_pdfs(
+    brand: str,
+    category: Optional[str] = None,
+    brochure_override: Optional[str] = None
+) -> List[str]:
     """
-    Finds all available brochure PDF paths for a given brand.
+    Finds all available brochure PDF paths for a given brand and optional category.
     Checks:
     1. Explicit brochure override path (from Brochure_PDF column)
-    2. brochures/{brand_slug}/*.pdf and brochures/{brand}/*.pdf
-    3. data/brochures/{brand_slug}.pdf and data/brochures/{brand}.pdf
+    2. brochures/{category_slug}/{brand_slug}/*.pdf
+    3. Legacy: brochures/{brand_slug}/*.pdf and brochures/{brand}/*.pdf
+    4. data/brochures/{brand_slug}.pdf and data/brochures/{brand}.pdf
     """
     found_paths = []
     seen_norm = set()
     brand_slug = brand.lower().replace(" ", "-")
+    cat_slug = category.lower().replace(" ", "-") if category else None
 
     def _add_path(p: str):
         norm = os.path.normcase(os.path.abspath(p))
@@ -36,7 +42,17 @@ def find_brochure_pdfs(brand: str, brochure_override: Optional[str] = None) -> L
     if brochure_override:
         _add_path(brochure_override)
 
-    # Check brochures/ directories
+    # Check category-partitioned directories first
+    if cat_slug:
+        for folder in [f"brochures/{cat_slug}/{brand_slug}", f"brochures/{cat_slug}/{brand}"]:
+            if os.path.exists(folder) and os.path.isdir(folder):
+                for fname in os.listdir(folder):
+                    if fname.lower().endswith(".pdf"):
+                        _add_path(os.path.join(folder, fname))
+        if found_paths:
+            return found_paths
+
+    # Check legacy brochures/ directories fallback
     for folder in [f"brochures/{brand_slug}", f"brochures/{brand}", f"brochures/{brand.lower()}"]:
         if os.path.exists(folder) and os.path.isdir(folder):
             for fname in os.listdir(folder):
@@ -45,6 +61,8 @@ def find_brochure_pdfs(brand: str, brochure_override: Optional[str] = None) -> L
 
     # Check data/brochures/
     for folder in ["data/brochures", "data"]:
+        if cat_slug:
+            _add_path(os.path.join(folder, cat_slug, f"{brand_slug}.pdf"))
         for fname in [f"{brand_slug}.pdf", f"{brand.lower()}.pdf", f"{brand}.pdf"]:
             _add_path(os.path.join(folder, fname))
 
@@ -147,7 +165,8 @@ def find_product_in_brochure(
     model_name: str,
     qualifier_tokens: Optional[List[str]] = None,
     config: Optional[dict] = None,
-    brochure_override: Optional[str] = None
+    brochure_override: Optional[str] = None,
+    category: Optional[str] = None
 ) -> Optional[ParserResult]:
     """
     TIER 0: Smart Two-Pass Brand Brochure PDF Extractor.
@@ -156,9 +175,9 @@ def find_product_in_brochure(
     PASS 2 (Targeted Vision Fallback): ONLY runs if Pass 1 found zero matches in text,
     auditing at most 3 scanned/graphical pages.
     """
-    pdf_paths = find_brochure_pdfs(brand, brochure_override=brochure_override)
+    pdf_paths = find_brochure_pdfs(brand, category=category, brochure_override=brochure_override)
     if not pdf_paths:
-        logger.debug(f"[Tier 0] No brochure PDFs found for brand '{brand}'. Silently skipping Tier 0.")
+        logger.debug(f"[Tier 0] No brochure PDFs found for brand '{brand}' (category='{category}'). Silently skipping Tier 0.")
         return None
 
     from src.utils.scraper import extract_model_name_portion, normalize_model_tokens, reject_qualifier_mismatch

@@ -217,7 +217,8 @@ def execute_spec_escalation(
     brand_cfg: dict,
     exclude_urls: Optional[Set[str]] = None,
     config: Optional[dict] = None,
-    brochure_override: Optional[str] = None
+    brochure_override: Optional[str] = None,
+    category: Optional[str] = None
 ) -> Tuple[Optional[ParserResult], Optional[str]]:
     """
     Executes 5-tier escalation for product specs:
@@ -283,7 +284,8 @@ def execute_spec_escalation(
         model_name=model_name,
         qualifier_tokens=qualifier_tokens,
         config=cfg,
-        brochure_override=brochure_override
+        brochure_override=brochure_override,
+        category=category
     )
     if brochure_res and brochure_res.specs:
         combined_res, combined_provenance = _merge_res(
@@ -453,13 +455,15 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
     """
     brand = str(row_dict.get("Brand", "")).strip()
     model_name = str(row_dict.get("Model_Name", "")).strip()
+    category = str(row_dict.get("Category", "")).strip() or None
     product_id = str(row_dict.get("Product_ID", f"{brand}_{model_name}")).strip()
     manual_url = str(row_dict.get("Product_URL", "")).strip() if not is_empty_value(row_dict.get("Product_URL")) else None
     brochure_override = str(row_dict.get("Brochure_PDF", "")).strip() if not is_empty_value(row_dict.get("Brochure_PDF")) else None
 
-    brand_defaults = load_brand_defaults(brand)
+    brand_defaults = load_brand_defaults(brand, category=category)
     parser_res, provenance = execute_spec_escalation(
-        product_id, brand, model_name, manual_url, brand_defaults, exclude_urls=exclude_urls, config=config, brochure_override=brochure_override
+        product_id, brand, model_name, manual_url, brand_defaults,
+        exclude_urls=exclude_urls, config=config, brochure_override=brochure_override, category=category
     )
 
     if not parser_res or not parser_res.specs:

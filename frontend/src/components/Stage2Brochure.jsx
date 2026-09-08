@@ -45,6 +45,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [techDetails, setTechDetails] = useState(null);
+  const [showIncompleteModal, setShowIncompleteModal] = useState(false);
 
   // Helper to parse price strings with currency symbols, commas, trailing text
   const parsePrice = (v) => {
@@ -54,14 +55,15 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
     return clean ? parseFloat(clean) : NaN;
   };
 
-  // Helper to check if a row is complete (usable name, valid DP, valid MRP)
-  const isRowComplete = (r) => {
-    const hasName = Boolean(r.model_name && r.model_name.trim());
+  // Helper to get array of missing field names for a row
+  const getMissingFields = (r) => {
+    const missing = [];
+    if (!r.model_name || !r.model_name.trim()) missing.push('Model Name');
     const dpNum = parsePrice(r.dp);
+    if (isNaN(dpNum) || dpNum <= 0) missing.push('DP');
     const mrpNum = parsePrice(r.mrp);
-    const hasDp = !isNaN(dpNum) && dpNum > 0;
-    const hasMrp = !isNaN(mrpNum) && mrpNum > 0;
-    return hasName && hasDp && hasMrp;
+    if (isNaN(mrpNum) || mrpNum <= 0) missing.push('MRP');
+    return missing;
   };
 
   // Fetch existing brands for the dropdown
@@ -133,10 +135,21 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
   // Count duplicates in active rows
   const duplicateCount = rows.filter((r) => r.isDuplicate).length;
 
-  // Complete rows count
-  const completeRows = rows.filter(isRowComplete);
-  const completeCount = completeRows.length;
-  const incompleteCount = rows.length - completeCount;
+  // Incomplete rows calculation
+  const incompleteRows = rows.map((r, idx) => {
+    const missing = getMissingFields(r);
+    if (missing.length > 0) {
+      return {
+        rowIndex: idx + 1,
+        model_name: r.model_name,
+        display_name: r.display_name || r.model_name || `Row ${idx + 1}`,
+        missing: missing,
+      };
+    }
+    return null;
+  }).filter(Boolean);
+
+  const incompleteCount = incompleteRows.length;
 
   // Duplicate display name detection across all rows
   const displayNameCounts = rows.reduce((acc, r) => {
@@ -146,22 +159,16 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
   }, {});
   const dupDisplayNames = Object.keys(displayNameCounts).filter((k) => displayNameCounts[k] > 1);
 
-  // Handle continuing to Stage 3
-  const handleConfirmAndStart = async () => {
-    if (!brand || completeCount === 0 || isSubmitting) return;
-
-    // Check for duplicate display names before proceeding
-    if (dupDisplayNames.length > 0) {
-      setErrorMsg(`Duplicate Display Name detected for "${dupDisplayNames.join(', ')}". Each product must have a unique Display Name.`);
-      return;
-    }
+  // Core execution of confirm and start
+  const executeConfirmAndStart = async () => {
+    if (!brand || rows.length === 0 || isSubmitting) return;
 
     // If already confirmed in this session or brand has active job, advance straight to Stage 3
     if (isConfirmed) {
       onStartCollecting({
         brand: brand.trim(),
         category: category,
-        rowCount: completeRows.length,
+        rowCount: rows.length,
       });
       return;
     }
@@ -171,7 +178,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
     setTechDetails(null);
 
     try {
-      // 1. Confirm products via POST /brands/{brand}/confirm
+      // 1. Confirm products via POST /brands/{brand}/confirm (submits ALL non-deleted rows)
       const confirmPayload = {
         brand_name: brand.trim(),
         brand_code: ingestResult?.brand_code || null,
@@ -181,14 +188,18 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
         column_mapping: ingestResult?.column_mapping || {},
         qualifier_tokens: ingestResult?.qualifier_tokens || [],
         dp_column_explanation: ingestResult?.dp_column_explanation || 'User confirmed price sheet rows',
-        rows: completeRows.map((r) => ({
-          model_name: r.model_name.trim(),
-          display_name: (r.display_name || r.model_name).trim(),
-          dp: parsePrice(r.dp),
-          mrp: parsePrice(r.mrp),
-          raw_text: r.raw_text,
-          notes: r.notes,
-        })),
+        rows: rows.map((r) => {
+          const dpNum = parsePrice(r.dp);
+          const mrpNum = parsePrice(r.mrp);
+          return {
+            model_name: (r.model_name || '').trim(),
+            display_name: (r.display_name || r.model_name || '').trim(),
+            dp: !isNaN(dpNum) && dpNum > 0 ? dpNum : null,
+            mrp: !isNaN(mrpNum) && mrpNum > 0 ? mrpNum : null,
+            raw_text: r.raw_text,
+            notes: r.notes,
+          };
+        }),
       };
 
       const confirmRes = await fetch(`/brands/${encodeURIComponent(brand.trim())}/confirm`, {
@@ -209,7 +220,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
           onStartCollecting({
             brand: brand.trim(),
             category: category,
-            rowCount: completeRows.length,
+            rowCount: rows.length,
           });
           return;
         }
@@ -254,13 +265,32 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
       onStartCollecting({
         brand: brand.trim(),
         category: category,
-        rowCount: completeRows.length,
+        rowCount: rows.length,
       });
     } catch (err) {
       console.error('Failed to confirm and start collection:', err);
       setIsSubmitting(false);
       setErrorMsg(err.message || 'An error occurred during confirmation.');
     }
+  };
+
+  // Button click handler: checks for duplicates and incomplete rows first
+  const handleContinueClick = () => {
+    if (!brand || rows.length === 0 || isSubmitting) return;
+
+    // Check for duplicate display names before proceeding
+    if (dupDisplayNames.length > 0) {
+      setErrorMsg(`Duplicate Display Name detected for "${dupDisplayNames.join(', ')}". Each product must have a unique Display Name.`);
+      return;
+    }
+
+    // If there are incomplete rows and not already confirmed, prompt with confirmation dialog
+    if (incompleteCount > 0 && !isConfirmed) {
+      setShowIncompleteModal(true);
+      return;
+    }
+
+    executeConfirmAndStart();
   };
 
   return (
@@ -345,7 +375,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
           )}
           {incompleteCount > 0 && (
             <div className="stage-2-stat" style={{ borderLeft: '1px solid var(--amber-dark)', paddingLeft: '14px' }}>
-              <span className="stage-2-stat__number" style={{ color: 'var(--red)' }}>{incompleteCount}</span>
+              <span className="stage-2-stat__number" style={{ color: 'var(--amber-deep)' }}>{incompleteCount}</span>
               <span className="stage-2-stat__label">incomplete</span>
             </div>
           )}
@@ -358,7 +388,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
           <div className="parsed-rows-title">Parsed rows</div>
           <div className="parsed-rows-hint">
             {incompleteCount > 0
-              ? `${incompleteCount} ${incompleteCount === 1 ? 'row is' : 'rows are'} missing price or name. Fill them in inline or delete them.`
+              ? `${incompleteCount} ${incompleteCount === 1 ? 'row is' : 'rows are'} missing price or name. Fill them in inline or proceed anyway.`
               : 'Click any cell to edit'}
           </div>
         </div>
@@ -376,18 +406,18 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
             </thead>
             <tbody>
               {rows.map((row, idx) => {
-                const complete = isRowComplete(row);
                 const missingModel = !row.model_name || !row.model_name.trim();
                 const dpNum = parsePrice(row.dp);
                 const mrpNum = parsePrice(row.mrp);
                 const missingDp = isNaN(dpNum) || dpNum <= 0;
                 const missingMrp = isNaN(mrpNum) || mrpNum <= 0;
+                const rowIsIncomplete = missingModel || missingDp || missingMrp;
 
                 return (
                   <tr
                     key={row.id}
                     className={`parsed-row ${row.isDuplicate ? 'parsed-row--duplicate' : ''}`}
-                    style={!complete ? { backgroundColor: 'var(--cream)' } : {}}
+                    style={rowIsIncomplete ? { backgroundColor: 'var(--cream)' } : {}}
                   >
                     {/* Model column */}
                     <td>
@@ -398,7 +428,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                               <WarningTriangleIcon width={15} height={15} color="var(--amber-dark)" />
                             </span>
                           )}
-                          {!complete && !row.isDuplicate && (
+                          {rowIsIncomplete && !row.isDuplicate && (
                             <span className="dup-warning-icon" title="Incomplete row — missing information">
                               <WarningTriangleIcon width={15} height={15} color="var(--amber-dark)" />
                             </span>
@@ -415,7 +445,7 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
                         {row.isDuplicate && (
                           <div className="dup-note">same as row {row.duplicateOf}</div>
                         )}
-                        {!complete && (
+                        {rowIsIncomplete && (
                           <div className="dup-note" style={{ color: 'var(--amber-deep)' }}>
                             {missingDp && missingMrp
                               ? 'Missing DP & MRP'
@@ -553,6 +583,113 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
         <ErrorDisplay error={errorMsg} technicalDetails={techDetails} showIcon={true} />
       )}
 
+      {/* Incomplete Rows Confirmation Modal */}
+      {showIncompleteModal && (
+        <div
+          className="modal-overlay"
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.45)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '16px',
+          }}
+        >
+          <div
+            className="modal-content"
+            style={{
+              background: '#FFFFFF',
+              borderRadius: '12px',
+              maxWidth: '520px',
+              width: '100%',
+              padding: '24px',
+              boxShadow: '0 12px 32px rgba(0, 0, 0, 0.18)',
+              border: '1px solid var(--grey-50)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
+              <WarningTriangleIcon width={22} height={22} color="var(--amber-dark)" />
+              <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 600, color: 'var(--amber-deep)' }}>
+                Incomplete Rows Detected ({incompleteCount})
+              </h3>
+            </div>
+
+            <p style={{ fontSize: '14px', color: '#4A4A48', lineHeight: '1.5', margin: '0 0 16px 0' }}>
+              The following {incompleteCount === 1 ? 'row has' : 'rows have'} missing information. You can go back and fill them in now, or proceed to collection anyway:
+            </p>
+
+            <div
+              style={{
+                maxHeight: '200px',
+                overflowY: 'auto',
+                border: '1px solid var(--cream)',
+                borderRadius: '8px',
+                background: 'var(--page-bg)',
+                padding: '8px 12px',
+                marginBottom: '20px',
+              }}
+            >
+              {incompleteRows.map((item) => (
+                <div
+                  key={item.rowIndex}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '8px 0',
+                    borderBottom: '1px solid var(--grey-50)',
+                    fontSize: '13px',
+                  }}
+                >
+                  <span style={{ fontWeight: 600, color: '#2C2C2A' }}>
+                    {item.display_name}
+                  </span>
+                  <span
+                    style={{
+                      background: 'var(--cream)',
+                      color: 'var(--amber-deep)',
+                      fontSize: '12px',
+                      fontWeight: 500,
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      border: '1px solid var(--amber-pale)',
+                    }}
+                  >
+                    Missing {item.missing.join(' & ')}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowIncompleteModal(false)}
+              >
+                Go back & edit
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  setShowIncompleteModal(false);
+                  executeConfirmAndStart();
+                }}
+              >
+                Proceed anyway ({rows.length} {rows.length === 1 ? 'row' : 'rows'})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Footer Actions */}
       <div className="stage-footer">
         <div className="stage-footer__left">
@@ -569,14 +706,14 @@ export function Stage2Brochure({ ingestResult, onBack, onStartCollecting }) {
           <button
             type="button"
             className="btn-primary"
-            disabled={isSubmitting || completeCount === 0}
-            onClick={handleConfirmAndStart}
+            disabled={isSubmitting || rows.length === 0 || !brand.trim()}
+            onClick={handleContinueClick}
           >
             {isSubmitting
               ? 'Saving...'
               : isConfirmed
-              ? `Continue to collection (${completeCount} ${completeCount === 1 ? 'row' : 'rows'})`
-              : `Continue with ${completeCount} ${completeCount === 1 ? 'row' : 'rows'}`}
+              ? `Continue to collection (${rows.length} ${rows.length === 1 ? 'row' : 'rows'})`
+              : `Start collecting ${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`}
           </button>
         </div>
       </div>

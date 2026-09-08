@@ -333,7 +333,8 @@ def run_review_loop(
         row_dict = row.to_dict()
         pid = row_dict.get("Product_ID")
         brand = row_dict.get("Brand", "")
-        brand_defaults = load_brand_defaults(brand)
+        cat_val = str(row_dict.get("Category", "")).strip() or None
+        brand_defaults = load_brand_defaults(brand, category=cat_val)
 
         if target_pids and pid not in target_pids:
             updated_rows.append(row_dict)
