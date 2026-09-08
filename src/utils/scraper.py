@@ -106,17 +106,17 @@ def load_brand_defaults(
                         if c_name.lower() == clean_cat:
                             cat_entry = c_val
                             break
-                    if not cat_entry:
-                        for c_name, c_val in categories_dict.items():
-                            if c_name.lower() == "powerbank":
-                                cat_entry = c_val
-                                break
-                        if not cat_entry and categories_dict:
-                            cat_entry = next(iter(categories_dict.values()))
-
                 if cat_entry and isinstance(cat_entry, dict):
                     resolved = dict(base)
                     resolved.update(cat_entry)
+                    return resolved
+
+                # If a specific category was requested but not found in categories_dict,
+                # return base brand settings without category-specific collection_url / qualifier_tokens
+                if category:
+                    resolved = dict(base)
+                    resolved["collection_url"] = None
+                    resolved["qualifier_tokens"] = []
                     return resolved
 
                 return base

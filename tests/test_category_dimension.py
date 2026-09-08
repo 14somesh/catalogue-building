@@ -27,23 +27,23 @@ class TestCategoryDimension(unittest.TestCase):
         self.assertIn("Mini", pb_pb.get("qualifier_tokens", []))
         self.assertIn("powerbanks", pb_pb.get("collection_url", ""))
 
+        # When TWS is not onboarded, it cleanly falls back to brand-level domain
         pb_tws = load_brand_defaults("Pebble", "TWS")
         self.assertEqual(pb_tws.get("domain"), "pebblecart.com")
-        self.assertIn("Buds", pb_tws.get("qualifier_tokens", []))
-        self.assertNotIn("Max", pb_tws.get("qualifier_tokens", []))
+        self.assertIsNone(pb_tws.get("collection_url"))
+        self.assertEqual(pb_tws.get("qualifier_tokens", []), [])
 
     def test_2_existing_catalogue_rows(self):
         df = load_catalogue_data_readonly("data/catalogue_data.xlsx")
         pebble_rows = df[df["Brand"].astype(str).str.lower() == "pebble"]
-        self.assertEqual(len(pebble_rows), 10)
+        self.assertEqual(len(pebble_rows), 7)
 
         pb_rows = df[(df["Brand"].astype(str).str.lower() == "pebble") & (df["Category"].astype(str).str.lower() == "powerbank")]
         self.assertEqual(len(pb_rows), 7)
         self.assertEqual(pb_rows["Product_ID"].tolist(), [f"PB-PEB-{i:03d}" for i in range(1, 8)])
 
         tws_rows = df[(df["Brand"].astype(str).str.lower() == "pebble") & (df["Category"].astype(str).str.lower() == "tws")]
-        self.assertEqual(len(tws_rows), 3)
-        self.assertEqual(tws_rows["Product_ID"].tolist(), ["PB-PEB-008", "PB-PEB-009", "PB-PEB-010"])
+        self.assertEqual(len(tws_rows), 0)
 
     def test_3_category_prefixes(self):
         self.assertEqual(derive_category_prefix("Powerbank"), "PB")
@@ -58,14 +58,6 @@ class TestCategoryDimension(unittest.TestCase):
 
     def test_5_api_category_scoping(self):
         client = TestClient(app)
-        # Test GET /brands/Pebble/rows?category=TWS
-        resp_tws = client.get("/brands/Pebble/rows?category=TWS")
-        self.assertEqual(resp_tws.status_code, 200)
-        rows_tws = resp_tws.json()
-        self.assertEqual(len(rows_tws), 3)
-        for r in rows_tws:
-            self.assertEqual(r.get("category"), "TWS")
-
         # Test GET /brands/Pebble/rows?category=Powerbank
         resp_pb = client.get("/brands/Pebble/rows?category=Powerbank")
         self.assertEqual(resp_pb.status_code, 200)
@@ -74,10 +66,14 @@ class TestCategoryDimension(unittest.TestCase):
         for r in rows_pb:
             self.assertEqual(r.get("category"), "Powerbank")
 
-        # Test GET /brands/Pebble/rows with no category returns all 10
+        # Test GET /brands/Pebble/rows with empty category returns all 7
         resp_all = client.get("/brands/Pebble/rows")
         self.assertEqual(resp_all.status_code, 200)
-        self.assertEqual(len(resp_all.json()), 10)
+        self.assertEqual(len(resp_all.json()), 7)
+
+        # Test GET /brands/Pebble/rows?category=TWS returns 404 when no rows exist
+        resp_tws = client.get("/brands/Pebble/rows?category=TWS")
+        self.assertEqual(resp_tws.status_code, 404)
 
     def test_6_concurrent_brand_category_locking(self):
         # Enqueue Pebble Powerbank job
@@ -93,26 +89,26 @@ class TestCategoryDimension(unittest.TestCase):
 
     def test_7_list_brands_grouping_and_filtering(self):
         client = TestClient(app)
-        # Test GET /brands returns separate entries for Pebble Powerbank and Pebble TWS
+        # Test GET /brands returns Pebble Powerbank entry
         resp = client.get("/brands")
         self.assertEqual(resp.status_code, 200)
         brands = resp.json()
         pebble_entries = [b for b in brands if b["brand"].lower() == "pebble"]
-        self.assertEqual(len(pebble_entries), 2)
-        pb_entry = next(b for b in pebble_entries if b["category"].lower() == "powerbank")
-        tws_entry = next(b for b in pebble_entries if b["category"].lower() == "tws")
+        self.assertEqual(len(pebble_entries), 1)
+        pb_entry = pebble_entries[0]
+        self.assertEqual(pb_entry["category"], "Powerbank")
         self.assertEqual(pb_entry["total_rows"], 7)
-        self.assertEqual(tws_entry["total_rows"], 3)
 
-        # Test GET /brands?category=TWS returns only TWS entries
+        # Test GET /brands?category=Powerbank returns Powerbank entries
+        resp_pb = client.get("/brands?category=Powerbank")
+        self.assertEqual(resp_pb.status_code, 200)
+        pb_brands = resp_pb.json()
+        self.assertTrue(any(b["brand"].lower() == "pebble" for b in pb_brands))
+
+        # Test GET /brands?category=TWS returns empty when no TWS products exist
         resp_tws = client.get("/brands?category=TWS")
         self.assertEqual(resp_tws.status_code, 200)
-        tws_brands = resp_tws.json()
-        for b in tws_brands:
-            self.assertEqual(b["category"], "TWS")
-        self.assertEqual(len(tws_brands), 1)
-        self.assertEqual(tws_brands[0]["brand"], "Pebble")
-        self.assertEqual(tws_brands[0]["total_rows"], 3)
+        self.assertEqual(len(resp_tws.json()), 0)
 
 
 if __name__ == "__main__":
