@@ -38,7 +38,7 @@ class BaseParser(ABC):
         pass
 
     @abstractmethod
-    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1) -> ParserResult:
+    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1, category: Optional[str] = None) -> ParserResult:
         """Parses HTML into a standardized ParserResult."""
         pass
 

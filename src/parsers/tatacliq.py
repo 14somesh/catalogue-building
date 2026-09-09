@@ -2,6 +2,7 @@ import re
 from typing import Set, Dict, List
 from bs4 import BeautifulSoup
 from src.parsers.base import BaseParser, ParserResult
+from src.utils.category_specs import extract_category_specs
 
 
 class TataCliqParser(BaseParser):
@@ -17,7 +18,7 @@ class TataCliqParser(BaseParser):
     def capabilities(self) -> Set[str]:
         return {"specs", "images"}
 
-    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 3) -> ParserResult:
+    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 3, category: Optional[str] = None) -> ParserResult:
         if status_code in (401, 403, 429):
             return ParserResult(success=False, status_code=status_code, url=url, is_blocked=True, tier=tier, error=f"HTTP {status_code} Blocked")
         if status_code in (404, 410):
@@ -35,26 +36,8 @@ class TataCliqParser(BaseParser):
 
         full_text = f"{title}\n" + "\n".join(spec_blocks)
 
-        specs = {}
-        cap = re.search(r'\b(5000|10000|15000|20000|25000|30000)\s*(?:mAh|mah)\b', full_text, re.I)
-        if cap:
-            specs["capacity"] = f"{cap.group(1)} mAh"
-        watt = re.search(r'\b(\d+(?:\.\d+)?\s*W(?:att)?)\b', full_text, re.I)
-        if watt:
-            specs["output"] = f"{watt.group(1)} Fast Charging"
-        ports = []
-        if re.search(r'type-?c|usb-?c', full_text, re.I):
-            ports.append("Type-C")
-        if re.search(r'usb-?a', full_text, re.I):
-            ports.append("USB-A")
-        if ports:
-            specs["ports"] = ", ".join(ports)
-        wt = re.search(r'\b(\d{2,3}(?:\.\d+)?)\s*(?:g|grams|gm)\b', full_text, re.I)
-        if wt:
-            specs["weight"] = f"{wt.group(1)}g"
-        warr = re.search(r'\b(\d+)\s*(?:month|year)s?\s*(?:warranty)\b', full_text, re.I)
-        if warr:
-            specs["warranty"] = warr.group(0).title()
+        # Extract specs based on category
+        specs = extract_category_specs(full_text, category=category)
 
         images = []
         for img in soup.find_all("img"):

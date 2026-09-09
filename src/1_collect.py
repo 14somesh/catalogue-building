@@ -466,7 +466,7 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         exclude_urls=exclude_urls, config=config, brochure_override=brochure_override, category=category
     )
 
-    if not parser_res or not parser_res.specs:
+    if not parser_res or (not parser_res.specs and not parser_res.description_text):
         # AUTO-SKIP ON EXHAUSTION: All tiers (including Vision) exhausted. Write NOTHING to Raw_ columns.
         return {
             "Status": "Skipped",
@@ -474,37 +474,58 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
             "Fix_Log": "Tier 1-4 escalation (with Vision fallback) exhausted; no verified technical specs found."
         }, False, f"[{product_id}] SKIPPED: All tiers exhausted"
 
-    # Call LLM ONLY to draft bullets and subtitle from verified product text
-    clean_specs = {k: v for k, v in parser_res.specs.items() if k in ("capacity", "output", "ports", "weight") and v}
+    # Call LLM to draft bullets and subtitle from verified product text & category specs
+    clean_specs = {k: v for k, v in parser_res.specs.items() if v}
     llm_copy, provider_used = draft_bullets_and_subtitle(
         brand=brand,
         model_name=model_name,
         product_description_block=parser_res.description_text or "",
         specs=clean_specs,
+        category=category,
         llm_config=config.get("llm", {})
     )
+
+    source_url = parser_res.url
+    tier = parser_res.tier
+    specs = parser_res.specs
+
+    # Category-aware spec resolution for Excel storage columns
+    from src.utils.category_specs import normalize_category_key
+    row_cat = normalize_category_key(category)
+    if row_cat in ("tws", "audio"):
+        spec_cap_val = specs.get("playtime") or specs.get("capacity")
+        spec_out_val = specs.get("drivers") or specs.get("output")
+        spec_ports_val = specs.get("noise_cancellation") or specs.get("ports")
+        spec_wt_val = specs.get("bluetooth") or specs.get("weight")
+    elif row_cat == "smartwatch":
+        spec_cap_val = specs.get("display")
+        spec_out_val = specs.get("battery")
+        spec_ports_val = specs.get("calling")
+        spec_wt_val = specs.get("water_resistance")
+    else:
+        spec_cap_val = specs.get("capacity")
+        spec_out_val = specs.get("output")
+        spec_ports_val = specs.get("ports")
+        spec_wt_val = specs.get("weight")
 
     if not llm_copy:
         # INFRASTRUCTURE FAILURE: Specs were fetched, but LLM copy generation failed.
         # MUST NEVER set to Blocked. Mark as Deferred, keeping collected specs.
-        source_url = parser_res.url
-        tier = parser_res.tier
-        specs = parser_res.specs
         updates = {
             "Source_URL": source_url,
             "Source_Audit": provenance,
-            "Raw_Spec_Capacity": specs.get("capacity"),
-            "Source_Spec_Capacity": parser_res.field_sources.get("capacity") or (source_url if specs.get("capacity") else None),
-            "Tier_Spec_Capacity": parser_res.field_tiers.get("capacity", tier) if specs.get("capacity") else None,
-            "Raw_Spec_Output": specs.get("output"),
-            "Source_Spec_Output": parser_res.field_sources.get("output") or (source_url if specs.get("output") else None),
-            "Tier_Spec_Output": parser_res.field_tiers.get("output", tier) if specs.get("output") else None,
-            "Raw_Spec_Ports": specs.get("ports"),
-            "Source_Spec_Ports": parser_res.field_sources.get("ports") or (source_url if specs.get("ports") else None),
-            "Tier_Spec_Ports": parser_res.field_tiers.get("ports", tier) if specs.get("ports") else None,
-            "Raw_Spec_Weight": specs.get("weight"),
-            "Source_Spec_Weight": parser_res.field_sources.get("weight") or (source_url if specs.get("weight") else None),
-            "Tier_Spec_Weight": parser_res.field_tiers.get("weight", tier) if specs.get("weight") else None,
+            "Raw_Spec_Capacity": spec_cap_val,
+            "Source_Spec_Capacity": parser_res.field_sources.get("capacity") or (source_url if spec_cap_val else None),
+            "Tier_Spec_Capacity": parser_res.field_tiers.get("capacity", tier) if spec_cap_val else None,
+            "Raw_Spec_Output": spec_out_val,
+            "Source_Spec_Output": parser_res.field_sources.get("output") or (source_url if spec_out_val else None),
+            "Tier_Spec_Output": parser_res.field_tiers.get("output", tier) if spec_out_val else None,
+            "Raw_Spec_Ports": spec_ports_val,
+            "Source_Spec_Ports": parser_res.field_sources.get("ports") or (source_url if spec_ports_val else None),
+            "Tier_Spec_Ports": parser_res.field_tiers.get("ports", tier) if spec_ports_val else None,
+            "Raw_Spec_Weight": spec_wt_val,
+            "Source_Spec_Weight": parser_res.field_sources.get("weight") or (source_url if spec_wt_val else None),
+            "Tier_Spec_Weight": parser_res.field_tiers.get("weight", tier) if spec_wt_val else None,
             "Raw_Spec_Warranty": None,
             "Source_Spec_Warranty": None,
             "Tier_Spec_Warranty": None,
@@ -523,12 +544,8 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         if b_val:
             is_bp, bp_phrase = is_boilerplate_bullet(str(b_val))
             if is_bp:
-                logger.warning(f"[{product_id}] Boilerplate detected in {b_key} ('{bp_phrase}'). Dropping...")
+                logger.warning(f"[{product_id}] Dropped boilerplate {b_key}: '{bp_phrase}'")
                 llm_copy[b_key] = None
-
-    source_url = parser_res.url
-    tier = parser_res.tier
-    specs = parser_res.specs
 
     # Populate raw fields strictly paired with matching Source_ and Tier_ columns (WRITE GUARD COMPLIANT)
     has_mrp_display = not pd.isna(row_dict.get("MRP_Display")) and str(row_dict.get("MRP_Display")).strip() not in ("", "nan", "None")
@@ -548,18 +565,18 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         "Raw_MRP_Scraped": mrp_val if mrp_val else None,
         "Source_MRP_Scraped": mrp_source,
         "Tier_MRP_Scraped": mrp_tier,
-        "Raw_Spec_Capacity": specs.get("capacity"),
-        "Source_Spec_Capacity": parser_res.field_sources.get("capacity") or (source_url if specs.get("capacity") else None),
-        "Tier_Spec_Capacity": parser_res.field_tiers.get("capacity", tier) if specs.get("capacity") else None,
-        "Raw_Spec_Output": specs.get("output"),
-        "Source_Spec_Output": parser_res.field_sources.get("output") or (source_url if specs.get("output") else None),
-        "Tier_Spec_Output": parser_res.field_tiers.get("output", tier) if specs.get("output") else None,
-        "Raw_Spec_Ports": specs.get("ports"),
-        "Source_Spec_Ports": parser_res.field_sources.get("ports") or (source_url if specs.get("ports") else None),
-        "Tier_Spec_Ports": parser_res.field_tiers.get("ports", tier) if specs.get("ports") else None,
-        "Raw_Spec_Weight": specs.get("weight"),
-        "Source_Spec_Weight": parser_res.field_sources.get("weight") or (source_url if specs.get("weight") else None),
-        "Tier_Spec_Weight": parser_res.field_tiers.get("weight", tier) if specs.get("weight") else None,
+        "Raw_Spec_Capacity": spec_cap_val,
+        "Source_Spec_Capacity": parser_res.field_sources.get("capacity") or (source_url if spec_cap_val else None),
+        "Tier_Spec_Capacity": parser_res.field_tiers.get("capacity", tier) if spec_cap_val else None,
+        "Raw_Spec_Output": spec_out_val,
+        "Source_Spec_Output": parser_res.field_sources.get("output") or (source_url if spec_out_val else None),
+        "Tier_Spec_Output": parser_res.field_tiers.get("output", tier) if spec_out_val else None,
+        "Raw_Spec_Ports": spec_ports_val,
+        "Source_Spec_Ports": parser_res.field_sources.get("ports") or (source_url if spec_ports_val else None),
+        "Tier_Spec_Ports": parser_res.field_tiers.get("ports", tier) if spec_ports_val else None,
+        "Raw_Spec_Weight": spec_wt_val,
+        "Source_Spec_Weight": parser_res.field_sources.get("weight") or (source_url if spec_wt_val else None),
+        "Tier_Spec_Weight": parser_res.field_tiers.get("weight", tier) if spec_wt_val else None,
         "Raw_Spec_Warranty": None,
         "Source_Spec_Warranty": None,
         "Tier_Spec_Warranty": None,

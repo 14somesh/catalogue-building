@@ -2,6 +2,7 @@ import re
 from typing import Set, Dict, List
 from bs4 import BeautifulSoup
 from src.parsers.base import BaseParser, ParserResult
+from src.utils.category_specs import extract_category_specs
 
 
 class CromaParser(BaseParser):
@@ -18,7 +19,7 @@ class CromaParser(BaseParser):
     def capabilities(self) -> Set[str]:
         return {"specs", "images"}
 
-    def parse(self, url: str, html: str = "", status_code: int = 200, tier: int = 3) -> ParserResult:
+    def parse(self, url: str, html: str = "", status_code: int = 200, tier: int = 3, category: Optional[str] = None) -> ParserResult:
         # Extract slug text from URL for structured spec extraction
         slug_text = url.split("/p/")[0].split("/")[-1].replace("-", " ") if "/p/" in url else ""
         
@@ -36,40 +37,12 @@ class CromaParser(BaseParser):
         if not title and slug_text:
             # Reconstruct title from slug
             clean_slug = re.sub(r'\b(online|croma|buy|best price|prices|fast charging|power bank|powerbank)\b', '', slug_text, flags=re.I)
-            title = " ".join(w.capitalize() for w in clean_slug.split()[:4]) + " Powerbank"
+            title = " ".join(w.capitalize() for w in clean_slug.split()[:4])
 
         full_text = f"{title}\n{slug_text}\n" + "\n".join(spec_text_blocks)
         
-        # Specs regex extraction
-        specs = {}
-        cap = re.search(r'\b(5000|10000|15000|20000|25000|30000)\s*(?:mAh|mah)\b', full_text, re.I)
-        if cap:
-            specs["capacity"] = f"{cap.group(1)} mAh"
-            
-        watt = re.search(r'\b(\d+(?:[.\s]\d+)?)\s*w(?:att)?\b', full_text, re.I)
-        if watt:
-            w_val = watt.group(1).replace(" ", ".")
-            specs["output"] = f"{w_val}W Fast Charging"
-            
-        ports = []
-        if re.search(r'type-?c|usb-?c', full_text, re.I):
-            ports.append("Type-C")
-        if re.search(r'type-?a|usb-?a', full_text, re.I):
-            ports.append("USB-A")
-        if re.search(r'micro-?usb', full_text, re.I):
-            ports.append("Micro-USB")
-        if re.search(r'wireless|magsafe|qi2?', full_text, re.I):
-            ports.append("Magnetic Wireless")
-        if ports:
-            specs["ports"] = ", ".join(ports)
-            
-        wt = re.search(r'\b(\d{2,3}(?:\.\d+)?)\s*(?:g|grams|gm)\b', full_text, re.I)
-        if wt:
-            specs["weight"] = f"{wt.group(1)}g"
-            
-        warr = re.search(r'\b(\d+)\s*(?:month|year)s?\s*(?:warranty)\b', full_text, re.I)
-        if warr:
-            specs["warranty"] = warr.group(0).title()
+        # Specs regex extraction based on category
+        specs = extract_category_specs(full_text, category=category)
 
         # Extract MRP
         mrp = None

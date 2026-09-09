@@ -1,6 +1,9 @@
 import os
+import sys
 import io
 import importlib
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from PIL import Image
 
 images_mod = importlib.import_module("src.2_images")
@@ -48,3 +51,15 @@ def test_visual_ai_review_gate_rejects_banners_and_hands():
             is_valid, score, rejection = audit_collected_image_quality(img_bytes, brand, model, mime_type="image/jpeg")
             assert is_valid is False, f"Expected {path} to be REJECTED by Visual Review Gate, but was approved (score={score})"
             assert rejection is not None
+
+
+if __name__ == "__main__":
+    print("Testing normalize_and_pad_image_square...")
+    test_normalize_and_pad_image_square()
+    print("PASS: normalize_and_pad_image_square")
+    print("Testing visual_ai_review_gate_approves_clean_packshots...")
+    test_visual_ai_review_gate_approves_clean_packshots()
+    print("PASS: test_visual_ai_review_gate_approves_clean_packshots")
+    print("Testing visual_ai_review_gate_rejects_banners_and_hands...")
+    test_visual_ai_review_gate_rejects_banners_and_hands()
+    print("PASS: test_visual_ai_review_gate_rejects_banners_and_hands")

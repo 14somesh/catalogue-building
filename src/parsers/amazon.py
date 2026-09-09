@@ -20,7 +20,7 @@ class AmazonParser(BaseParser):
     def capabilities(self) -> Set[str]:
         return {"images"}
 
-    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 3) -> ParserResult:
+    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 3, category: Optional[str] = None) -> ParserResult:
         """
         Parses Amazon page HTML for master product images ONLY.
         Raises ValueError if invoked for specs.

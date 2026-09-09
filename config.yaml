@@ -1,62 +1,58 @@
 category:
-  name: "POWERBANK"
-  display_title: "Powerbanks & Portable Chargers"
-
-# Explicit brand rendering order in catalogue (leave empty to follow sheet appearance order)
-# The real brand order will be supplied when the product sheet is populated in Phase 5
+  name: POWERBANK
+  display_title: Powerbanks & Portable Chargers
 brand_order:
-  - "Stuffcool"
-  - "Pebble"
-  - "Portronics"
-  - "Urbn"
-  - "EVM"
-
+- Stuffcool
+- Pebble
+- Portronics
+- Urbn
+- EVM
+- Glow Gadget
+- Wangari
 page_setup:
-  paper_size: "A4"
-  orientation: "portrait"
+  paper_size: A4
+  orientation: portrait
   products_per_page: 2
   show_page_numbers: true
-
 image_validation:
   min_width_px: 800
   min_height_px: 800
   recommended_dpi: 300
-  allowed_formats: ["png", "jpg", "jpeg", "webp"]
-
+  allowed_formats:
+  - png
+  - jpg
+  - jpeg
+  - webp
 validation_rules:
   title_max_chars: 40
   subtitle_max_chars: 80
-  bullet_max_chars: 58       # Measured wrap cliff to keep bullets <= 3 lines @ 12.5px font size
+  bullet_max_chars: 58
   min_bullets: 2
   max_bullets: 4
-
 llm:
   providers:
-    - name: "gemini"
-      model: "gemini-3.5-flash-lite"
-      temperature: 0.2
-    - name: "gemini"
-      model: "gemini-3.5-flash"
-      temperature: 0.2
-    - name: "groq"
-      model: "llama-3.3-70b-versatile"
-      temperature: 0.2
-
+  - name: gemini
+    model: gemini-3.5-flash-lite
+    temperature: 0.2
+  - name: gemini
+    model: gemini-3.5-flash
+    temperature: 0.2
+  - name: groq
+    model: llama-3.3-70b-versatile
+    temperature: 0.2
 search:
-  provider: "gemini_grounding"   # Options: "gemini_grounding", "duckduckgo"
+  provider: gemini_grounding
   max_results: 3
   timeout_secs: 15
-
 company:
-  name: "VIANET"
-  location: "Pune"
-  email: "sales@vianet.co.in"
-  contact_line: "Corporate gifting · Pune · sales@vianet.co.in"
-
+  name: VIANET
+  location: Pune
+  email: sales@vianet.co.in
+  contact_line: "Corporate gifting \xB7 Pune \xB7 sales@vianet.co.in"
 paths:
-  excel_file: "data/catalogue_data.xlsx"
-  images_dir: "images/"
-  brochures_dir: "brochures/"
-  output_dir: "dist/"
-  output_filename_pattern: "{category}_catalogue_{timestamp}.pdf"
-  output_pdf: "dist/catalogue.pdf"
+  excel_file: data/catalogue_data.xlsx
+  images_dir: images/
+  brochures_dir: brochures/
+  output_dir: dist/
+  output_filename_pattern: '{category}_catalogue_{timestamp}.pdf'
+  output_pdf: dist/catalogue.pdf

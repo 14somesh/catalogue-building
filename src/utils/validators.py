@@ -86,17 +86,21 @@ def validate_row_deterministic(
             hard_flags.append(f"Qualifier token mismatch: {qualifier_err}")
 
     # --------------------------------------------------------------------------
-    # HARD CHECK c: Capacity stated in Model_Name conflicts with collected capacity
+    # HARD CHECK c: Capacity stated in Model_Name conflicts with collected capacity (Powerbanks only)
     # --------------------------------------------------------------------------
-    model_cap_match = re.search(r'\b(5000|10000|15000|20000|25000|30000)\s*(?:mah)?\b', model_name, re.I)
-    if model_cap_match:
-        model_cap_num = model_cap_match.group(1).replace(",", "")
-        collected_cap = str(get_effective_value(row_dict, "Spec_Capacity") or "")
-        spec_cap_match = re.search(r'\b(5000|10000|15000|20000|25000|30000)\b', collected_cap.replace(",", ""))
-        if spec_cap_match and spec_cap_match.group(1) != model_cap_num:
-            hard_flags.append(
-                f"Capacity mismatch: Model_Name specifies {model_cap_num}mAh but collected spec is {spec_cap_match.group(1)}mAh"
-            )
+    from src.utils.category_specs import normalize_category_key
+    cat_key = normalize_category_key(row_dict.get("Category"))
+
+    if cat_key == "powerbank":
+        model_cap_match = re.search(r'\b(5000|10000|15000|20000|25000|30000)\s*(?:mah)?\b', model_name, re.I)
+        if model_cap_match:
+            model_cap_num = model_cap_match.group(1).replace(",", "")
+            collected_cap = str(get_effective_value(row_dict, "Spec_Capacity") or "")
+            spec_cap_match = re.search(r'\b(5000|10000|15000|20000|25000|30000)\b', collected_cap.replace(",", ""))
+            if spec_cap_match and spec_cap_match.group(1) != model_cap_num:
+                hard_flags.append(
+                    f"Capacity mismatch: Model_Name specifies {model_cap_num}mAh but collected spec is {spec_cap_match.group(1)}mAh"
+                )
 
     # --------------------------------------------------------------------------
     # HARD CHECK d: Boilerplate detected in bullets
@@ -109,15 +113,25 @@ def validate_row_deterministic(
                 hard_flags.append(f"Boilerplate detected in Bullet_{b_idx}: '{bp_phrase}'")
 
     # --------------------------------------------------------------------------
-    # HARD CHECK e: Fewer than 2 of 4 spec fields populated (Hard Fail), 2 populated (WARN), 3-4 populated (Pass cleanly)
+    # HARD CHECK e: Category-Aware Specification Sufficiency
     # --------------------------------------------------------------------------
-    spec_fields = ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight"]
-    empty_spec_count = sum(1 for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf)))
-    if empty_spec_count > 2:
-        hard_flags.append(f"Insufficient specifications: {empty_spec_count} of 4 required specs are empty (fewer than 2 populated)")
-    elif empty_spec_count == 2:
-        missing_sf = [sf.replace("Spec_", "").lower() for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf))]
-        warnings.append(f"Partial specifications: 2 of 4 specs empty ({', '.join(missing_sf)})")
+    if cat_key == "powerbank":
+        spec_fields = ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight"]
+        empty_spec_count = sum(1 for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf)))
+        if empty_spec_count > 2:
+            hard_flags.append(f"Insufficient specifications: {empty_spec_count} of 4 required specs are empty (fewer than 2 populated)")
+        elif empty_spec_count == 2:
+            missing_sf = [sf.replace("Spec_", "").lower() for sf in spec_fields if is_empty_value(get_effective_value(row_dict, sf))]
+            warnings.append(f"Partial specifications: 2 of 4 specs empty ({', '.join(missing_sf)})")
+    else:
+        # For non-powerbank categories (TWS, Smartwatch, Audio, etc.):
+        # Valid if product has structured specs OR >= 2 verified feature bullets
+        populated_specs = sum(1 for sf in ["Spec_Capacity", "Spec_Output", "Spec_Ports", "Spec_Weight"] if not is_empty_value(get_effective_value(row_dict, sf)))
+        populated_bullets = sum(1 for b_idx in range(1, 5) if not is_empty_value(get_effective_value(row_dict, f"Bullet_{b_idx}")))
+        if populated_specs == 0 and populated_bullets < 2:
+            hard_flags.append("Insufficient specifications: No technical specifications or feature bullets found across available sources")
+        elif populated_specs == 0 and populated_bullets >= 2:
+            warnings.append("Specifications derived directly from verified product description")
 
     # --------------------------------------------------------------------------
     # HARD CHECK f: Any populated field with an empty Source_ (Write Guard Integrity)

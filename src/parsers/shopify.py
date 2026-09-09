@@ -2,11 +2,12 @@ import re
 from typing import Set, Dict, List
 from bs4 import BeautifulSoup
 from src.parsers.base import BaseParser, ParserResult
+from src.utils.category_specs import extract_category_specs
 
 
 class ShopifyParser(BaseParser):
     """
-    Parser for Shopify-based brand storefronts (e.g. Stuffcool).
+    Parser for Shopify-based brand storefronts (e.g. Stuffcool, Pebble).
     Extracts product title, clean description, collapsed accordion specs, and high-res images.
     """
 
@@ -18,7 +19,7 @@ class ShopifyParser(BaseParser):
     def capabilities(self) -> Set[str]:
         return {"specs", "images"}
 
-    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1) -> ParserResult:
+    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1, category: Optional[str] = None) -> ParserResult:
         if status_code in (401, 403, 429):
             return ParserResult(success=False, status_code=status_code, url=url, is_blocked=True, tier=tier, error=f"HTTP {status_code} Blocked")
         if status_code in (404, 410):
@@ -58,8 +59,8 @@ class ShopifyParser(BaseParser):
 
         full_product_text = f"{product_title or ''}\n{desc_text}\n" + "\n".join(spec_text_blocks)
 
-        # Parse structured specs
-        specs = self._extract_specs(full_product_text)
+        # Parse structured specs based on category context
+        specs = extract_category_specs(full_product_text, category=category)
 
         # Extract MRP / List Price
         mrp = None
@@ -95,9 +96,9 @@ class ShopifyParser(BaseParser):
                 if val > 100:
                     mrp = val
 
-        # Has specs verification: require at least capacity or wattage/output
-        has_specs = bool(specs.get("capacity") or specs.get("output"))
-        if not has_specs and not desc_text:
+        # Has specs verification: require at least 1 extracted spec or verified product description
+        has_specs = bool(specs) or bool(desc_text.strip())
+        if not has_specs:
             return ParserResult(success=False, status_code=200, url=url, is_delisted=True, tier=tier, error="Page lacks technical specs")
 
         # Extract High-Res Product Images (Prioritize og:image, ignore video posters & thumbnails)

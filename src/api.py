@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import io
@@ -11,6 +12,23 @@ import asyncio
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, Union
+
+
+def sanitize_json_values(obj: Any) -> Any:
+    """Recursively replaces NaN, Inf, -Inf with None so json.dumps produces valid JSON."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, dict):
+        return {k: sanitize_json_values(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [sanitize_json_values(v) for v in obj]
+    return obj
+
+
+def safe_json_dumps(obj: Any) -> str:
+    return json.dumps(sanitize_json_values(obj))
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -212,7 +230,7 @@ async def stream_job_progress(job_id: str):
                 "total": current_job.get("progress_total", 0),
                 "message": current_job.get("message", "")
             }
-            yield f"data: {json.dumps(initial_evt)}\n\n"
+            yield f"data: {safe_json_dumps(initial_evt)}\n\n"
             terminal_evt = {
                 "stage": "terminal",
                 "status": current_job["status"],
@@ -223,7 +241,7 @@ async def stream_job_progress(job_id: str):
                 "result": current_job.get("result"),
                 "error": current_job.get("error")
             }
-            yield f"data: {json.dumps(terminal_evt)}\n\n"
+            yield f"data: {safe_json_dumps(terminal_evt)}\n\n"
             return
 
         # 2. Register subscriber queue for live events
@@ -239,13 +257,13 @@ async def stream_job_progress(job_id: str):
                 "total": current_job.get("progress_total", 0),
                 "message": current_job.get("message", "")
             }
-            yield f"data: {json.dumps(init_evt)}\n\n"
+            yield f"data: {safe_json_dumps(init_evt)}\n\n"
 
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(q.get(), timeout=2.0)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield f"data: {safe_json_dumps(event)}\n\n"
                     if event.get("stage") == "terminal":
                         break
                 except asyncio.TimeoutError:
@@ -262,7 +280,7 @@ async def stream_job_progress(job_id: str):
                             "result": j.get("result") if j else None,
                             "error": j.get("error") if j else None
                         }
-                        yield f"data: {json.dumps(term_evt)}\n\n"
+                        yield f"data: {safe_json_dumps(term_evt)}\n\n"
                         break
                     # Send SSE keep-alive comment
                     yield ": keep-alive\n\n"

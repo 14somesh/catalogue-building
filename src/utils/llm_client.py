@@ -411,10 +411,11 @@ def post_process_copy_payload(raw_copy: Dict[str, Any], brand: str) -> Tuple[Dic
     return processed, all_valid
 
 
-def _build_copy_prompts(brand: str, model_name: str, product_description_block: str, specs: Dict[str, str]) -> Tuple[str, str]:
+def _build_copy_prompts(brand: str, model_name: str, product_description_block: str, specs: Dict[str, str], category: Optional[str] = None) -> Tuple[str, str]:
     """Builds identical structured copy system and user prompts across all providers."""
     user_prompt = (
         f"Brand: {brand}\n"
+        f"Category: {category or 'Electronics'}\n"
         f"Model: {model_name}\n"
         f"Verified Specs: {json.dumps(specs)}\n\n"
         f"--- VERIFIED PRODUCT DESCRIPTION BLOCK ---\n"
@@ -430,13 +431,14 @@ def _draft_copy_gemini(
     model_name: str,
     product_description_block: str,
     specs: Dict[str, str],
+    category: Optional[str] = None,
     model: str = "gemini-3.6-flash",
     temperature: float = 0.2,
     max_retries: int = 3
 ) -> Dict[str, Any]:
     """Executes copy drafting on Gemini with deterministic post-processing."""
     client = get_gemini_client()
-    system_prompt, user_prompt = _build_copy_prompts(brand, model_name, product_description_block, specs)
+    system_prompt, user_prompt = _build_copy_prompts(brand, model_name, product_description_block, specs, category=category)
     logger.info(f"Calling Gemini ({model}) to draft copy for {brand} {model_name}...")
 
     last_error = None
@@ -451,31 +453,20 @@ def _draft_copy_gemini(
                     temperature=temperature
                 )
             )
-            parsed_data = json.loads(response.text)
-            processed_data, is_valid = post_process_copy_payload(parsed_data, brand)
-            if is_valid or attempt == max_retries:
-                return processed_data
-            logger.warning(f"[Gemini] Copy validation failed on attempt {attempt}/{max_retries}. Re-requesting...")
-
+            raw_text = response.text
+            if not raw_text:
+                raise ValueError("Empty response from Gemini")
+            parsed = json.loads(raw_text)
+            processed, is_valid = post_process_copy_payload(parsed, brand)
+            if is_valid:
+                return processed
+            logger.warning(f"[Gemini] Attempt {attempt}: Post-processing validation failed. Retrying...")
         except Exception as e:
             last_error = e
-            err_type = classify_gemini_error(e)
+            logger.warning(f"[Gemini] Attempt {attempt} failed: {e}")
 
-            if err_type == "QUOTA_EXHAUSTED":
-                raise GeminiDailyQuotaExhaustedError(str(e))
-            elif err_type == "RATE_LIMIT" and attempt < max_retries:
-                backoff_sec = 10 + (attempt * 5)
-                logger.warning(f"[Gemini] Rate limit on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
-                time.sleep(backoff_sec)
-            elif err_type == "TRANSIENT" and attempt < max_retries:
-                backoff_sec = 2 ** attempt
-                logger.warning(f"[Gemini] Transient error on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
-                time.sleep(backoff_sec)
-            else:
-                logger.error(f"[Gemini] Error on attempt {attempt}: {e}")
-                break
-
-    raise RuntimeError(f"Gemini drafting failed after {max_retries} attempts: {last_error}")
+    logger.error(f"[Gemini] All {max_retries} attempts failed for {brand} {model_name}: {last_error}")
+    raise last_error or RuntimeError("Gemini drafting failed")
 
 
 def _draft_copy_groq(
@@ -483,53 +474,42 @@ def _draft_copy_groq(
     model_name: str,
     product_description_block: str,
     specs: Dict[str, str],
+    category: Optional[str] = None,
     model: str = "llama-3.3-70b-versatile",
     temperature: float = 0.2,
     max_retries: int = 3
 ) -> Dict[str, Any]:
     """Executes copy drafting on Groq with deterministic post-processing."""
     client = get_groq_client()
-    system_prompt, user_prompt = _build_copy_prompts(brand, model_name, product_description_block, specs)
+    system_prompt, user_prompt = _build_copy_prompts(brand, model_name, product_description_block, specs, category=category)
     logger.info(f"Calling Groq ({model}) to draft copy for {brand} {model_name}...")
 
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            completion = client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt + "\nReturn JSON adhering to ProductCopySchema (title, subtitle, bullet_1, bullet_2, bullet_3, bullet_4)."},
                     {"role": "user", "content": user_prompt}
                 ],
                 response_format={"type": "json_object"},
                 temperature=temperature
             )
-            raw_content = completion.choices[0].message.content
-            parsed_data = json.loads(raw_content)
-            processed_data, is_valid = post_process_copy_payload(parsed_data, brand)
-            if is_valid or attempt == max_retries:
-                return processed_data
-            logger.warning(f"[Groq] Copy validation failed on attempt {attempt}/{max_retries}. Re-requesting...")
-
+            raw_text = response.choices[0].message.content
+            if not raw_text:
+                raise ValueError("Empty response from Groq")
+            parsed = json.loads(raw_text)
+            processed, is_valid = post_process_copy_payload(parsed, brand)
+            if is_valid:
+                return processed
+            logger.warning(f"[Groq] Attempt {attempt}: Post-processing validation failed. Retrying...")
         except Exception as e:
             last_error = e
-            err_type = classify_groq_error(e)
+            logger.warning(f"[Groq] Attempt {attempt} failed: {e}")
 
-            if err_type == "QUOTA_EXHAUSTED":
-                raise GroqDailyQuotaExhaustedError(str(e))
-            elif err_type == "RATE_LIMIT" and attempt < max_retries:
-                backoff_sec = 5 + (attempt * 3)
-                logger.warning(f"[Groq] Rate limit on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
-                time.sleep(backoff_sec)
-            elif err_type == "TRANSIENT" and attempt < max_retries:
-                backoff_sec = 2 ** attempt
-                logger.warning(f"[Groq] Transient error on attempt {attempt}/{max_retries}. Retrying in {backoff_sec}s...")
-                time.sleep(backoff_sec)
-            else:
-                logger.error(f"[Groq] Error on attempt {attempt}: {e}")
-                break
-
-    raise RuntimeError(f"Groq drafting failed after {max_retries} attempts: {last_error}")
+    logger.error(f"[Groq] All {max_retries} attempts failed for {brand} {model_name}: {last_error}")
+    raise last_error or RuntimeError("Groq drafting failed")
 
 
 def draft_bullets_and_subtitle(
@@ -537,6 +517,7 @@ def draft_bullets_and_subtitle(
     model_name: str,
     product_description_block: str,
     specs: Dict[str, str],
+    category: Optional[str] = None,
     llm_config: Optional[dict] = None,
     max_retries: int = 3
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -568,6 +549,7 @@ def draft_bullets_and_subtitle(
                     model_name=model_name,
                     product_description_block=product_description_block,
                     specs=specs,
+                    category=category,
                     model=p_model or "gemini-3.6-flash",
                     temperature=p_temp,
                     max_retries=max_retries
@@ -581,6 +563,7 @@ def draft_bullets_and_subtitle(
                     model_name=model_name,
                     product_description_block=product_description_block,
                     specs=specs,
+                    category=category,
                     model=p_model or "llama-3.3-70b-versatile",
                     temperature=p_temp,
                     max_retries=max_retries
