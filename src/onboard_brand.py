@@ -252,8 +252,8 @@ Execute these tasks:
    - If two prices exist: the lower price is Dealer Price (DP), the higher price is Maximum Retail Price (MRP).
    - If one price exists: it is Dealer Price (DP).
 4. Extract product rows:
-   - Strip internal SKU codes, brand prefixes, and color variant suffixes (e.g. 'Black', 'White') to produce `model_name`.
-   - Generate `display_name`: the SHORTEST clean product title for the catalogue card (e.g. 'Mega', 'Major', 'Roam Plus', 'Power Shutter' — NOT 'Mega 20000mAh Powerbank').
+   - For `model_name`: Keep the FULL functional branded model name (e.g. 'STRIKER Buds', 'Wave Buds', 'Open Loop', 'Roam 20000mAh', 'Powerbox 10K', 'Cosmos Ultra'). Strip ONLY internal SKU codes, brand prefixes, color variant suffixes (e.g. 'Black', 'White'), and price-sheet noise. NEVER strip words that identify the product model or category ('Buds', 'TWS', 'Watch', 'Band', 'Powerbank', etc. MUST stay in `model_name`).
+   - For `display_name`: Generate the SHORTEST clean display title for the catalogue card layout (e.g. 'STRIKER', 'Wave', 'Open Loop', 'Roam', 'Mega').
    - Extract `dp` and `mrp` as numbers if found in the row.
 5. Select Brand-Specific Qualifier Tokens:
    - Analyze naming patterns for true variant/modifier suffixes (e.g. 'Plus', 'Pro', 'Max', 'Mini', 'Ultra', 'Lite', 'Go').
@@ -280,8 +280,8 @@ Execute these tasks autonomously:
    - If two prices exist: the lower price is Dealer Price (DP), the higher price is Maximum Retail Price (MRP).
    - If one price exists: it is Dealer Price (DP).
 5. Extract product rows:
-   - Strip internal SKU codes, brand prefixes, and color variant suffixes (e.g. 'Black', 'White') to produce `model_name`.
-   - Generate `display_name`: the SHORTEST clean product title for the catalogue card (e.g. 'Mega', 'Major', 'Roam Plus', 'Power Shutter' — NOT 'Mega 20000mAh Powerbank').
+   - For `model_name`: Keep the FULL functional branded model name (e.g. 'STRIKER Buds', 'Wave Buds', 'Open Loop', 'Roam 20000mAh', 'Powerbox 10K', 'Cosmos Ultra'). Strip ONLY internal SKU codes, brand prefixes, color variant suffixes (e.g. 'Black', 'White'), and price-sheet noise. NEVER strip words that identify the product model or category ('Buds', 'TWS', 'Watch', 'Band', 'Powerbank', etc. MUST stay in `model_name`).
+   - For `display_name`: Generate the SHORTEST clean display title for the catalogue card layout (e.g. 'STRIKER', 'Wave', 'Open Loop', 'Roam', 'Mega').
    - Extract `dp` and `mrp` as numbers if found in the row.
 6. Select Brand-Specific Qualifier Tokens:
    - Analyze the catalog's naming patterns to identify true variant/modifier suffixes (e.g. 'Plus', 'Pro', 'Max', 'Mini', 'Ultra', 'Lite', 'Go').

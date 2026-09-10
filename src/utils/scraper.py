@@ -167,7 +167,7 @@ def extract_model_name_portion(title: str, brand: str = "") -> str:
             cleaned = leading_part
 
     # Split on capacity, wattage, or generic category keywords
-    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*(?:\.\d+)?|certified|magnetic|wireless|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*(?:\.\d+)?|certified|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
     m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
     if m:
         leading_part = cleaned[:m.start()].strip()
@@ -181,18 +181,22 @@ def score_candidate_match(
     candidate_title: str,
     candidate_url: str,
     brand: str = "",
-    qualifier_tokens: Optional[List[str]] = None
+    qualifier_tokens: Optional[List[str]] = None,
+    category: Optional[str] = None
 ) -> Tuple[float, bool, str]:
     """
     BIDIRECTIONAL CANDIDATE MATCHER & SCORER:
-    1. Requires all target model tokens to be present in candidate (subset check).
+    1. Requires all target model tokens to be present in candidate (subset check or token-boundary equivalence).
     2. Enforces qualifier token mismatch checks.
     3. Rewards exact title / model portion / slug match.
-    4. Strongly penalizes candidates with extra model-name tokens not in target.
+    4. Strongly penalizes candidates with extra model-name tokens not in target (excluding category descriptors and internal SKUs).
     Returns (score, is_valid, diagnostic_reason).
     """
+    from src.utils.category_specs import get_category_descriptor_tokens
+
     brand_lower = brand.lower() if brand else ""
-    stopwords = {"pb", brand_lower, "powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and", "in", "for", "customized", "custom", "suction"}
+    category_descriptors = get_category_descriptor_tokens(category)
+    stopwords = {"pb", brand_lower, "powerbank", "power", "bank", "portable", "charger", "fast", "charging", "series", "the", "with", "and", "in", "for", "customized", "custom", "suction"} | category_descriptors
     
     # 1. Target tokens
     target_model_part = extract_model_name_portion(target_model_name, brand=brand)
@@ -214,7 +218,19 @@ def score_candidate_match(
     if not primary_target_tokens:
         primary_target_tokens = target_tokens
 
-    if not target_tokens.issubset(cand_all_tokens) and not primary_target_tokens.issubset(cand_all_tokens):
+    is_subset = target_tokens.issubset(cand_all_tokens) or primary_target_tokens.issubset(cand_all_tokens)
+    if not is_subset:
+        # Narrow token-boundary / compound check (e.g. 'openloop' vs 'open loop')
+        cand_all_alphanumeric = re.sub(r'[^a-zA-Z0-9]', '', (candidate_title + " " + cand_slug)).lower()
+        target_str_compact = re.sub(r'[^a-zA-Z0-9]', '', target_model_part).lower()
+        if target_str_compact and target_str_compact in cand_all_alphanumeric:
+            is_subset = True
+        else:
+            target_primary_compact = re.sub(r'[^a-zA-Z0-9]', '', " ".join(sorted(primary_target_tokens))).lower()
+            if target_primary_compact and target_primary_compact in cand_all_alphanumeric:
+                is_subset = True
+
+    if not is_subset:
         return -1.0, False, f"Target tokens {primary_target_tokens} missing in candidate '{candidate_title}'"
         
     # Qualifier token check
@@ -237,10 +253,18 @@ def score_candidate_match(
     
     # Extra tokens penalty in model portion (Rule 1 & Rule 3)
     # If candidate model-name segment contains extra model tokens not in target, reject as different model
-    raw_extra_tokens = (cand_model_tokens - target_tokens) - qualifiers_norm
+    raw_extra_tokens = (cand_model_tokens - target_tokens) - qualifiers_norm - category_descriptors
     # Ignore internal SKU part numbers (e.g. 'p0109', 'p0208', 'p0301', '0109', 'p')
     sku_tokens = {tok for tok in raw_extra_tokens if re.fullmatch(r'p\d+|\d{3,5}|p|sku', tok, re.I)}
     extra_model_tokens = raw_extra_tokens - sku_tokens
+    
+    # Narrow token-boundary equivalence: if candidate model segment matches target across whitespace/hyphens
+    if extra_model_tokens:
+        target_comp = re.sub(r'[^a-zA-Z0-9]', '', target_model_part).lower()
+        cand_comp = re.sub(r'[^a-zA-Z0-9]', '', cand_model_part).lower()
+        if target_comp and target_comp == cand_comp:
+            extra_model_tokens = set()
+
     if extra_model_tokens:
         reason = f"Extra model token mismatch in '{cand_model_part}': candidate has {extra_model_tokens} not in target '{target_model_name}'."
         logger.warning(f"Rejected candidate '{candidate_title}' for '{target_model_name}': {reason}")
@@ -284,7 +308,7 @@ def extract_leading_model_segment(title: str, brand: str = "") -> str:
         if leading_part:
             cleaned = leading_part
 
-    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*(?:\.\d+)?|certified|magnetic|wireless|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
+    split_pattern = r'\b(?:\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*(?:\.\d+)?|certified|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in)\b'
     m = re.search(split_pattern, cleaned, flags=re.IGNORECASE)
     if m:
         leading_part = cleaned[:m.start()].strip()
@@ -823,7 +847,8 @@ def search_shopify_brand_store(
     domain: str,
     qualifier_tokens: List[str],
     exclude_urls: Optional[Set[str]] = None,
-    timeout: int = 15
+    timeout: int = 15,
+    category: Optional[str] = None
 ) -> Optional[str]:
     """
     Tier 1 & Tier 2 Shopify Discovery:
@@ -857,7 +882,7 @@ def search_shopify_brand_store(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
         )
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": p_title, "score": score, "source": "suggest"})
@@ -874,7 +899,7 @@ def search_shopify_brand_store(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
         )
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": title, "score": score, "source": "catalogue"})
@@ -894,7 +919,8 @@ def search_retail_reliance(
     model_name: str,
     qualifier_tokens: List[str],
     exclude_urls: Optional[Set[str]] = None,
-    timeout: int = 15
+    timeout: int = 15,
+    category: Optional[str] = None
 ) -> Optional[str]:
     """
     Tier 3 Reliance Digital Discovery:
@@ -937,7 +963,7 @@ def search_retail_reliance(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, display, product_url, brand=brand, qualifier_tokens=qualifier_tokens
+            model_name, display, product_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
         )
         if is_valid and score > 0:
             candidates.append({"url": product_url, "title": display, "score": score})
@@ -957,7 +983,8 @@ def search_retail_croma(
     model_name: str,
     qualifier_tokens: List[str],
     exclude_urls: Optional[Set[str]] = None,
-    timeout: int = 15
+    timeout: int = 15,
+    category: Optional[str] = None
 ) -> Optional[str]:
     """
     Tier 3 Croma Discovery:
@@ -998,7 +1025,7 @@ def search_retail_croma(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, name, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+            model_name, name, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
         )
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": name, "score": score})
@@ -1013,18 +1040,24 @@ def search_retail_croma(
     return None
 
 
-def fetch_and_parse_url(url: str, tier: int = 1, timeout: int = 15, platform: Optional[str] = None) -> ParserResult:
+def fetch_and_parse_url(
+    url: str,
+    tier: int = 1,
+    timeout: int = 15,
+    platform: Optional[str] = None,
+    category: Optional[str] = None
+) -> ParserResult:
     """
     Fetches a URL, dispatches to the appropriate parser, and returns ParserResult.
     Detects 401/403/429 (Blocked), 404/410/Soft-404 (Delisted), and extracts specs/images.
     Hard timeout of 15s enforced.
     """
-    logger.info(f"[Tier {tier}] Fetching URL: {url} (platform={platform or 'auto'})")
+    logger.info(f"[Tier {tier}] Fetching URL: {url} (platform={platform or 'auto'}, category={category or 'powerbank'})")
     parser = get_parser_for_url(url, platform=platform)
     
     try:
         response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
-        return parser.parse(url=url, html=response.text, status_code=response.status_code, tier=tier)
+        return parser.parse(url=url, html=response.text, status_code=response.status_code, tier=tier, category=category)
     except requests.exceptions.Timeout:
         logger.warning(f"[Tier {tier}] Timeout ({timeout}s) fetching {url}")
         return ParserResult(success=False, status_code=0, url=url, tier=tier, error="Connection timeout")

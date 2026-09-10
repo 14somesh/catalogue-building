@@ -50,7 +50,8 @@ def find_product_on_brand_collection(
     collection_url: str,
     qualifier_tokens: List[str],
     brand: str = "",
-    exclude_urls: Optional[Set[str]] = None
+    exclude_urls: Optional[Set[str]] = None,
+    category: Optional[str] = None
 ) -> Optional[str]:
     """
     Tier 2 helper: Scans brand collection page for product links matching model name with candidate scoring.
@@ -88,7 +89,7 @@ def find_product_on_brand_collection(
 
             combined_candidate = " ".join(text_list)
             score, is_valid, diag = score_candidate_match(
-                model_name, combined_candidate, full_url, brand=brand, qualifier_tokens=qualifier_tokens
+                model_name, combined_candidate, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
             )
             if is_valid and score > 0:
                 candidates.append({"url": full_url, "title": combined_candidate, "score": score})
@@ -104,14 +105,21 @@ def find_product_on_brand_collection(
     return None
 
 
-def is_specs_insufficient(specs: Dict[str, str]) -> Tuple[bool, int, List[str]]:
+def is_specs_insufficient(specs: Dict[str, str], category: Optional[str] = None) -> Tuple[bool, int, List[str]]:
     """
-    Checks if a spec dictionary has fewer than 3 of 4 required specs populated.
-    Required specs: capacity, output, ports, weight.
+    Category-aware specification sufficiency check.
+    For Powerbank: checks capacity, output, ports, weight (requires >= 2 of 4).
+    For other categories: checks primary category specs against min_required_specs.
     """
-    required_keys = ["capacity", "output", "ports", "weight"]
-    missing = [k for k in required_keys if not specs.get(k) or is_empty_value(specs.get(k))]
-    return (len(missing) > 1), len(missing), missing
+    from src.utils.category_specs import get_category_spec_definition
+    cat_def = get_category_spec_definition(category)
+    primary_keys = cat_def.get("primary_specs", ["capacity", "output", "ports", "weight"])
+    min_required = cat_def.get("min_required_specs", 2)
+    
+    missing = [k for k in primary_keys if not specs.get(k) or is_empty_value(specs.get(k))]
+    populated = len(primary_keys) - len(missing)
+    is_insufficient = (populated < min_required)
+    return is_insufficient, len(missing), missing
 
 
 def execute_vision_fallback_for_page(
@@ -291,10 +299,10 @@ def execute_spec_escalation(
         combined_res, combined_provenance = _merge_res(
             combined_res, brochure_res, f"tier-{brochure_res.tier}: ({brochure_res.url})"
         )
-        is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+        is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
         if not is_thin:
             return combined_res, combined_provenance
-        logger.info(f"[{product_id}] Tier 0 Brochure yielded partial specs ({missing_count}/5 empty: {missing_keys}). Escalating to Tier 1 to fill gaps...")
+        logger.info(f"[{product_id}] Tier 0 Brochure yielded partial specs ({missing_count} empty: {missing_keys}). Escalating to Tier 1 to fill gaps...")
 
     # Check if brand domain is configured; if not, run autonomous domain discovery
     if not brand_domain:
@@ -325,7 +333,7 @@ def execute_spec_escalation(
 
         if not tier1_url:
             # 1a. Try Shopify direct index
-            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls)
+            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category)
             
             # 1b. Non-Shopify Generic Sitemap Fallback
             if not tier1_url:
@@ -342,7 +350,7 @@ def execute_spec_escalation(
         brand_platform = brand_cfg.get("platform")
         if tier1_url:
             logger.info(f"[{product_id}] Executing Tier 1 (Brand Product Page): {tier1_url}")
-            res = fetch_and_parse_url(tier1_url, tier=1, platform=brand_platform)
+            res = fetch_and_parse_url(tier1_url, tier=1, platform=brand_platform, category=category)
             if res.is_blocked:
                 from src.utils.profiler import record_waf_block
                 record_waf_block(brand, domain=brand_domain, reason="HTTP 403 / Bot Challenge")
@@ -350,20 +358,20 @@ def execute_spec_escalation(
                 logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned HTTP 403 / Bot Challenge. Persisted WAF block and escalating to Tier 3 Retail.")
             elif res.success and res.specs:
                 combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-1: brand-page ({tier1_url})")
-                is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                 if not is_thin:
                     return combined_res, combined_provenance
-                logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count}/4 empty: {missing_keys}). Checking Vision Fallback...")
+                logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count} empty: {missing_keys}). Checking Vision Fallback...")
             
             # VISION FALLBACK Tier 1: Fires if HTML returned 200 but specs are missing / thin
             if res.status_code == 200:
                 vision_res = execute_vision_fallback_for_page(tier1_url, brand, model_name, base_tier=1, config=cfg, existing_images=res.image_urls)
                 if vision_res and vision_res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-1-vision: brand-page ({tier1_url})")
-                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                     if not is_thin:
                         return combined_res, combined_provenance
-                    logger.warning(f"[{product_id}] Tier 1 Vision yielded partial specs ({missing_count}/4 empty). Escalating to Tier 2...")
+                    logger.warning(f"[{product_id}] Tier 1 Vision yielded partial specs ({missing_count} empty). Escalating to Tier 2...")
                 else:
                     logger.warning(f"[{product_id}] Tier 1 Vision yielded no specs. Escalating to Tier 2...")
             elif not res.is_blocked:
@@ -376,9 +384,9 @@ def execute_spec_escalation(
         collection_url = brand_cfg.get("collection_url")
         if collection_url and not brand_cfg.get("waf_blocked"):
             logger.info(f"[{product_id}] Executing Tier 2 (Brand Collection Page): {collection_url}")
-            tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls)
+            tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls, category=category)
             if tier2_prod_url:
-                res = fetch_and_parse_url(tier2_prod_url, tier=2, platform=brand_platform)
+                res = fetch_and_parse_url(tier2_prod_url, tier=2, platform=brand_platform, category=category)
                 if res.is_blocked:
                     from src.utils.profiler import record_waf_block
                     record_waf_block(brand, domain=brand_domain, reason="HTTP 403 / Bot Challenge")
@@ -386,20 +394,20 @@ def execute_spec_escalation(
                     logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned HTTP 403 / Bot Challenge. Persisted WAF block.")
                 elif res.success and res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-2: brand-collection ({tier2_prod_url})")
-                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                     if not is_thin:
                         return combined_res, combined_provenance
-                    logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count}/4 empty). Checking Vision Fallback...")
+                    logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count} empty). Checking Vision Fallback...")
                 
                 # VISION FALLBACK Tier 2
                 if res.status_code == 200:
                     vision_res = execute_vision_fallback_for_page(tier2_prod_url, brand, model_name, base_tier=2, config=cfg, existing_images=res.image_urls)
                     if vision_res and vision_res.specs:
                         combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-2-vision: brand-collection ({tier2_prod_url})")
-                        is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                        is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                         if not is_thin:
                             return combined_res, combined_provenance
-                        logger.warning(f"[{product_id}] Tier 2 Vision yielded partial specs ({missing_count}/5 empty). Escalating to Tier 3...")
+                        logger.warning(f"[{product_id}] Tier 2 Vision yielded partial specs ({missing_count} empty). Escalating to Tier 3...")
                     else:
                         logger.warning(f"[{product_id}] Tier 2 Vision yielded no specs. Escalating to Tier 3...")
             else:
@@ -411,29 +419,29 @@ def execute_spec_escalation(
         store_lower = retail_store.lower()
         retail_url = None
         if "reliance" in store_lower:
-            retail_url = search_retail_reliance(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls)
+            retail_url = search_retail_reliance(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category)
         elif "croma" in store_lower:
-            retail_url = search_retail_croma(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls)
+            retail_url = search_retail_croma(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category)
 
         if retail_url:
             logger.info(f"[{product_id}] Executing Tier 3 ({retail_store}): {retail_url}")
-            res = fetch_and_parse_url(retail_url, tier=3)
+            res = fetch_and_parse_url(retail_url, tier=3, category=category)
             if res.success and res.specs:
                 combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-3: retail-{retail_store} ({retail_url})")
-                is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                 if not is_thin:
                     return combined_res, combined_provenance
-                logger.warning(f"[{product_id}] Tier 3 ({retail_store}) HTML yielded insufficient specs ({missing_count}/5 empty). Checking Vision Fallback...")
+                logger.warning(f"[{product_id}] Tier 3 ({retail_store}) HTML yielded insufficient specs ({missing_count} empty). Checking Vision Fallback...")
             
             # VISION FALLBACK Tier 3
             if res.status_code == 200:
                 vision_res = execute_vision_fallback_for_page(retail_url, brand, model_name, base_tier=3, config=cfg, existing_images=res.image_urls)
                 if vision_res and vision_res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-3-vision: retail-{retail_store} ({retail_url})")
-                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs)
+                    is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                     if not is_thin:
                         return combined_res, combined_provenance
-                    logger.warning(f"[{product_id}] Tier 3 Vision yielded partial specs ({missing_count}/5 empty). Trying next retail...")
+                    logger.warning(f"[{product_id}] Tier 3 Vision yielded partial specs ({missing_count} empty). Trying next retail...")
                 else:
                     logger.warning(f"[{product_id}] Tier 3 Vision yielded no specs. Trying next retail...")
             else:

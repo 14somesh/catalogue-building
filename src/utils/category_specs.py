@@ -98,6 +98,21 @@ def normalize_category_key(category: Optional[str]) -> str:
     return "generic"
 
 
+CATEGORY_DESCRIPTOR_TOKENS: Dict[str, Set[str]] = {
+    "powerbank": {"powerbank", "powerbanks", "power", "bank", "banks", "pb"},
+    "tws": {"buds", "bud", "tws", "earbuds", "earbud", "earphones", "earphone", "headphones", "headphone", "airbuds", "airbud", "truly"},
+    "audio": {"audio", "headphones", "headphone", "earphones", "earphone", "speaker", "speakers", "soundbar", "soundbars", "buds", "earbuds"},
+    "smartwatch": {"smartwatch", "smartwatches", "watch", "watches", "band", "bands", "wearable"},
+    "generic": set()
+}
+
+
+def get_category_descriptor_tokens(category: Optional[str]) -> Set[str]:
+    """Returns the set of category-specific descriptor synonyms for token matching."""
+    key = normalize_category_key(category)
+    return set(CATEGORY_DESCRIPTOR_TOKENS.get(key, set()))
+
+
 def get_category_spec_definition(category: Optional[str]) -> Dict[str, Any]:
     """Returns the spec definition configuration for a category."""
     key = normalize_category_key(category)

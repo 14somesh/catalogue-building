@@ -31,6 +31,12 @@ brands:
         - Mini
         - Lite
         - Go
+      TWS:
+        collection_url: https://www.pebblecart.com/collections/headphones
+        qualifier_tokens:
+        - Pro
+        - Max
+        - Plus
   Portronics:
     domain: portronics.com
     platform: shopify
