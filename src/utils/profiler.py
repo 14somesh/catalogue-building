@@ -234,7 +234,9 @@ def discover_collection_url(
 def record_waf_block(
     brand: str,
     domain: str,
+    vendor: Optional[str] = None,
     reason: str = "HTTP 403 Bot Challenge",
+    platform: str = "custom",
     config_path: str = "config/brand_defaults.yaml"
 ) -> None:
     """
@@ -257,15 +259,19 @@ def record_waf_block(
     if brand not in cfg["brands"]:
         cfg["brands"][brand] = {}
 
-    cfg["brands"][brand]["domain"] = domain
-    cfg["brands"][brand]["waf_blocked"] = True
-    cfg["brands"][brand]["waf_reason"] = reason
-    cfg["brands"][brand]["waf_blocked_at"] = now_iso
+    brand_entry = cfg["brands"][brand]
+    brand_entry["domain"] = domain
+    brand_entry["platform"] = platform
+    brand_entry["waf_blocked"] = True
+    if vendor:
+        brand_entry["waf_vendor"] = vendor
+    brand_entry["waf_reason"] = reason
+    brand_entry["waf_blocked_at"] = now_iso
 
     with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, sort_keys=False, default_flow_style=False)
+        yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
 
-    logger.warning(f"[WAF Learning] Persisted WAF block for brand '{brand}' ({domain}): {reason} at {now_iso}")
+    logger.warning(f"[WAF Learning] Persisted WAF block for brand '{brand}' ({domain}): {vendor or 'WAF'} - {reason} at {now_iso}")
 
 
 def profile_brand(
@@ -298,6 +304,8 @@ def profile_brand(
         "collection_url": None,
         "qualifier_tokens": [],
         "waf_blocked": False,
+        "waf_vendor": None,
+        "waf_reason": None,
         "found": [],
         "not_found": []
     }
@@ -308,14 +316,21 @@ def profile_brand(
     # Check if brand is known to be WAF blocked
     if existing_cfg.get("waf_blocked"):
         report["waf_blocked"] = True
+        report["waf_vendor"] = existing_cfg.get("waf_vendor")
+        report["waf_reason"] = existing_cfg.get("waf_reason")
         report["domain"] = existing_cfg.get("domain")
-        report["found"].append(f"WAF block recorded ({existing_cfg.get('waf_reason', 'Bot Challenge')})")
+        report["found"].append(f"WAF block recorded ({existing_cfg.get('waf_vendor', 'WAF')}: {existing_cfg.get('waf_reason', 'Bot Challenge')})")
 
     # a) Domain
     domain = existing_domain or existing_cfg.get("domain")
     if not domain and not report["waf_blocked"]:
         disc = discover_and_verify_brand_domain(clean_brand, model_names, category=clean_category, config_path=config_path)
         domain = disc.get("domain")
+        if disc.get("waf_blocked"):
+            report["waf_blocked"] = True
+            report["waf_vendor"] = disc.get("waf_vendor")
+            report["waf_reason"] = disc.get("waf_reason")
+            report["found"].append(f"WAF block detected during discovery ({disc.get('waf_vendor', 'WAF')}: {disc.get('waf_reason')})")
 
     if domain:
         report["domain"] = domain
