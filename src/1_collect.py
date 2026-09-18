@@ -25,6 +25,7 @@ from src.utils.scraper import (
     normalize_model_tokens,
     is_boilerplate_bullet,
     load_brand_defaults,
+    save_brand_domain_default,
     search_shopify_brand_store,
     search_retail_reliance,
     search_retail_croma,
@@ -55,22 +56,34 @@ def find_product_on_brand_collection(
 ) -> Optional[str]:
     """
     Tier 2 helper: Scans brand collection page for product links matching model name with candidate scoring.
+    Falls back to TinyFish Fetch when collection page is protected by WAF.
     """
     exclude = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
     try:
+        html_text = ""
         r = requests.get(collection_url, headers=DEFAULT_HEADERS, timeout=15)
-        if r.status_code != 200:
-            return None
+        is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, collection_url)
+        if is_blocked or r.status_code != 200:
+            from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch
+            if is_tinyfish_configured():
+                logger.info(f"[Tier 2] Direct collection fetch blocked ({vendor or r.status_code}). Retrying via TinyFish Fetch: {collection_url}")
+                tf_res = tinyfish_fetch(collection_url)
+                if tf_res and tf_res.get("text"):
+                    html_text = tf_res["text"]
+            if not html_text:
+                return None
+        else:
+            html_text = r.text
         
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(html_text, "html.parser")
         prod_map = {}
         for a in soup.find_all("a", href=True):
             raw_href = a["href"].split("?")[0].split("#")[0]
-            if "/products/" in raw_href:
+            if "/products/" in raw_href or "/product/" in raw_href:
                 text = a.get_text().strip()
                 img = a.find("img", alt=True)
                 img_alt = img["alt"].strip() if img else ""
-                slug = raw_href.split("/products/")[-1].replace("-", " ")
+                slug = raw_href.split("/")[-1].replace("-", " ")
                 
                 if raw_href not in prod_map:
                     prod_map[raw_href] = []
@@ -79,6 +92,15 @@ def find_product_on_brand_collection(
                 if img_alt:
                     prod_map[raw_href].append(img_alt)
                 prod_map[raw_href].append(slug)
+
+        # Also search raw links in markdown if plain text
+        if not prod_map:
+            md_links = re.findall(r'\[([^\]]+)\]\((https?://[^\s\)]+)\)', html_text)
+            for l_text, l_url in md_links:
+                if any(k in l_url.lower() for k in ["/products/", "/product/", ".html"]):
+                    clean_u = l_url.split("?")[0]
+                    if clean_u not in prod_map:
+                        prod_map[clean_u] = [l_text, clean_u.split("/")[-1].replace("-", " ")]
 
         candidates = []
         for raw_href, text_list in prod_map.items():
@@ -313,6 +335,8 @@ def execute_spec_escalation(
             brand_domain = disc["domain"]
             brand_cfg["domain"] = disc["domain"]
             brand_cfg["platform"] = disc.get("platform", "shopify")
+            if disc.get("waf_bypass_via"):
+                brand_cfg["waf_bypass_via"] = disc.get("waf_bypass_via")
             if disc.get("collection_url"):
                 brand_cfg["collection_url"] = disc["collection_url"]
         elif disc.get("waf_blocked"):
@@ -320,10 +344,13 @@ def execute_spec_escalation(
             brand_cfg["domain"] = disc.get("domain")
             brand_cfg["waf_vendor"] = disc.get("waf_vendor")
             brand_cfg["waf_reason"] = disc.get("waf_reason")
+            if disc.get("waf_bypass_via"):
+                brand_cfg["waf_bypass_via"] = disc.get("waf_bypass_via")
 
+    has_tinyfish_bypass = (brand_cfg.get("waf_bypass_via") == "tinyfish")
     if not brand_domain and not brand_cfg.get("waf_blocked"):
         logger.info(f"[{product_id}] No verified brand domain configured for '{brand}'. Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
-    elif brand_cfg.get("waf_blocked"):
+    elif brand_cfg.get("waf_blocked") and not has_tinyfish_bypass:
         logger.warning(f"[{product_id}] Brand domain '{brand_domain or brand_cfg.get('domain')}' is flagged as WAF-blocked ({brand_cfg.get('waf_vendor', 'WAF')}: {brand_cfg.get('waf_reason', 'Bot Challenge')}). Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
     else:
         # ==================== TIER 1: Brand Product Page (Shopify Direct / Generic JSON-LD & Sitemap) ====================
@@ -361,8 +388,11 @@ def execute_spec_escalation(
                 from src.utils.profiler import record_waf_block
                 record_waf_block(brand, domain=brand_domain, reason=res.error or "HTTP 403 / Bot Challenge")
                 brand_cfg["waf_blocked"] = True
+                brand_cfg.pop("waf_bypass_via", None)
                 logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned WAF block. Persisted block and escalating to Tier 3 Retail.")
             elif res.success and res.specs:
+                if brand_domain and (brand_cfg.get("waf_blocked") or has_tinyfish_bypass):
+                    save_brand_domain_default(brand, brand_domain, platform=brand_platform or "custom", category=category, waf_bypass_via="tinyfish")
                 combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-1: brand-page ({tier1_url})")
                 is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                 if not is_thin:
@@ -388,7 +418,7 @@ def execute_spec_escalation(
 
         # ==================== TIER 2: Brand Collection Page ====================
         collection_url = brand_cfg.get("collection_url")
-        if collection_url and not brand_cfg.get("waf_blocked"):
+        if collection_url and (not brand_cfg.get("waf_blocked") or has_tinyfish_bypass):
             logger.info(f"[{product_id}] Executing Tier 2 (Brand Collection Page): {collection_url}")
             tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls, category=category)
             if tier2_prod_url:
@@ -397,8 +427,11 @@ def execute_spec_escalation(
                     from src.utils.profiler import record_waf_block
                     record_waf_block(brand, domain=brand_domain, reason=res.error or "HTTP 403 / Bot Challenge")
                     brand_cfg["waf_blocked"] = True
+                    brand_cfg.pop("waf_bypass_via", None)
                     logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned WAF block. Persisted block.")
                 elif res.success and res.specs:
+                    if brand_domain and (brand_cfg.get("waf_blocked") or has_tinyfish_bypass):
+                        save_brand_domain_default(brand, brand_domain, platform=brand_platform or "custom", category=category, waf_bypass_via="tinyfish")
                     combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-2: brand-collection ({tier2_prod_url})")
                     is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
                     if not is_thin:

@@ -237,12 +237,13 @@ def record_waf_block(
     vendor: Optional[str] = None,
     reason: str = "HTTP 403 Bot Challenge",
     platform: str = "custom",
-    config_path: str = "config/brand_defaults.yaml"
+    config_path: str = "config/brand_defaults.yaml",
+    waf_bypass_via: Optional[str] = None
 ) -> None:
     """
     RUNTIME WAF LEARNING:
     Records runtime bot protection / WAF block against brand in brand_defaults.yaml.
-    Future runs check waf_blocked: true and escalate directly to retail.
+    Future runs check waf_blocked: true and waf_bypass_via.
     """
     from datetime import datetime, timezone
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -267,6 +268,8 @@ def record_waf_block(
         brand_entry["waf_vendor"] = vendor
     brand_entry["waf_reason"] = reason
     brand_entry["waf_blocked_at"] = now_iso
+    if waf_bypass_via:
+        brand_entry["waf_bypass_via"] = waf_bypass_via
 
     with open(config_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)

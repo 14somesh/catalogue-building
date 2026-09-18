@@ -356,7 +356,8 @@ def save_brand_domain_default(
     platform: str = "shopify",
     collection_url: Optional[str] = None,
     category: Optional[str] = None,
-    config_path: str = "config/brand_defaults.yaml"
+    config_path: str = "config/brand_defaults.yaml",
+    waf_bypass_via: Optional[str] = None
 ) -> bool:
     """
     Persists a verified brand website domain (shared) and optional collection URL (category-scoped) to config/brand_defaults.yaml.
@@ -383,6 +384,8 @@ def save_brand_domain_default(
             brand_entry["domain"] = domain
         if platform:
             brand_entry["platform"] = platform
+        if waf_bypass_via:
+            brand_entry["waf_bypass_via"] = waf_bypass_via
 
         if collection_url and clean_category:
             if "categories" not in brand_entry or not isinstance(brand_entry["categories"], dict):
@@ -402,7 +405,7 @@ def save_brand_domain_default(
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f, sort_keys=False)
 
-        logger.info(f"Successfully saved verified domain '{domain}' (platform={platform}, category={clean_category}) for brand '{brand}' to {config_path}")
+        logger.info(f"Successfully saved verified domain '{domain}' (platform={platform}, category={clean_category}, waf_bypass_via={waf_bypass_via}) for brand '{brand}' to {config_path}")
         return True
     except Exception as e:
         logger.error(f"Failed saving brand domain for '{brand}' to {config_path}: {e}")
@@ -413,20 +416,26 @@ def verify_brand_storefront(
     domain: str,
     brand: str,
     model_names: List[str]
-) -> Tuple[bool, Optional[str], Optional[str], List[str], Optional[str], Optional[str], Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str], List[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Verifies that a candidate domain is an authentic storefront selling this brand's products.
     1. Checks if it is a parked / squatter domain or reseller directory.
     2. Cross-checks against the actual product model names from the price sheet.
-    3. Detects WAF / Bot protection challenges during discovery.
-    Returns (is_verified, platform, collection_url, matched_models, waf_vendor, waf_reason, actual_domain).
+    3. Detects WAF / Bot protection challenges during discovery and retries via TinyFish Fetch.
+    Returns (is_verified, platform, collection_url, matched_models, waf_vendor, waf_reason, actual_domain, waf_bypass_via).
     """
     from urllib.parse import urlparse
     import requests
+    from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch
 
     clean_domain = domain.strip().lower().replace("http://", "").replace("https://", "").replace("www.", "").rstrip("/")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    generic_model_words = {
+        "live", "go", "pro", "tour", "plus", "max", "mini", "lite", "play", "air",
+        "buds", "beam", "free", "one", "tune", "flex", "ace", "neo", "ultra", "flow"
     }
 
     # 1. Try Shopify products.json index (fastest, most authoritative)
@@ -434,12 +443,30 @@ def verify_brand_storefront(
         pjson_url = f"https://{clean_domain}/products.json?limit=250"
         r = requests.get(pjson_url, headers=headers, timeout=(2.0, 3.0), allow_redirects=True)
         is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, pjson_url)
+        
+        if is_blocked and is_tinyfish_configured():
+            logger.info(f"[Domain Verification] '{clean_domain}' products.json blocked by {vendor}. Retrying via TinyFish Fetch...")
+            tf_res = tinyfish_fetch(pjson_url)
+            if tf_res and tf_res.get("text"):
+                tf_text = tf_res["text"]
+                matched = []
+                for m in model_names:
+                    m_clean = m.strip()
+                    if not m_clean:
+                        continue
+                    if re.search(r'\b' + re.escape(m_clean) + r'\b', tf_text, re.IGNORECASE):
+                        matched.append(m)
+                has_substantive_match = any(m.lower().strip() not in generic_model_words for m in matched) or len(matched) >= 2
+                if matched and has_substantive_match:
+                    logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED via TinyFish Fetch products.json for '{brand}' with matched models: {matched}")
+                    return True, "shopify", None, matched, vendor, reason, clean_domain, "tinyfish"
+
         if is_blocked:
             actual_domain = urlparse(r.url).netloc.replace("www.", "").lower() if r.url else clean_domain
             logger.warning(f"[Domain Verification] Domain '{clean_domain}' (at {r.url}) is protected by WAF/Bot challenge ({vendor}: {reason}).")
-            return False, None, None, [], vendor, reason, actual_domain
+            # Don't return immediately; allow homepage check with TinyFish fallback
 
-        if r.status_code == 200:
+        elif r.status_code == 200:
             data = r.json()
             prods = data.get("products", [])
             if prods:
@@ -467,7 +494,7 @@ def verify_brand_storefront(
                         coll_url = f"https://{clean_domain}/collections/all"
 
                     logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED as Shopify store for '{brand}' with matched models: {matched}")
-                    return True, "shopify", coll_url, matched, None, None, clean_domain
+                    return True, "shopify", coll_url, matched, None, None, clean_domain, None
     except Exception as e:
         logger.debug(f"products.json check failed for {clean_domain}: {e}")
 
@@ -476,10 +503,42 @@ def verify_brand_storefront(
         home_url = f"https://{clean_domain}/"
         r = requests.get(home_url, headers=headers, timeout=(2.0, 3.0), allow_redirects=True)
         is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, home_url)
+        
+        slug_simple = re.sub(r'[^a-zA-Z0-9]', '', brand.lower())
+
+        if is_blocked and is_tinyfish_configured():
+            logger.info(f"[Domain Verification] '{clean_domain}' homepage blocked by {vendor}. Retrying via TinyFish Fetch...")
+            tf_res = tinyfish_fetch(home_url)
+            if tf_res and tf_res.get("text"):
+                text_lower = tf_res["text"].lower()
+                parked_signatures = [
+                    "buy this domain", "domain for sale", "hugedomains", "godaddy", "dan.com",
+                    "sedo", "namecheap", "is parked", "domain parking", "this web page is parked"
+                ]
+                if not any(p in text_lower for p in parked_signatures):
+                    matched = []
+                    for m in model_names:
+                        m_clean = m.strip()
+                        if not m_clean:
+                            continue
+                        if re.search(r'\b' + re.escape(m_clean) + r'\b', text_lower, re.IGNORECASE):
+                            matched.append(m)
+
+                    has_substantive_match = any(m.lower().strip() not in generic_model_words for m in matched) or len(matched) >= 2
+                    is_brand_official = (
+                        slug_simple in clean_domain
+                        and brand.lower() in text_lower
+                        and any(w in text_lower for w in ["official", "store", "shop", "products", "warranty", "sound", "audio", "cart"])
+                    )
+
+                    if (matched and has_substantive_match) or is_brand_official:
+                        logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED via TinyFish Fetch homepage for '{brand}' with matched models: {matched}")
+                        return True, "custom", None, matched, vendor, reason, clean_domain, "tinyfish"
+
         if is_blocked:
             actual_domain = urlparse(r.url).netloc.replace("www.", "").lower() if r.url else clean_domain
             logger.warning(f"[Domain Verification] Domain '{clean_domain}' (at {r.url}) is protected by WAF/Bot challenge ({vendor}: {reason}).")
-            return False, None, None, [], vendor, reason, actual_domain
+            return False, None, None, [], vendor, reason, actual_domain, None
 
         if r.status_code == 200:
             text_lower = r.text.lower()
@@ -491,14 +550,10 @@ def verify_brand_storefront(
             ]
             if any(p in text_lower for p in parked_signatures):
                 logger.warning(f"[Domain Verification] Domain '{clean_domain}' REJECTED: Parked/Squatter domain detected.")
-                return False, None, None, [], None, None, clean_domain
+                return False, None, None, [], None, None, clean_domain, None
 
             # Check if brand name and at least one substantive model name appear on the storefront
             matched = []
-            generic_model_words = {
-                "live", "go", "pro", "tour", "plus", "max", "mini", "lite", "play", "air",
-                "buds", "beam", "free", "one", "tune", "flex", "ace", "neo", "ultra", "flow"
-            }
             for m in model_names:
                 m_clean = m.strip()
                 if not m_clean:
@@ -508,15 +563,21 @@ def verify_brand_storefront(
                     matched.append(m)
 
             has_substantive_match = any(m.lower().strip() not in generic_model_words for m in matched) or len(matched) >= 2
-            if matched and has_substantive_match:
+            is_brand_official = (
+                slug_simple in clean_domain
+                and brand.lower() in text_lower
+                and any(w in text_lower for w in ["official", "store", "shop", "products", "warranty", "sound", "audio", "cart"])
+            )
+
+            if (matched and has_substantive_match) or is_brand_official:
                 logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED via homepage for '{brand}' with matched models: {matched}")
-                return True, "generic", None, matched, None, None, clean_domain
+                return True, "generic", None, matched, None, None, clean_domain, None
             else:
                 logger.debug(f"[Domain Verification] Domain '{clean_domain}' reachable but insufficient substantive models matched ({matched}).")
     except Exception as e:
         logger.debug(f"Homepage check failed for {clean_domain}: {e}")
 
-    return False, None, None, [], None, None, clean_domain
+    return False, None, None, [], None, None, clean_domain, None
 
 
 def discover_and_verify_brand_domain(
@@ -530,7 +591,8 @@ def discover_and_verify_brand_domain(
     Runs when no domain is configured for a brand. Probes standard candidate domains,
     verifies they are real storefronts selling the brand's products, and cross-checks
     against models from the price sheet. If verified, persists to brand_defaults.yaml.
-    Detects WAF/Bot protection challenges during domain discovery and persists blocks.
+    Detects WAF/Bot protection challenges during domain discovery and persists blocks or bypasses.
+    Falls back to TinyFish Search API if guess-and-verify returns no match.
     """
     clean_brand = brand.strip()
     if not clean_brand:
@@ -538,12 +600,13 @@ def discover_and_verify_brand_domain(
 
     existing_cfg = load_brand_defaults(clean_brand, category=category, config_path=config_path)
     existing_domain = existing_cfg.get("domain")
-    if existing_domain and not existing_cfg.get("waf_blocked"):
+    if existing_domain and (not existing_cfg.get("waf_blocked") or existing_cfg.get("waf_bypass_via") == "tinyfish"):
         return {
             "domain": existing_domain,
             "platform": existing_cfg.get("platform", "shopify"),
             "collection_url": existing_cfg.get("collection_url"),
-            "verified": True
+            "verified": True,
+            "waf_bypass_via": existing_cfg.get("waf_bypass_via")
         }
 
     # Generate candidate domains
@@ -594,29 +657,74 @@ def discover_and_verify_brand_domain(
         waf_vendor = res[4] if len(res) > 4 else None
         waf_reason = res[5] if len(res) > 5 else None
         actual_dom = res[6] if len(res) > 6 and res[6] else cand_domain
+        waf_bypass_via = res[7] if len(res) > 7 else None
 
         if is_verified:
-            save_brand_domain_default(clean_brand, cand_domain, platform=platform or "shopify", collection_url=coll_url, category=category, config_path=config_path)
+            save_brand_domain_default(
+                clean_brand, actual_dom or cand_domain, platform=platform or "shopify",
+                collection_url=coll_url, category=category, config_path=config_path,
+                waf_bypass_via=waf_bypass_via
+            )
             return {
-                "domain": cand_domain,
+                "domain": actual_dom or cand_domain,
                 "platform": platform,
                 "collection_url": coll_url,
                 "verified": True,
-                "matched_models": matched
+                "matched_models": matched,
+                "waf_bypass_via": waf_bypass_via
             }
-        elif waf_vendor:
-            from src.utils.profiler import record_waf_block
-            record_waf_block(clean_brand, domain=actual_dom, vendor=waf_vendor, reason=waf_reason, platform="custom", config_path=config_path)
-            logger.warning(f"[Domain Discovery] Brand '{clean_brand}' storefront '{actual_dom}' is protected by WAF ({waf_vendor}: {waf_reason}). Persisted WAF block.")
-            return {
-                "domain": actual_dom,
-                "platform": "custom",
-                "collection_url": None,
-                "verified": False,
-                "waf_blocked": True,
-                "waf_vendor": waf_vendor,
-                "waf_reason": waf_reason
-            }
+        elif waf_vendor and not detected_block:
+            detected_block = (actual_dom, waf_vendor, waf_reason)
+
+    # Secondary fallback: TinyFish Search API for candidate domain discovery
+    from src.utils.tinyfish import is_tinyfish_configured, search_brand_domains_via_tinyfish
+    if is_tinyfish_configured():
+        logger.info(f"[Domain Discovery] Standard candidates unverified. Querying TinyFish Search for '{clean_brand}' domains...")
+        search_domains = search_brand_domains_via_tinyfish(clean_brand)
+        for cand_domain in search_domains:
+            if cand_domain in candidates:
+                continue
+            res = verify_brand_storefront(cand_domain, clean_brand, model_names)
+            is_verified = res[0]
+            platform = res[1]
+            coll_url = res[2]
+            matched = res[3]
+            waf_vendor = res[4] if len(res) > 4 else None
+            waf_reason = res[5] if len(res) > 5 else None
+            actual_dom = res[6] if len(res) > 6 and res[6] else cand_domain
+            waf_bypass_via = res[7] if len(res) > 7 else None
+
+            if is_verified:
+                save_brand_domain_default(
+                    clean_brand, actual_dom or cand_domain, platform=platform or "shopify",
+                    collection_url=coll_url, category=category, config_path=config_path,
+                    waf_bypass_via=waf_bypass_via
+                )
+                return {
+                    "domain": actual_dom or cand_domain,
+                    "platform": platform,
+                    "collection_url": coll_url,
+                    "verified": True,
+                    "matched_models": matched,
+                    "waf_bypass_via": waf_bypass_via
+                }
+            elif waf_vendor and not detected_block:
+                detected_block = (actual_dom, waf_vendor, waf_reason)
+
+    if detected_block:
+        actual_dom, waf_vendor, waf_reason = detected_block
+        from src.utils.profiler import record_waf_block
+        record_waf_block(clean_brand, domain=actual_dom, vendor=waf_vendor, reason=waf_reason, platform="custom", config_path=config_path)
+        logger.warning(f"[Domain Discovery] Brand '{clean_brand}' storefront '{actual_dom}' is protected by WAF ({waf_vendor}: {waf_reason}). Persisted WAF block.")
+        return {
+            "domain": actual_dom,
+            "platform": "custom",
+            "collection_url": None,
+            "verified": False,
+            "waf_blocked": True,
+            "waf_vendor": waf_vendor,
+            "waf_reason": waf_reason
+        }
 
     logger.info(f"Domain discovery completed for '{clean_brand}': No verified storefront discovered.")
     return {"domain": None, "verified": False}
@@ -867,7 +975,26 @@ def fetch_shopify_catalogue(domain: str, timeout: int = 15) -> List[Dict[str, An
             url = f"https://www.{domain}/products.json?limit=250&page={page}"
             try:
                 r = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
-                if r.status_code == 200:
+                is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, url)
+                if is_blocked or r.status_code != 200:
+                    from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch
+                    if is_tinyfish_configured():
+                        logger.info(f"[Shopify Catalogue] Direct fetch blocked ({vendor or r.status_code}). Retrying via TinyFish Fetch: {url}")
+                        tf_res = tinyfish_fetch(url)
+                        if tf_res and tf_res.get("text"):
+                            try:
+                                p_data = json.loads(tf_res["text"])
+                                prods = p_data.get("products", [])
+                                if prods:
+                                    all_products.extend(prods)
+                                    if len(prods) < 250:
+                                        break
+                                    page += 1
+                                    continue
+                            except Exception:
+                                pass
+                    break
+                else:
                     prods = r.json().get("products", [])
                     if not prods:
                         break
@@ -875,8 +1002,6 @@ def fetch_shopify_catalogue(domain: str, timeout: int = 15) -> List[Dict[str, An
                     if len(prods) < 250:
                         break
                     page += 1
-                else:
-                    break
             except Exception as e:
                 logger.warning(f"Error fetching Shopify catalogue for {domain} (page {page}): {e}")
                 break
@@ -920,6 +1045,7 @@ def search_shopify_brand_store(
     Tier 1 & Tier 2 Shopify Discovery:
     Scores all candidates from suggest API and full catalogue against Model_Name.
     Prefers exact title matches, penalizes extra tokens, and ignores exclude_urls.
+    Falls back to TinyFish Fetch and TinyFish Search when direct requests are blocked.
     """
     exclude = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
     candidates = []
@@ -932,6 +1058,19 @@ def search_shopify_brand_store(
         sug_url = f"https://www.{domain}/search/suggest.json?q={quote_plus(model_name)}&resources[type]=product"
         try:
             r = requests.get(sug_url, headers=DEFAULT_HEADERS, timeout=timeout)
+            is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, sug_url)
+            if is_blocked or r.status_code != 200:
+                from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch
+                if is_tinyfish_configured():
+                    logger.info(f"[Shopify Suggest] Direct suggest blocked ({vendor or r.status_code}). Retrying via TinyFish Fetch: {sug_url}")
+                    tf_res = tinyfish_fetch(sug_url)
+                    if tf_res and tf_res.get("text"):
+                        try:
+                            s_data = json.loads(tf_res["text"])
+                            return s_data.get("resources", {}).get("results", {}).get("products", [])
+                        except Exception:
+                            pass
+                return []
             if r.status_code == 200:
                 return r.json().get("resources", {}).get("results", {}).get("products", [])
         except Exception as e:
@@ -990,6 +1129,44 @@ def search_shopify_brand_store(
                     out_diagnostics["ambiguous_candidates"] = []
                 if cand_display not in out_diagnostics["ambiguous_candidates"]:
                     out_diagnostics["ambiguous_candidates"].append(cand_display)
+
+    # 3. Secondary fallback: TinyFish Search API for candidate product discovery
+    if not candidates:
+        from src.utils.tinyfish import is_tinyfish_configured, tinyfish_search
+        if is_tinyfish_configured():
+            clean_dom = domain.replace("www.", "").lower().strip()
+            queries = [
+                f"{brand} {model_name} site:{clean_dom}",
+                f"{brand} {model_name} {clean_dom}"
+            ]
+            for tf_q in queries:
+                tf_items = tinyfish_search(tf_q, limit=6)
+                for it in tf_items:
+                    cand_title = it.get("title", "")
+                    cand_url = it.get("url", "")
+                    if not cand_url or clean_dom not in cand_url.lower():
+                        continue
+                    clean_full = cand_url.rstrip("/").lower()
+                    if clean_full in exclude or clean_full in seen_urls:
+                        continue
+                    score, is_valid, diag = score_candidate_match(
+                        model_name, cand_title, cand_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
+                    )
+                    if is_valid and score > 0:
+                        candidates.append({"url": cand_url, "title": cand_title, "score": score, "source": "tinyfish_search"})
+                        seen_urls.add(clean_full)
+                    elif out_diagnostics is not None:
+                        target_clean = extract_model_name_portion(model_name, brand=brand)
+                        target_toks = normalize_model_tokens(target_clean) - {"pb", brand.lower() if brand else "", "powerbank", "power", "bank", "portable", "charger", "earbuds", "headphones", "tws", "wireless"}
+                        cand_toks = normalize_model_tokens(cand_title)
+                        if target_toks and target_toks.issubset(cand_toks):
+                            cand_display = extract_clean_candidate_model_name(cand_title, brand=brand)
+                            if "ambiguous_candidates" not in out_diagnostics:
+                                out_diagnostics["ambiguous_candidates"] = []
+                            if cand_display not in out_diagnostics["ambiguous_candidates"]:
+                                out_diagnostics["ambiguous_candidates"].append(cand_display)
+                if candidates:
+                    break
 
     if candidates:
         candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -1162,6 +1339,7 @@ def fetch_and_parse_url(
     """
     Fetches a URL, dispatches to the appropriate parser, and returns ParserResult.
     Detects 401/403/429 (Blocked), 404/410/Soft-404 (Delisted), and extracts specs/images.
+    Retries blocked URLs via TinyFish Fetch fallback.
     Hard timeout of 15s enforced.
     """
     logger.info(f"[Tier {tier}] Fetching URL: {url} (platform={platform or 'auto'}, category={category or 'powerbank'})")
@@ -1172,6 +1350,16 @@ def fetch_and_parse_url(
         is_blocked, vendor, reason = detect_waf_block(response.status_code, dict(response.headers), response.text, url)
         if is_blocked:
             logger.warning(f"[Tier {tier}] WAF / Bot protection detected on {url} ({vendor}: {reason})")
+            from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch, parse_tinyfish_markdown_to_result
+            if is_tinyfish_configured():
+                logger.info(f"[Tier {tier}] Retrying blocked URL via TinyFish Fetch: {url}")
+                tf_res = tinyfish_fetch(url)
+                if tf_res and tf_res.get("text"):
+                    parsed_res = parse_tinyfish_markdown_to_result(tf_res, url=url, tier=tier, category=category)
+                    if parsed_res.success:
+                        logger.info(f"[Tier {tier}] TinyFish Fetch succeeded on blocked URL {url} with {len(parsed_res.specs)} specs")
+                        return parsed_res
+
             res = parser.parse(url=url, html=response.text, status_code=response.status_code, tier=tier, category=category)
             res.is_blocked = True
             res.error = f"Blocked: {vendor} ({reason})"
@@ -1179,9 +1367,24 @@ def fetch_and_parse_url(
         return parser.parse(url=url, html=response.text, status_code=response.status_code, tier=tier, category=category)
     except requests.exceptions.Timeout:
         logger.warning(f"[Tier {tier}] Timeout ({timeout}s) fetching {url}")
+        from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch, parse_tinyfish_markdown_to_result
+        if is_tinyfish_configured():
+            logger.info(f"[Tier {tier}] Timeout on direct fetch. Retrying via TinyFish Fetch: {url}")
+            tf_res = tinyfish_fetch(url)
+            if tf_res and tf_res.get("text"):
+                parsed_res = parse_tinyfish_markdown_to_result(tf_res, url=url, tier=tier, category=category)
+                if parsed_res.success:
+                    return parsed_res
         return ParserResult(success=False, status_code=0, url=url, tier=tier, error="Connection timeout")
     except requests.exceptions.RequestException as e:
         logger.error(f"[Tier {tier}] Request error fetching {url}: {e}")
+        from src.utils.tinyfish import is_tinyfish_configured, tinyfish_fetch, parse_tinyfish_markdown_to_result
+        if is_tinyfish_configured():
+            tf_res = tinyfish_fetch(url)
+            if tf_res and tf_res.get("text"):
+                parsed_res = parse_tinyfish_markdown_to_result(tf_res, url=url, tier=tier, category=category)
+                if parsed_res.success:
+                    return parsed_res
         return ParserResult(success=False, status_code=0, url=url, tier=tier, error=str(e))
 
 

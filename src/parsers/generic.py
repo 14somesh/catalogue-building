@@ -300,24 +300,47 @@ class GenericBrandParser:
     def find_product_url(self, model_name: str, qualifier_tokens: Optional[List[str]] = None) -> Optional[Tuple[str, str, float]]:
         """
         Searches discovered sitemap URLs for target product model.
+        Falls back to TinyFish Search if sitemaps yield no matching product URL.
         Returns (url, matched_title, score).
         """
         from src.utils.scraper import score_candidate_match
         urls = self._discover_sitemap_urls()
-        if not urls:
-            return None
-
         best_match = None
         best_score = -1.0
 
-        for url in urls:
-            slug = url.split("/")[-1].split("?")[0].replace("-", " ").replace(".html", "")
-            score, is_valid, reason = score_candidate_match(
-                model_name, slug, url, brand=self.brand_name, qualifier_tokens=qualifier_tokens
-            )
-            if is_valid and score > best_score:
-                best_score = score
-                best_match = (url, slug, score)
+        if urls:
+            for url in urls:
+                slug = url.split("/")[-1].split("?")[0].replace("-", " ").replace(".html", "")
+                score, is_valid, reason = score_candidate_match(
+                    model_name, slug, url, brand=self.brand_name, qualifier_tokens=qualifier_tokens
+                )
+                if is_valid and score > best_score:
+                    best_score = score
+                    best_match = (url, slug, score)
+
+        # Fallback: Query TinyFish Search API for candidate product URLs on this domain
+        if not best_match:
+            from src.utils.tinyfish import is_tinyfish_configured, tinyfish_search
+            if is_tinyfish_configured():
+                queries = [
+                    f"{self.brand_name} {model_name} site:{self.brand_domain}",
+                    f"{self.brand_name} {model_name} {self.brand_domain}"
+                ]
+                for q in queries:
+                    results = tinyfish_search(q, limit=6)
+                    for it in results:
+                        u = it.get("url", "")
+                        t = it.get("title", "")
+                        if not u or self.brand_domain not in u.lower():
+                            continue
+                        score, is_valid, reason = score_candidate_match(
+                            model_name, t, u, brand=self.brand_name, qualifier_tokens=qualifier_tokens
+                        )
+                        if is_valid and score > best_score:
+                            best_score = score
+                            best_match = (u, t, score)
+                    if best_match:
+                        break
 
         return best_match
 
