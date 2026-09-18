@@ -11,6 +11,7 @@ import pdfplumber
 
 from src.utils.logger import setup_logger
 from src.parsers import get_parser_for_url, BaseParser, ParserResult
+from src.utils.waf_detector import detect_waf_block
 
 logger = setup_logger("scraper")
 
@@ -412,12 +413,13 @@ def verify_brand_storefront(
     domain: str,
     brand: str,
     model_names: List[str]
-) -> Tuple[bool, Optional[str], Optional[str], List[str]]:
+) -> Tuple[bool, Optional[str], Optional[str], List[str], Optional[str], Optional[str], Optional[str]]:
     """
     Verifies that a candidate domain is an authentic storefront selling this brand's products.
     1. Checks if it is a parked / squatter domain or reseller directory.
     2. Cross-checks against the actual product model names from the price sheet.
-    Returns (is_verified, platform, collection_url, matched_models).
+    3. Detects WAF / Bot protection challenges during discovery.
+    Returns (is_verified, platform, collection_url, matched_models, waf_vendor, waf_reason, actual_domain).
     """
     from urllib.parse import urlparse
     import requests
@@ -430,7 +432,13 @@ def verify_brand_storefront(
     # 1. Try Shopify products.json index (fastest, most authoritative)
     try:
         pjson_url = f"https://{clean_domain}/products.json?limit=250"
-        r = requests.get(pjson_url, headers=headers, timeout=(2.0, 3.0))
+        r = requests.get(pjson_url, headers=headers, timeout=(2.0, 3.0), allow_redirects=True)
+        is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, pjson_url)
+        if is_blocked:
+            actual_domain = urlparse(r.url).netloc.replace("www.", "").lower() if r.url else clean_domain
+            logger.warning(f"[Domain Verification] Domain '{clean_domain}' (at {r.url}) is protected by WAF/Bot challenge ({vendor}: {reason}).")
+            return False, None, None, [], vendor, reason, actual_domain
+
         if r.status_code == 200:
             data = r.json()
             prods = data.get("products", [])
@@ -459,14 +467,20 @@ def verify_brand_storefront(
                         coll_url = f"https://{clean_domain}/collections/all"
 
                     logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED as Shopify store for '{brand}' with matched models: {matched}")
-                    return True, "shopify", coll_url, matched
+                    return True, "shopify", coll_url, matched, None, None, clean_domain
     except Exception as e:
         logger.debug(f"products.json check failed for {clean_domain}: {e}")
 
     # 2. Try Homepage / Sitemap HTML check
     try:
         home_url = f"https://{clean_domain}/"
-        r = requests.get(home_url, headers=headers, timeout=(2.0, 3.0))
+        r = requests.get(home_url, headers=headers, timeout=(2.0, 3.0), allow_redirects=True)
+        is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, home_url)
+        if is_blocked:
+            actual_domain = urlparse(r.url).netloc.replace("www.", "").lower() if r.url else clean_domain
+            logger.warning(f"[Domain Verification] Domain '{clean_domain}' (at {r.url}) is protected by WAF/Bot challenge ({vendor}: {reason}).")
+            return False, None, None, [], vendor, reason, actual_domain
+
         if r.status_code == 200:
             text_lower = r.text.lower()
             
@@ -477,10 +491,14 @@ def verify_brand_storefront(
             ]
             if any(p in text_lower for p in parked_signatures):
                 logger.warning(f"[Domain Verification] Domain '{clean_domain}' REJECTED: Parked/Squatter domain detected.")
-                return False, None, None, []
+                return False, None, None, [], None, None, clean_domain
 
-            # Check if brand name and at least one model name appear on the storefront
+            # Check if brand name and at least one substantive model name appear on the storefront
             matched = []
+            generic_model_words = {
+                "live", "go", "pro", "tour", "plus", "max", "mini", "lite", "play", "air",
+                "buds", "beam", "free", "one", "tune", "flex", "ace", "neo", "ultra", "flow"
+            }
             for m in model_names:
                 m_clean = m.strip()
                 if not m_clean:
@@ -489,15 +507,16 @@ def verify_brand_storefront(
                 if re.search(pattern, text_lower, re.IGNORECASE):
                     matched.append(m)
 
-            if matched:
+            has_substantive_match = any(m.lower().strip() not in generic_model_words for m in matched) or len(matched) >= 2
+            if matched and has_substantive_match:
                 logger.info(f"[Domain Verification] Domain '{clean_domain}' VERIFIED via homepage for '{brand}' with matched models: {matched}")
-                return True, "generic", None, matched
+                return True, "generic", None, matched, None, None, clean_domain
             else:
-                logger.debug(f"[Domain Verification] Domain '{clean_domain}' reachable but 0 models matched.")
+                logger.debug(f"[Domain Verification] Domain '{clean_domain}' reachable but insufficient substantive models matched ({matched}).")
     except Exception as e:
         logger.debug(f"Homepage check failed for {clean_domain}: {e}")
 
-    return False, None, None, []
+    return False, None, None, [], None, None, clean_domain
 
 
 def discover_and_verify_brand_domain(
@@ -511,6 +530,7 @@ def discover_and_verify_brand_domain(
     Runs when no domain is configured for a brand. Probes standard candidate domains,
     verifies they are real storefronts selling the brand's products, and cross-checks
     against models from the price sheet. If verified, persists to brand_defaults.yaml.
+    Detects WAF/Bot protection challenges during domain discovery and persists blocks.
     """
     clean_brand = brand.strip()
     if not clean_brand:
@@ -538,32 +558,43 @@ def discover_and_verify_brand_domain(
     if slug_hyphen != slug_simple:
         base_slugs.extend([slug_hyphen, slug_hyphen + "s"])
 
+    prefixes = ["in.", "", "store.", "shop."]
     extensions = [
         ".in",
         ".com",
         ".co.in",
         "india.com",
         "india.in",
-        "world.com",
-        "cart.com",
-        "zone.com",
         "store.in",
         "shop.in",
         "tech.in",
+        "cart.com",
+        "zone.com",
+        "world.com",
         "lifestyle.com"
     ]
 
     candidates = []
-    for ext in extensions:
-        for s in base_slugs:
-            cand = f"{s}{ext}" if ext.startswith(".") else f"{s}{ext}"
-            if cand not in candidates:
-                candidates.append(cand)
+    for prefix in prefixes:
+        for ext in extensions:
+            for s in base_slugs:
+                cand = f"{prefix}{s}{ext}" if ext.startswith(".") else f"{prefix}{s}{ext}"
+                if cand not in candidates:
+                    candidates.append(cand)
 
     logger.info(f"Initiating autonomous domain discovery for '{clean_brand}' against {len(candidates)} candidate domains...")
 
+    detected_block = None
     for cand_domain in candidates:
-        is_verified, platform, coll_url, matched = verify_brand_storefront(cand_domain, clean_brand, model_names)
+        res = verify_brand_storefront(cand_domain, clean_brand, model_names)
+        is_verified = res[0]
+        platform = res[1]
+        coll_url = res[2]
+        matched = res[3]
+        waf_vendor = res[4] if len(res) > 4 else None
+        waf_reason = res[5] if len(res) > 5 else None
+        actual_dom = res[6] if len(res) > 6 and res[6] else cand_domain
+
         if is_verified:
             save_brand_domain_default(clean_brand, cand_domain, platform=platform or "shopify", collection_url=coll_url, category=category, config_path=config_path)
             return {
@@ -572,6 +603,19 @@ def discover_and_verify_brand_domain(
                 "collection_url": coll_url,
                 "verified": True,
                 "matched_models": matched
+            }
+        elif waf_vendor:
+            from src.utils.profiler import record_waf_block
+            record_waf_block(clean_brand, domain=actual_dom, vendor=waf_vendor, reason=waf_reason, platform="custom", config_path=config_path)
+            logger.warning(f"[Domain Discovery] Brand '{clean_brand}' storefront '{actual_dom}' is protected by WAF ({waf_vendor}: {waf_reason}). Persisted WAF block.")
+            return {
+                "domain": actual_dom,
+                "platform": "custom",
+                "collection_url": None,
+                "verified": False,
+                "waf_blocked": True,
+                "waf_vendor": waf_vendor,
+                "waf_reason": waf_reason
             }
 
     logger.info(f"Domain discovery completed for '{clean_brand}': No verified storefront discovered.")
@@ -644,7 +688,7 @@ def resolve_any_url_to_product(
     soup = BeautifulSoup(html, "html.parser")
 
     # Learn and persist domain if verified
-    is_ver, plat, coll, _ = verify_brand_storefront(domain, brand or domain, [target_model_name])
+    is_ver, plat, coll, _ = verify_brand_storefront(domain, brand or domain, [target_model_name])[:4]
     if is_ver and brand:
         save_brand_domain_default(brand, domain, platform=plat or "shopify", collection_url=coll)
 
@@ -841,6 +885,27 @@ def fetch_shopify_catalogue(domain: str, timeout: int = 15) -> List[Dict[str, An
     return get_cached_json(cache_key, _fetch) or []
 
 
+def extract_clean_candidate_model_name(title: str, brand: str = "") -> str:
+    """Extracts concise candidate model name for human-readable diagnostic reporting."""
+    cleaned = title
+    if brand:
+        cleaned = re.sub(rf'^{re.escape(brand)}\s*', '', cleaned, flags=re.I).strip()
+    cleaned = re.sub(r'^(?:new\s+launch\s+|all\s+new\s+)', '', cleaned, flags=re.I).strip()
+    
+    # Split on common category descriptors, marketing delimiters, or capacities
+    split_pat = r'\b(?:true\s+wireless|wireless|earbuds?|earphones?|headphones?|neckband|tws|anc|in\s+ear|over\s+ear|on\s+ear|noise\s+cancell?(?:ing|ation)|adaptive|spatial|smart\s+ambient|hi\s*[- ]?res|bluetooth|\d+(?:,\d+)?\s*mah|\d+k\b|\d+(?:\.\d+)?\s*w\b|qi\d*|power\s*bank|powerbank|charger|with\s+built|with\s+type|with\s+stand|made\s+in|premium)\b'
+    m = re.search(split_pat, cleaned, flags=re.I)
+    if m:
+        cleaned = cleaned[:m.start()].strip()
+    
+    delim_m = re.search(r'\s+[-|–—/]\s+', cleaned)
+    if delim_m:
+        cleaned = cleaned[:delim_m.start()].strip()
+
+    cleaned = re.sub(r'[,\.\-–—\s]+$', '', cleaned).strip()
+    return cleaned if len(cleaned) >= 2 else title
+
+
 def search_shopify_brand_store(
     brand: str,
     model_name: str,
@@ -848,7 +913,8 @@ def search_shopify_brand_store(
     qualifier_tokens: List[str],
     exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    out_diagnostics: Optional[Dict[str, Any]] = None
 ) -> Optional[str]:
     """
     Tier 1 & Tier 2 Shopify Discovery:
@@ -887,6 +953,16 @@ def search_shopify_brand_store(
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": p_title, "score": score, "source": "suggest"})
             seen_urls.add(clean_full)
+        elif out_diagnostics is not None:
+            target_clean = extract_model_name_portion(model_name, brand=brand)
+            target_toks = normalize_model_tokens(target_clean) - {"pb", brand.lower() if brand else "", "powerbank", "power", "bank", "portable", "charger", "earbuds", "headphones", "tws", "wireless"}
+            cand_toks = normalize_model_tokens(p_title)
+            if target_toks and target_toks.issubset(cand_toks):
+                cand_display = extract_clean_candidate_model_name(p_title, brand=brand)
+                if "ambiguous_candidates" not in out_diagnostics:
+                    out_diagnostics["ambiguous_candidates"] = []
+                if cand_display not in out_diagnostics["ambiguous_candidates"]:
+                    out_diagnostics["ambiguous_candidates"].append(cand_display)
 
     # 2. Local matching against full catalogue
     catalogue = fetch_shopify_catalogue(domain, timeout=timeout)
@@ -904,6 +980,16 @@ def search_shopify_brand_store(
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": title, "score": score, "source": "catalogue"})
             seen_urls.add(clean_full)
+        elif out_diagnostics is not None:
+            target_clean = extract_model_name_portion(model_name, brand=brand)
+            target_toks = normalize_model_tokens(target_clean) - {"pb", brand.lower() if brand else "", "powerbank", "power", "bank", "portable", "charger", "earbuds", "headphones", "tws", "wireless"}
+            cand_toks = normalize_model_tokens(title)
+            if target_toks and target_toks.issubset(cand_toks):
+                cand_display = extract_clean_candidate_model_name(title, brand=brand)
+                if "ambiguous_candidates" not in out_diagnostics:
+                    out_diagnostics["ambiguous_candidates"] = []
+                if cand_display not in out_diagnostics["ambiguous_candidates"]:
+                    out_diagnostics["ambiguous_candidates"].append(cand_display)
 
     if candidates:
         candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -920,7 +1006,8 @@ def search_retail_reliance(
     qualifier_tokens: List[str],
     exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    out_diagnostics: Optional[Dict[str, Any]] = None
 ) -> Optional[str]:
     """
     Tier 3 Reliance Digital Discovery:
@@ -968,6 +1055,16 @@ def search_retail_reliance(
         if is_valid and score > 0:
             candidates.append({"url": product_url, "title": display, "score": score})
             seen_urls.add(clean_full)
+        elif out_diagnostics is not None:
+            target_clean = extract_model_name_portion(model_name, brand=brand)
+            target_toks = normalize_model_tokens(target_clean) - {"pb", brand.lower() if brand else "", "powerbank", "power", "bank", "portable", "charger", "earbuds", "headphones", "tws", "wireless"}
+            cand_toks = normalize_model_tokens(display)
+            if target_toks and target_toks.issubset(cand_toks):
+                cand_display = extract_clean_candidate_model_name(display, brand=brand)
+                if "ambiguous_candidates" not in out_diagnostics:
+                    out_diagnostics["ambiguous_candidates"] = []
+                if cand_display not in out_diagnostics["ambiguous_candidates"]:
+                    out_diagnostics["ambiguous_candidates"].append(cand_display)
 
     if candidates:
         candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -984,7 +1081,8 @@ def search_retail_croma(
     qualifier_tokens: List[str],
     exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    out_diagnostics: Optional[Dict[str, Any]] = None
 ) -> Optional[str]:
     """
     Tier 3 Croma Discovery:
@@ -1002,6 +1100,10 @@ def search_retail_croma(
         }
         try:
             r = requests.get(url, headers=headers, timeout=timeout)
+            is_blocked, vendor, reason = detect_waf_block(r.status_code, dict(r.headers), r.text, url)
+            if is_blocked or r.status_code == 403:
+                logger.warning(f"[Croma Direct] WAF / Bot protection detected ({vendor or 'Akamai'}: {reason or 'HTTP 403'}). Marking Croma blocked for this call and falling through to Reliance Digital.")
+                return []
             if r.status_code == 200 and "json" in r.headers.get("Content-Type", ""):
                 return r.json().get("products", [])
             else:
@@ -1030,6 +1132,16 @@ def search_retail_croma(
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": name, "score": score})
             seen_urls.add(clean_full)
+        elif out_diagnostics is not None:
+            target_clean = extract_model_name_portion(model_name, brand=brand)
+            target_toks = normalize_model_tokens(target_clean) - {"pb", brand.lower() if brand else "", "powerbank", "power", "bank", "portable", "charger", "earbuds", "headphones", "tws", "wireless"}
+            cand_toks = normalize_model_tokens(name)
+            if target_toks and target_toks.issubset(cand_toks):
+                cand_display = extract_clean_candidate_model_name(name, brand=brand)
+                if "ambiguous_candidates" not in out_diagnostics:
+                    out_diagnostics["ambiguous_candidates"] = []
+                if cand_display not in out_diagnostics["ambiguous_candidates"]:
+                    out_diagnostics["ambiguous_candidates"].append(cand_display)
 
     if candidates:
         candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -1057,6 +1169,13 @@ def fetch_and_parse_url(
     
     try:
         response = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
+        is_blocked, vendor, reason = detect_waf_block(response.status_code, dict(response.headers), response.text, url)
+        if is_blocked:
+            logger.warning(f"[Tier {tier}] WAF / Bot protection detected on {url} ({vendor}: {reason})")
+            res = parser.parse(url=url, html=response.text, status_code=response.status_code, tier=tier, category=category)
+            res.is_blocked = True
+            res.error = f"Blocked: {vendor} ({reason})"
+            return res
         return parser.parse(url=url, html=response.text, status_code=response.status_code, tier=tier, category=category)
     except requests.exceptions.Timeout:
         logger.warning(f"[Tier {tier}] Timeout ({timeout}s) fetching {url}")

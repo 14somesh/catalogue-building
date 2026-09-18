@@ -226,7 +226,8 @@ def execute_spec_escalation(
     exclude_urls: Optional[Set[str]] = None,
     config: Optional[dict] = None,
     brochure_override: Optional[str] = None,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    out_diagnostics: Optional[Dict[str, Any]] = None
 ) -> Tuple[Optional[ParserResult], Optional[str]]:
     """
     Executes 5-tier escalation for product specs:
@@ -259,30 +260,30 @@ def execute_spec_escalation(
             incoming.field_sources["subtitle"] = incoming.url
             incoming.field_tiers["subtitle"] = incoming.tier
             combined_provenance = tier_name
-            return incoming, tier_name
+            return incoming, combined_provenance
         
-        # Merge missing specs from incoming into base (base outranks incoming)
+        # Merge specs prioritizing base (earlier tier)
         for k, v in incoming.specs.items():
             if v and not is_empty_value(v):
                 if k not in base.specs or not base.specs[k] or is_empty_value(base.specs[k]):
                     base.specs[k] = v
                     base.field_sources[k] = incoming.url
                     base.field_tiers[k] = incoming.tier
-        
+
         # Merge MRP if base lacked it
         if not base.mrp and incoming.mrp:
             base.mrp = incoming.mrp
             base.field_sources["mrp"] = incoming.url
             base.field_tiers["mrp"] = incoming.tier
-            
-        # Merge description text if base is thin
-        if len(base.description_text or "") < len(incoming.description_text or ""):
+                
+        # Merge description/features text
+        if incoming.description_text:
             base.description_text = f"{base.description_text or ''}\n{incoming.description_text or ''}".strip()
             
         # Merge images if base lacked them
         if not base.image_urls and incoming.image_urls:
             base.image_urls = incoming.image_urls
-            
+
         combined_provenance = f"{combined_provenance} + {tier_name}"
         return base, combined_provenance
 
@@ -307,18 +308,23 @@ def execute_spec_escalation(
     # Check if brand domain is configured; if not, run autonomous domain discovery
     if not brand_domain:
         from src.utils.scraper import discover_and_verify_brand_domain
-        disc = discover_and_verify_brand_domain(brand, [model_name])
+        disc = discover_and_verify_brand_domain(brand, [model_name], category=category or "Powerbank")
         if disc.get("verified") and disc.get("domain"):
             brand_domain = disc["domain"]
             brand_cfg["domain"] = disc["domain"]
             brand_cfg["platform"] = disc.get("platform", "shopify")
             if disc.get("collection_url"):
                 brand_cfg["collection_url"] = disc["collection_url"]
+        elif disc.get("waf_blocked"):
+            brand_cfg["waf_blocked"] = True
+            brand_cfg["domain"] = disc.get("domain")
+            brand_cfg["waf_vendor"] = disc.get("waf_vendor")
+            brand_cfg["waf_reason"] = disc.get("waf_reason")
 
-    if not brand_domain:
+    if not brand_domain and not brand_cfg.get("waf_blocked"):
         logger.info(f"[{product_id}] No verified brand domain configured for '{brand}'. Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
     elif brand_cfg.get("waf_blocked"):
-        logger.warning(f"[{product_id}] Brand domain '{brand_domain}' is flagged as WAF-blocked ({brand_cfg.get('waf_reason', 'Bot Challenge')}). Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
+        logger.warning(f"[{product_id}] Brand domain '{brand_domain or brand_cfg.get('domain')}' is flagged as WAF-blocked ({brand_cfg.get('waf_vendor', 'WAF')}: {brand_cfg.get('waf_reason', 'Bot Challenge')}). Skipping Tiers 1 & 2 -> Escalating directly to Tier 3 Retail.")
     else:
         # ==================== TIER 1: Brand Product Page (Shopify Direct / Generic JSON-LD & Sitemap) ====================
         tier1_url = None
@@ -333,7 +339,7 @@ def execute_spec_escalation(
 
         if not tier1_url:
             # 1a. Try Shopify direct index
-            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category)
+            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics)
             
             # 1b. Non-Shopify Generic Sitemap Fallback
             if not tier1_url:
@@ -353,9 +359,9 @@ def execute_spec_escalation(
             res = fetch_and_parse_url(tier1_url, tier=1, platform=brand_platform, category=category)
             if res.is_blocked:
                 from src.utils.profiler import record_waf_block
-                record_waf_block(brand, domain=brand_domain, reason="HTTP 403 / Bot Challenge")
+                record_waf_block(brand, domain=brand_domain, reason=res.error or "HTTP 403 / Bot Challenge")
                 brand_cfg["waf_blocked"] = True
-                logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned HTTP 403 / Bot Challenge. Persisted WAF block and escalating to Tier 3 Retail.")
+                logger.warning(f"[Bot Block Detection] Brand domain '{brand_domain}' returned WAF block. Persisted block and escalating to Tier 3 Retail.")
             elif res.success and res.specs:
                 combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-1: brand-page ({tier1_url})")
                 is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
@@ -389,9 +395,9 @@ def execute_spec_escalation(
                 res = fetch_and_parse_url(tier2_prod_url, tier=2, platform=brand_platform, category=category)
                 if res.is_blocked:
                     from src.utils.profiler import record_waf_block
-                    record_waf_block(brand, domain=brand_domain, reason="HTTP 403 / Bot Challenge")
+                    record_waf_block(brand, domain=brand_domain, reason=res.error or "HTTP 403 / Bot Challenge")
                     brand_cfg["waf_blocked"] = True
-                    logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned HTTP 403 / Bot Challenge. Persisted WAF block.")
+                    logger.warning(f"[Bot Block Detection] Brand collection page '{collection_url}' returned WAF block. Persisted block.")
                 elif res.success and res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-2: brand-collection ({tier2_prod_url})")
                     is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
@@ -413,15 +419,15 @@ def execute_spec_escalation(
             else:
                 logger.warning(f"[{product_id}] Tier 2 collection page did not yield matching product. Escalating to Tier 3...")
 
-    # ==================== TIER 3: Direct Retail Endpoints (Reliance Digital) ====================
-    retail_order = brand_cfg.get("retail_order", ["reliance"])
+    # ==================== TIER 3: Direct Retail Endpoints (Reliance Digital, Croma) ====================
+    retail_order = brand_cfg.get("retail_order", ["reliance", "croma"])
     for retail_store in retail_order:
         store_lower = retail_store.lower()
         retail_url = None
         if "reliance" in store_lower:
-            retail_url = search_retail_reliance(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category)
+            retail_url = search_retail_reliance(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics)
         elif "croma" in store_lower:
-            retail_url = search_retail_croma(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category)
+            retail_url = search_retail_croma(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics)
 
         if retail_url:
             logger.info(f"[{product_id}] Executing Tier 3 ({retail_store}): {retail_url}")
@@ -469,18 +475,32 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
     brochure_override = str(row_dict.get("Brochure_PDF", "")).strip() if not is_empty_value(row_dict.get("Brochure_PDF")) else None
 
     brand_defaults = load_brand_defaults(brand, category=category)
+    out_diagnostics: Dict[str, Any] = {}
     parser_res, provenance = execute_spec_escalation(
         product_id, brand, model_name, manual_url, brand_defaults,
-        exclude_urls=exclude_urls, config=config, brochure_override=brochure_override, category=category
+        exclude_urls=exclude_urls, config=config, brochure_override=brochure_override, category=category,
+        out_diagnostics=out_diagnostics
     )
 
     if not parser_res or (not parser_res.specs and not parser_res.description_text):
         # AUTO-SKIP ON EXHAUSTION: All tiers (including Vision) exhausted. Write NOTHING to Raw_ columns.
+        ambiguous_cands = out_diagnostics.get("ambiguous_candidates", [])
+        if ambiguous_cands:
+            cands_str = ", ".join(ambiguous_cands[:4])
+            reason_str = f"Multiple candidates found: {cands_str} — model name may be ambiguous or outdated" if len(ambiguous_cands) > 1 else f"Candidate found: {cands_str} — model name may be ambiguous or outdated"
+            flags_msg = f"Skipped: {reason_str}"
+            fix_log_msg = f"Tier 1-4 escalation exhausted. {reason_str}"
+            log_msg = f"[{product_id}] SKIPPED: {reason_str}"
+        else:
+            flags_msg = "Skipped: All spec tiers exhausted (including Vision) without finding technical specifications"
+            fix_log_msg = "Tier 1-4 escalation (with Vision fallback) exhausted; no verified technical specs found."
+            log_msg = f"[{product_id}] SKIPPED: All tiers exhausted"
+
         return {
             "Status": "Skipped",
-            "Flags": "Skipped: All spec tiers exhausted (including Vision) without finding technical specifications",
-            "Fix_Log": "Tier 1-4 escalation (with Vision fallback) exhausted; no verified technical specs found."
-        }, False, f"[{product_id}] SKIPPED: All tiers exhausted"
+            "Flags": flags_msg,
+            "Fix_Log": fix_log_msg
+        }, False, log_msg
 
     # Call LLM to draft bullets and subtitle from verified product text & category specs
     clean_specs = {k: v for k, v in parser_res.specs.items() if v}
