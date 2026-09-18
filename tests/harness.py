@@ -196,9 +196,10 @@ def resolve_candidate_for_product(
     platform = brand_cfg.get("platform", "shopify")
     qualifiers = brand_cfg.get("qualifier_tokens", [])
     collection_url = brand_cfg.get("collection_url")
+    waf_blocked = brand_cfg.get("waf_blocked", False)
 
     # 3. Tier 1: Direct Shopify store candidate match
-    if domain and platform == "shopify":
+    if domain and platform == "shopify" and not waf_blocked:
         shopify_url = search_shopify_brand_store(
             brand=brand,
             model_name=model_name,
