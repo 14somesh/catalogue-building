@@ -147,3 +147,13 @@ brands:
         - Mini
         - Lite
         - Go
+  JBL:
+    categories:
+      TWS:
+        qualifier_tokens:
+        - Pro
+        - Ultra
+        - Plus
+    domain: in.jbl.com
+    platform: custom
+    waf_bypass_via: tinyfish
