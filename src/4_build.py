@@ -248,8 +248,6 @@ def resolve_effective_dp_float(row: Any) -> float:
     """Extracts numeric effective DP for sorting; products without DP return infinity to sort last."""
     prod = get_effective_product_dict(row)
     dp_val = prod.get("dp_raw") if prod.get("dp_raw") is not None else prod.get("dp")
-    if dp_val is None and prod.get("mrp_raw") is not None:
-        dp_val = prod.get("mrp_raw")
     if dp_val is not None and not is_empty_value(dp_val):
         try:
             return float(str(dp_val).replace("₹", "").replace("MRP", "").replace(",", "").strip())
