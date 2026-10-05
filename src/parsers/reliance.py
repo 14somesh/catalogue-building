@@ -1,5 +1,5 @@
 import re
-from typing import Set, Dict, List
+from typing import Set, Dict, List, Optional
 from bs4 import BeautifulSoup
 from src.parsers.base import BaseParser, ParserResult
 from src.utils.category_specs import extract_category_specs

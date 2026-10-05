@@ -3,7 +3,7 @@ import sys
 import yaml
 import re
 import pandas as pd
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Set
 from urllib.parse import quote_plus, urljoin
 
 # Ensure project root is in sys.path

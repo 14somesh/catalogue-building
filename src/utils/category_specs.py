@@ -5,7 +5,7 @@ for each product category (Powerbanks, TWS / Audio, Smartwatches, Cables / Charg
 """
 
 import re
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set
 
 
 CATEGORY_SPEC_DEFINITIONS: Dict[str, Dict[str, Any]] = {

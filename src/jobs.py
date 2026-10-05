@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Callable, Set, Union
+from typing import Dict, Any, Optional, List, Callable, Set, Union, Tuple
 from contextlib import contextmanager
 
 from src.utils.logger import setup_logger
