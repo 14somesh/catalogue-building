@@ -318,38 +318,6 @@ def extract_leading_model_segment(title: str, brand: str = "") -> str:
     return cleaned
 
 
-def reject_qualifier_mismatch(
-    target_model_name: str,
-    candidate_title: str,
-    qualifier_tokens: Optional[List[str]] = None,
-    brand: str = ""
-) -> Tuple[bool, Optional[str]]:
-    """
-    QUALIFIER TOKEN CHECK:
-    When matching a candidate page to a row, only compares qualifier tokens in the
-    LEADING MODEL NAME SEGMENT of the candidate title (before capacity, wattage,
-    or descriptor words). Also treats '+' and 'Plus' as equivalent tokens.
-    Returns (is_valid, rejection_reason).
-    """
-    if not qualifier_tokens:
-        return True, None
-        
-    cand_lead = extract_leading_model_segment(candidate_title, brand=brand)
-    target_tokens = normalize_model_tokens(target_model_name)
-    cand_tokens = normalize_model_tokens(cand_lead)
-    
-    for q in qualifier_tokens:
-        q_norm_set = normalize_model_tokens(q)
-        target_has = q_norm_set.issubset(target_tokens)
-        cand_has = q_norm_set.issubset(cand_tokens)
-        
-        if cand_has and not target_has:
-            reason = f"Qualifier token mismatch in model segment '{cand_lead}': candidate contains '{q}' but target Model_Name '{target_model_name}' does not."
-            return False, reason
-            
-    return True, None
-
-
 def save_brand_domain_default(
     brand: str,
     domain: str,
@@ -912,10 +880,43 @@ def reject_qualifier_mismatch(
     brand: Optional[str] = None
 ) -> Tuple[bool, Optional[str]]:
     """
-    STRICT QUALIFIER GUARD:
-    Rejects any candidate title containing a qualifier token that does NOT appear in target_model_name.
+    STRICT QUALIFIER & BRAND GUARD:
+    1. Rejects candidate titles containing an identifiable brand other than the target brand.
+    2. Rejects candidate titles containing a qualifier token that does NOT appear in target_model_name.
     Returns (is_valid, rejection_reason).
     """
+    if brand and str(brand).strip():
+        tgt_brand = str(brand).strip().lower()
+        cand_lower = candidate_title.lower()
+        # If candidate title explicitly mentions the target brand, it is not a brand mismatch
+        if not re.search(rf"\b{re.escape(tgt_brand)}\b", cand_lower):
+            known_brands = [
+                "stuffcool", "pebble", "portronics", "urbn", "evm", "ambrane", "glow gadget",
+                "wangari", "jbl", "boat", "boult audio", "boult", "noise", "ptron", "mivi",
+                "crossbeats", "zebronics", "realme", "redmi", "xiaomi", "oneplus", "oppo",
+                "vivo", "apple", "samsung", "sony", "anker", "belkin", "hammer", "wings",
+                "truke", "skullcandy", "marshall", "sennheiser", "bose", "soundcore",
+                "philips", "panasonic", "jabra", "infinity", "fire-boltt", "beatxp",
+                "unix", "ubon", "syska", "mi", "nothing", "cmf", "honor", "motorola", "lenovo"
+            ]
+            for b in known_brands:
+                b_clean = b.lower()
+                if b_clean != tgt_brand and b_clean not in tgt_brand and tgt_brand not in b_clean:
+                    match = re.search(rf"\b{re.escape(b_clean)}\b", cand_lower)
+                    if match:
+                        start_pos = match.start()
+                        prefix = cand_lower[:start_pos].rstrip()
+                        suffix = cand_lower[match.end():].lstrip()
+                        # Ignore compatibility references (e.g. 'for Apple Watch', 'compatible with Samsung')
+                        if re.search(r"\b(?:for|with|compatible with|compatible|supports|suitable for|designed for)$", prefix):
+                            continue
+                        if re.search(r"^(?:watch|iphone|ipad|macbook|airpods|galaxy|pixel|phone|devices|cables?)\b", suffix):
+                            continue
+                        detected = b.title()
+                        reason = f"Brand mismatch: candidate appears to be '{detected}', expected '{brand}'"
+                        logger.warning(f"Rejected candidate '{candidate_title}' for '{target_model_name}': {reason}")
+                        return False, reason
+
     tokens = qualifier_tokens or DEFAULT_QUALIFIER_TOKENS
     target_words = normalize_model_tokens(target_model_name)
     

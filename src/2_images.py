@@ -20,7 +20,12 @@ from src.utils.excel_handler import (
     slugify,
     is_empty_value
 )
-from src.utils.scraper import load_brand_defaults, reject_qualifier_mismatch
+from src.utils.scraper import (
+    load_brand_defaults,
+    reject_qualifier_mismatch,
+    extract_model_name_portion,
+    normalize_model_tokens
+)
 from src.parsers.amazon import AmazonParser
 from src.utils.llm_client import audit_collected_image_quality
 from src.utils.logger import setup_logger
@@ -184,9 +189,15 @@ def resolve_product_image_path(row: dict, images_dir: str = "images") -> str:
     return cat_path
 
 
-def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:
+def fetch_brand_gallery_candidate_urls(
+    product_page_url: str,
+    model_name: str = "",
+    brand: str = ""
+) -> List[str]:
     """
     Extracts all candidate image URLs from a Shopify or brand product page.
+    For generic HTML pages, only retains images whose alt/title or container text
+    contains the target model name's key tokens.
     Prioritizes isolated packshot naming conventions (e.g. Dome01, white, 01).
     """
     candidates: List[str] = []
@@ -216,12 +227,34 @@ def fetch_brand_gallery_candidate_urls(product_page_url: str) -> List[str]:
             if r.status_code == 200:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(r.text, "html.parser")
+                
+                # Derive key model tokens to filter out unrelated page images
+                target_clean = extract_model_name_portion(model_name, brand=brand) if model_name else ""
+                target_tokens = (normalize_model_tokens(target_clean) - {
+                    "pb", brand.lower() if brand else "", "powerbank", "power", "bank",
+                    "portable", "charger", "earbuds", "headphones", "tws", "wireless"
+                }) if target_clean else set()
+
                 for img in soup.find_all("img"):
                     src = img.get("src") or img.get("data-src")
                     if src:
-                        is_prod = any(m in src for m in ["media/catalog/product", "cdn/shop", "cdn.shopify", "wp-content/uploads"])
+                        is_prod = any(m in src for m in ["media/catalog/product", "cdn/shop", "cdn.shopify", "wp-content/uploads", "assets", "product", "images"])
                         if not is_prod:
                             continue
+                        
+                        # Model token check: alt, title, or nearest heading/container text
+                        if target_tokens:
+                            img_attr_text = f"{img.get('alt', '')} {img.get('title', '')}"
+                            container = img.find_parent(["figure", "div", "section", "article", "li"])
+                            container_text = ""
+                            if container:
+                                heading = container.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+                                container_text = heading.get_text() if heading else container.get_text(separator=" ", strip=True)
+                            combined_text = f"{img_attr_text} {container_text} {src}"
+                            img_tokens = normalize_model_tokens(combined_text)
+                            if not target_tokens.issubset(img_tokens):
+                                continue
+
                         master = re.sub(r'/cache/[a-f0-9]+/', '/', src)
                         if master.startswith("//"):
                             master = "https:" + master
@@ -287,14 +320,26 @@ def search_amazon_for_image(
             brand_defaults = load_brand_defaults(brand, category=category)
             qualifier_tokens = brand_defaults.get("qualifier_tokens", ["Max", "Ultra", "Plus", "Pro", "Mini", "Lite", "Go"])
             
-            for i in range(min(5, items.count())):
+            for i in range(min(8, items.count())):
                 item = items.nth(i)
-                title_el = item.locator('h2 a span')
-                title = title_el.inner_text() if title_el.count() > 0 else ""
+                links = item.locator('h2 a')
+                title = ""
+                for j in range(links.count()):
+                    l_text = links.nth(j).inner_text().strip()
+                    if l_text:
+                        title = l_text
+                        break
+                if not title:
+                    img_el = item.locator('img.s-image')
+                    title = img_el.get_attribute('alt') if img_el.count() > 0 else ""
+                if not title:
+                    continue
+                if brand and brand.lower() not in title.lower():
+                    continue
                 asin = item.get_attribute('data-asin')
                 
-                # Qualifier Token Check
-                is_valid, _ = reject_qualifier_mismatch(model_name, title, qualifier_tokens)
+                # Qualifier & Brand Token Check
+                is_valid, _ = reject_qualifier_mismatch(model_name, title, qualifier_tokens, brand=brand)
                 if not is_valid:
                     continue
 
@@ -344,7 +389,7 @@ def execute_image_tier_escalation(
         candidate_urls.append(image_url)
 
     if product_page_url:
-        gallery_urls = fetch_brand_gallery_candidate_urls(product_page_url)
+        gallery_urls = fetch_brand_gallery_candidate_urls(product_page_url, model_name=model_name, brand=brand)
         for gu in gallery_urls:
             if gu not in candidate_urls:
                 candidate_urls.append(gu)

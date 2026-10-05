@@ -985,8 +985,8 @@ def audit_collected_image_quality(
     Returns (is_valid: bool, quality_score: int, rejection_reason: Optional[str]).
     """
     if is_provider_exhausted("gemini"):
-        logger.warning(f"[Image Review Gate] Gemini is marked exhausted; applying heuristic pass for {brand} {model_name}.")
-        return True, 7, None
+        logger.warning(f"[Image Review Gate] Gemini is marked exhausted; failing closed for {brand} {model_name}.")
+        return False, 0, "Visual AI unavailable — image not brand-verified"
 
     client = get_gemini_client()
     candidate_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
@@ -1024,7 +1024,7 @@ def audit_collected_image_quality(
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(_call)
-                resp = future.result(timeout=12.0)
+                resp = future.result(timeout=18.0)
 
             parsed = json.loads(resp.text)
             is_brand_ok = bool(parsed.get("is_correct_brand_and_model", True))
@@ -1038,7 +1038,7 @@ def audit_collected_image_quality(
             if not is_brand_ok:
                 rejection = f"Wrong brand detected: '{detected_brand}' (expected '{brand}')"
                 logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
-                return False, score, rejection
+                return False, 0, rejection
 
             if has_banner:
                 rejection = "Marketing infographic banner with promotional text overlays"
@@ -1069,8 +1069,8 @@ def audit_collected_image_quality(
             else:
                 continue
 
-    logger.warning(f"[Image Review Gate] All vision models exhausted for {brand} {model_name}; applying heuristic pass.")
-    return True, 7, None
+    logger.warning(f"[Image Review Gate] All vision models exhausted for {brand} {model_name}; failing closed.")
+    return False, 0, "Visual AI unavailable — image not brand-verified"
 
 
 
