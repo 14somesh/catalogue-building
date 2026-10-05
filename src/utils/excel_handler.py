@@ -387,7 +387,7 @@ def get_effective_product_dict(row: Union[pd.Series, Dict[str, Any]], base_dir: 
         "dp_raw": dp_val,
         "price": dp_val,
         "mrp": mrp_val,
-        "mrp_raw": dp_val,  # For backward-compatibility with callers reading mrp_raw as DP
+        "mrp_raw": mrp_val,
         "mrp_display": str(mrp_val).strip() if mrp_val and not is_empty_value(mrp_val) else None,
         "specs": {
             "capacity": get_effective_value(row_dict, "Spec_Capacity") or "",

@@ -384,8 +384,6 @@ def build_catalogue_pdf(
             # Format price:
             # 1. DP (Dealer Price): Override_DP > MRP_Input
             dp_val = prod.get("dp_raw") if prod.get("dp_raw") is not None else prod.get("dp")
-            if dp_val is None and prod.get("mrp_raw") is not None:
-                dp_val = prod.get("mrp_raw")
             if dp_val is not None and not is_empty_value(dp_val):
                 try:
                     clean_dp = float(str(dp_val).replace("₹", "").replace("MRP", "").replace(",", "").strip())
@@ -393,7 +391,7 @@ def build_catalogue_pdf(
                 except Exception:
                     price_str = str(dp_val).strip()
             else:
-                price_str = "TBD"
+                price_str = None
 
             # 2. MRP (Maximum Retail Price): Override_MRP > MRP_Display > Raw_MRP_Scraped
             mrp_display_val = prod.get("mrp_display") or prod.get("mrp")

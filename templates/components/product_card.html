@@ -16,10 +16,15 @@
     </div>
 
     <div class="mrp">
-      <span class="mrp__label">DP</span>
-      <span class="mrp__price">₹{{ product.price }}</span>
-      {% if product.mrp_display %}
-        <span class="mrp__pipe">|</span>
+      {% if product.price %}
+        <span class="mrp__label">DP</span>
+        <span class="mrp__price">₹{{ product.price }}</span>
+        {% if product.mrp_display %}
+          <span class="mrp__pipe">|</span>
+          <span class="mrp__label">MRP</span>
+          <span class="mrp__price">₹{{ product.mrp_display }}</span>
+        {% endif %}
+      {% elif product.mrp_display %}
         <span class="mrp__label">MRP</span>
         <span class="mrp__price">₹{{ product.mrp_display }}</span>
       {% endif %}
