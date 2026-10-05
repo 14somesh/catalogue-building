@@ -183,7 +183,8 @@ def score_candidate_match(
     candidate_url: str,
     brand: str = "",
     qualifier_tokens: Optional[List[str]] = None,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    target_capacity: Optional[str] = None
 ) -> Tuple[float, bool, str]:
     """
     BIDIRECTIONAL CANDIDATE MATCHER & SCORER:
@@ -284,6 +285,12 @@ def score_candidate_match(
     cand_all_norm = normalize_model_tokens(candidate_title) - stopwords
     extra_title_tokens = cand_all_norm - target_tokens
     score -= len(extra_title_tokens) * 5.0
+
+    if target_capacity:
+        target_cap_tokens = {t for t in normalize_model_tokens(target_capacity) if re.fullmatch(r'\d{2,6}|mah', t)}
+        cand_cap_tokens = {t for t in normalize_model_tokens(candidate_title + " " + cand_slug) if re.fullmatch(r'\d{2,6}', t)}
+        if target_cap_tokens and cand_cap_tokens:
+            score += 20.0 if (target_cap_tokens & cand_cap_tokens) else -20.0
 
     return score, True, f"Score: {score:.1f} (exact_model: {exact_model_portion})"
 
@@ -1040,7 +1047,8 @@ def search_shopify_brand_store(
     exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15,
     category: Optional[str] = None,
-    out_diagnostics: Optional[Dict[str, Any]] = None
+    out_diagnostics: Optional[Dict[str, Any]] = None,
+    target_capacity: Optional[str] = None
 ) -> Optional[str]:
     """
     Tier 1 & Tier 2 Shopify Discovery:
@@ -1088,7 +1096,7 @@ def search_shopify_brand_store(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
+            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity
         )
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": p_title, "score": score, "source": "suggest"})
@@ -1115,7 +1123,7 @@ def search_shopify_brand_store(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
+            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity
         )
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": title, "score": score, "source": "catalogue"})
@@ -1151,7 +1159,7 @@ def search_shopify_brand_store(
                     if clean_full in exclude or clean_full in seen_urls:
                         continue
                     score, is_valid, diag = score_candidate_match(
-                        model_name, cand_title, cand_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
+                        model_name, cand_title, cand_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity
                     )
                     if is_valid and score > 0:
                         candidates.append({"url": cand_url, "title": cand_title, "score": score, "source": "tinyfish_search"})
@@ -1166,6 +1174,8 @@ def search_shopify_brand_store(
                                 out_diagnostics["ambiguous_candidates"] = []
                             if cand_display not in out_diagnostics["ambiguous_candidates"]:
                                 out_diagnostics["ambiguous_candidates"].append(cand_display)
+                if candidates:
+                    break
                 if candidates:
                     break
 

@@ -249,7 +249,8 @@ def execute_spec_escalation(
     config: Optional[dict] = None,
     brochure_override: Optional[str] = None,
     category: Optional[str] = None,
-    out_diagnostics: Optional[Dict[str, Any]] = None
+    out_diagnostics: Optional[Dict[str, Any]] = None,
+    target_capacity: Optional[str] = None
 ) -> Tuple[Optional[ParserResult], Optional[str]]:
     """
     Executes 5-tier escalation for product specs:
@@ -366,7 +367,7 @@ def execute_spec_escalation(
 
         if not tier1_url:
             # 1a. Try Shopify direct index
-            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics)
+            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics, target_capacity=target_capacity)
             
             # 1b. Non-Shopify Generic Sitemap Fallback
             if not tier1_url:
@@ -507,12 +508,16 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
     manual_url = str(row_dict.get("Product_URL", "")).strip() if not is_empty_value(row_dict.get("Product_URL")) else None
     brochure_override = str(row_dict.get("Brochure_PDF", "")).strip() if not is_empty_value(row_dict.get("Brochure_PDF")) else None
 
+    target_capacity = str(row_dict.get("Override_Spec_Capacity", "")).strip() if not is_empty_value(row_dict.get("Override_Spec_Capacity")) else None
+    if not target_capacity:
+        target_capacity = str(row_dict.get("Raw_Spec_Capacity", "")).strip() if not is_empty_value(row_dict.get("Raw_Spec_Capacity")) else None
+
     brand_defaults = load_brand_defaults(brand, category=category)
     out_diagnostics: Dict[str, Any] = {}
     parser_res, provenance = execute_spec_escalation(
         product_id, brand, model_name, manual_url, brand_defaults,
         exclude_urls=exclude_urls, config=config, brochure_override=brochure_override, category=category,
-        out_diagnostics=out_diagnostics
+        out_diagnostics=out_diagnostics, target_capacity=target_capacity
     )
 
     if not parser_res or (not parser_res.specs and not parser_res.description_text):

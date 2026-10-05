@@ -52,11 +52,12 @@ class Color:
 
 class MockHttpResponse:
     """Mock requests.Response returned by the offline network interceptor."""
-    def __init__(self, status_code: int = 200, text: str = "", json_data: Any = None):
+    def __init__(self, status_code: int = 200, text: str = "", json_data: Any = None, headers: Any = None):
         self.status_code = status_code
         self.text = text if text is not None else ""
         self.content = self.text.encode("utf-8") if isinstance(self.text, str) else b""
         self._json_data = json_data
+        self.headers = headers if headers is not None else {}
 
     def json(self):
         if self._json_data is not None:
@@ -176,6 +177,9 @@ def resolve_candidate_for_product(
     category = str(row_dict.get("Category", "")).strip()
     model_name = str(row_dict.get("Model_Name", "")).strip()
     manual_url = str(row_dict.get("Source_URL", "")).strip() if not is_empty_value(row_dict.get("Source_URL")) else None
+    target_capacity = str(row_dict.get("Override_Spec_Capacity", "")).strip() if not is_empty_value(row_dict.get("Override_Spec_Capacity")) else None
+    if not target_capacity:
+        target_capacity = str(row_dict.get("Raw_Spec_Capacity", "")).strip() if not is_empty_value(row_dict.get("Raw_Spec_Capacity")) else None
     
     # 1. Tier 0: Brochure check
     if manual_url and "brochure:" in manual_url:
@@ -206,7 +210,8 @@ def resolve_candidate_for_product(
             domain=domain,
             qualifier_tokens=qualifiers,
             exclude_urls=exclude_urls,
-            category=category
+            category=category,
+            target_capacity=target_capacity
         )
         if shopify_url:
             return shopify_url, "Tier 1: Official Brand Store"
