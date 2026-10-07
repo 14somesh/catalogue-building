@@ -459,6 +459,7 @@ def main():
     parser.add_argument("--golden-only", action="store_true", help="Run Level 2 golden dataset replay only")
     parser.add_argument("--update-baseline", action="store_true", help="Deliberately accept and update golden baseline")
     parser.add_argument("--record-brand", type=str, default=None, help="Re-record offline fixtures for a specific brand")
+    parser.add_argument("--skip-e2e", action="store_true", help="Skip Level 3 end-to-end offline smoke run")
 
     args = parser.parse_args()
 
@@ -512,6 +513,23 @@ def main():
         except RuntimeError as e:
             overall_success = False
             print(f"  {Color.RED}✗ NETWORK FALLTHROUGH BLOCKED:{Color.RESET} {e}")
+
+    # -------------------------------------------------------------------------
+    # LEVEL 3: END-TO-END OFFLINE SMOKE RUN (collect -> images -> review -> build PDF)
+    # -------------------------------------------------------------------------
+    if not args.unit_only and not args.golden_only and not args.skip_e2e:
+        print(f"\n{Color.BOLD}[LEVEL 3] Running Full Pipeline End-to-End (Offline, Isolated Copy)...{Color.RESET}")
+        from tests.e2e_smoke import run_e2e_smoke
+        e2e_ok, e2e_msgs = run_e2e_smoke()
+        if e2e_ok:
+            print(f"  {Color.GREEN}✓ PASSED:{Color.RESET} TWS (non-Shopify) and Powerbank (Shopify) ran collect → images → review → PDF cleanly.")
+            for m in e2e_msgs:
+                print(f"    {Color.DIM}{m}{Color.RESET}")
+        else:
+            overall_success = False
+            print(f"  {Color.RED}✗ FAILED:{Color.RESET} End-to-end pipeline run broke:")
+            for m in e2e_msgs:
+                print(f"    {Color.RED}• {m}{Color.RESET}")
 
     total_time = time.time() - start_total
     print("\n" + "-" * 78)

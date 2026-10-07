@@ -29,8 +29,10 @@ from src.utils.scraper import (
     search_shopify_brand_store,
     search_retail_reliance,
     search_retail_croma,
+    score_candidate_match,
     DEFAULT_HEADERS
 )
+from src.utils.waf_detector import detect_waf_block
 from src.utils.llm_client import draft_bullets_and_subtitle
 from src.parsers.base import ParserResult
 from src.utils.logger import setup_logger

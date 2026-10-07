@@ -1380,18 +1380,6 @@ def get_catalogue_config() -> Dict[str, Any]:
         return {"brand_order": [], "category": {}, "validation_rules": {}}
 
 
-@app.get("/categories")
-def list_categories() -> List[str]:
-    """Returns available product categories from config.yaml."""
-    try:
-        with open("config.yaml", "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        cat_name = cfg.get("category", {}).get("name", "Power Bank")
-        return [cat_name]
-    except Exception:
-        return ["Power Bank"]
-
-
 @app.get("/builds")
 def list_built_catalogues() -> List[Dict[str, Any]]:
     """

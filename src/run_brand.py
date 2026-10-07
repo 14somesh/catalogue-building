@@ -328,7 +328,9 @@ def resolve_brand_url_collisions(
 
 def clean_display_name(name: str, brand: str = "") -> str:
     """Returns the shortest clean Display_Name stripped of brand, SKU codes, capacities, and color suffixes."""
-    cleaned = str(name or "").strip()
+    if is_empty_value(name):
+        return ""
+    cleaned = str(name).strip()
     if brand:
         cleaned = re.sub(rf'^{re.escape(brand)}\s*', '', cleaned, flags=re.I).strip()
     # Strip SKU patterns
@@ -384,7 +386,7 @@ def execute_automatic_llm_post_run_review(
         current_disp = row.get("Display_Name")
 
         # 1. Clean Display_Name if it carries brand prefixes, SKU codes, or color suffixes
-        clean_disp = clean_display_name(current_disp or model_name, brand=brand_name)
+        clean_disp = clean_display_name(model_name if is_empty_value(current_disp) else current_disp, brand=brand_name)
         if clean_disp != current_disp and clean_disp:
             logger.info(f"[{pid}] Cleaned Display_Name from '{current_disp}' to '{clean_disp}'.")
             df.at[idx, "Display_Name"] = clean_disp

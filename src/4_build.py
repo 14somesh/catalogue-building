@@ -529,7 +529,8 @@ def build_catalogue_pdf(
             device_scale_factor=2
         )
         page = context.new_page()
-        page.goto(f"file:///{preview_html_path.replace(os.sep, '/')}", wait_until="networkidle")
+        from pathlib import Path
+        page.goto(Path(os.path.abspath(preview_html_path)).as_uri(), wait_until="networkidle")
         
         # Wait for self-hosted fonts & brand divider scaling
         page.evaluate("() => document.fonts.ready")

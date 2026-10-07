@@ -687,6 +687,112 @@ class TestParserContract(unittest.TestCase):
         self.assertEqual(res.specs.get("output"), "22.5W")
 
 
+class TestCodeIntegrity(unittest.TestCase):
+    """
+    Static guards for the crash classes that previously only surfaced during a live run:
+    missing imports / undefined names (swallowed by broad excepts), imports of names that don't exist,
+    duplicate API routes, and parser signature drift.
+    """
+    SRC_DIR = os.path.join(WORKSPACE_ROOT, "src")
+
+    @classmethod
+    def _src_files(cls):
+        out = []
+        for root, _, files in os.walk(cls.SRC_DIR):
+            if "__pycache__" in root:
+                continue
+            out += [os.path.join(root, f) for f in files if f.endswith(".py")]
+        return sorted(out)
+
+    def test_every_src_module_imports_cleanly(self):
+        for path in self._src_files():
+            rel = os.path.relpath(path, WORKSPACE_ROOT)[:-3].replace(os.sep, ".")
+            if rel.endswith("__init__"):
+                rel = rel[: -len(".__init__")]
+            with self.subTest(module=rel):
+                importlib.import_module(rel)
+
+    def test_no_undefined_names_in_src(self):
+        try:
+            from pyflakes.api import check
+            from pyflakes.reporter import Reporter
+            from pyflakes import messages as pm
+        except ImportError:
+            self.fail("pyflakes is required for this guard: pip install -r requirements.txt")
+        import io
+        problems = []
+
+        class _Collect(Reporter):
+            def __init__(self):
+                super().__init__(io.StringIO(), io.StringIO())
+
+            def flake(self, message):
+                if isinstance(message, (pm.UndefinedName, pm.UndefinedLocal, pm.UndefinedExport)):
+                    problems.append(str(message))
+
+        rep = _Collect()
+        for path in self._src_files():
+            with open(path, encoding="utf-8") as f:
+                check(f.read(), path, rep)
+        self.assertEqual(problems, [], "Undefined names (missing import or typo):\n" + "\n".join(problems))
+
+    def test_every_internal_from_import_resolves(self):
+        import ast
+        missing = []
+        for path in self._src_files() + [os.path.join(WORKSPACE_ROOT, "tests", "harness.py")]:
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), path)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src"):
+                    mod = importlib.import_module(node.module)
+                    for alias in node.names:
+                        if alias.name != "*" and not hasattr(mod, alias.name):
+                            try:
+                                importlib.import_module(f"{node.module}.{alias.name}")
+                            except ImportError:
+                                missing.append(f"{os.path.relpath(path, WORKSPACE_ROOT)}:{node.lineno} from {node.module} import {alias.name}")
+        self.assertEqual(missing, [], "Imports of names that do not exist:\n" + "\n".join(missing))
+
+    def test_no_duplicate_api_routes(self):
+        import ast
+        api_path = os.path.join(self.SRC_DIR, "api.py")
+        with open(api_path, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), api_path)
+        seen, dups = {}, []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for dec in node.decorator_list:
+                    if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+                            and dec.func.attr in ("get", "post", "put", "patch", "delete")
+                            and dec.args and isinstance(dec.args[0], ast.Constant)):
+                        key = (dec.func.attr.upper(), dec.args[0].value)
+                        if key in seen:
+                            dups.append(f"{key[0]} {key[1]} defined at lines {seen[key]} and {node.lineno}")
+                        seen[key] = node.lineno
+        self.assertEqual(dups, [], "Duplicate API routes (the later one is silently ignored):\n" + "\n".join(dups))
+
+    def test_parser_subclasses_keep_base_parse_signature(self):
+        import inspect
+        from src.parsers.base import BaseParser
+        from src.parsers import PARSER_REGISTRY
+        base_params = list(inspect.signature(BaseParser.parse).parameters)
+        for name, parser in PARSER_REGISTRY.items():
+            params = list(inspect.signature(type(parser).parse).parameters)
+            with self.subTest(parser=name):
+                self.assertTrue(set(base_params).issubset(params),
+                                f"{type(parser).__name__}.parse is missing {sorted(set(base_params) - set(params))}")
+
+
+class TestDisplayNameFallback(unittest.TestCase):
+    """An empty Display_Name cell must fall back to the model name, never the literal string 'nan'."""
+
+    def test_clean_display_name_of_empty_cell_is_empty_not_nan(self):
+        rb = importlib.import_module("src.run_brand")
+        self.assertEqual(rb.clean_display_name(float("nan"), brand="Zylo"), "")
+        self.assertEqual(rb.clean_display_name(None, brand="Zylo"), "")
+        self.assertEqual(rb.clean_display_name("Zylo Air 2", brand="Zylo"), "Air 2")
+
+
 if __name__ == "__main__":
     unittest.main()
 

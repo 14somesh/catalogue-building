@@ -1,7 +1,7 @@
 import re
 import json
 import logging
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
@@ -20,6 +20,38 @@ def clean_html_text(html: str) -> str:
     for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "svg"]):
         tag.decompose()
     return soup.get_text(separator=" ", strip=True)
+
+
+def detect_ecommerce_platform(domain: str, timeout: int = 6) -> Tuple[str, str]:
+    """
+    Lightweight live probe of a brand domain's storefront platform, used by the onboarding summary.
+    Returns (platform, detail) where platform is one of shopify/woocommerce/magento/bigcommerce/custom.
+    Never raises: network failures are reported as ("custom", "error: ...").
+    """
+    import requests
+    clean = str(domain or "").strip().replace("https://", "").replace("http://", "").strip("/")
+    if not clean:
+        return "custom", "error: empty domain"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    try:
+        r = requests.get(f"https://{clean}/products.json?limit=1", headers=headers, timeout=timeout)
+        if r.status_code == 200 and "products" in (r.text or "")[:200]:
+            return "shopify", "products.json reachable"
+        r = requests.get(f"https://{clean}/", headers=headers, timeout=timeout)
+        if r.status_code in (401, 403, 429):
+            return "custom", f"HTTP {r.status_code} — request blocked"
+        body = (r.text or "").lower()
+        if "cdn.shopify.com" in body or "shopify.theme" in body:
+            return "shopify", f"HTTP {r.status_code}, Shopify markers in homepage"
+        if "woocommerce" in body or "wp-content" in body:
+            return "woocommerce", f"HTTP {r.status_code}, WooCommerce markers in homepage"
+        if "mage/" in body or "magento" in body:
+            return "magento", f"HTTP {r.status_code}, Magento markers in homepage"
+        if "bigcommerce" in body:
+            return "bigcommerce", f"HTTP {r.status_code}, BigCommerce markers in homepage"
+        return "custom", f"HTTP {r.status_code}, no known platform markers"
+    except Exception as e:
+        return "custom", f"error: {type(e).__name__}"
 
 
 class GenericParser(BaseParser):
