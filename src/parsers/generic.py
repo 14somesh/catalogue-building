@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 
 from src.parsers.base import BaseParser, ParserResult
 from src.parsers.brochure import parse_specs_from_text
+from src.utils.category_specs import extract_category_specs, normalize_category_key
 
 logger = logging.getLogger("generic_parser")
 
@@ -36,7 +37,7 @@ class GenericParser(BaseParser):
     def capabilities(self) -> Set[str]:
         return {"specs", "images"}
 
-    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1) -> ParserResult:
+    def parse(self, url: str, html: str, status_code: int = 200, tier: int = 1, category: Optional[str] = None) -> ParserResult:
         if status_code in (401, 403, 429):
             return ParserResult(success=False, status_code=status_code, url=url, is_blocked=True, tier=tier, error=f"HTTP {status_code} Blocked")
         if status_code in (404, 410):
@@ -148,7 +149,10 @@ class GenericParser(BaseParser):
         desc_text = clean_html_text(str(desc_container)) if desc_container else ""
 
         full_text = f"{product_title or ''}\n{desc_text}\n{json_ld_desc}\n" + "\n".join(spec_text_blocks)
-        parsed_specs = parse_specs_from_text(full_text)
+        if normalize_category_key(category) == "powerbank":
+            parsed_specs = parse_specs_from_text(full_text)
+        else:
+            parsed_specs = extract_category_specs(full_text, category=category)
         for k, v in parsed_specs.items():
             if k not in specs or not specs[k]:
                 specs[k] = v

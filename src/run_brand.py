@@ -720,6 +720,24 @@ def run_brand(
                 "table_markdown": "",
                 "halt_reason": str(e)
             }
+        except Exception as e:
+            # One product's unexpected error must not abort the whole brand run.
+            logger.error(f"[{pid}] Unexpected error while processing row: {type(e).__name__}: {e}", exc_info=True)
+            err_msg = f"Skipped: internal error — {type(e).__name__}: {e}"
+            df.at[idx, "Status"] = "Skipped"
+            df.at[idx, "Flags"] = err_msg
+            df.at[idx, "Fix_Log"] = err_msg
+            save_catalogue_data(df, excel_path)
+            if progress_callback:
+                progress_callback({
+                    "stage": "row_done",
+                    "product_id": pid,
+                    "status": "Skipped",
+                    "source": None,
+                    "current": i,
+                    "total": total_brand_rows,
+                    "message": f"Error on product {i}/{total_brand_rows}: {pid} -> Skipped ({type(e).__name__})"
+                })
 
     if cancelled_early:
         logger.info(f"Collection gracefully stopped for brand '{brand_name}' due to cancellation request.")

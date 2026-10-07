@@ -646,5 +646,47 @@ class TestAdditionalPastFixInvariants(unittest.TestCase):
             self.assertTrue(any("Duplicate image asset" in f for f in hard_flags))
 
 
+class TestParserContract(unittest.TestCase):
+    """Every registered parser must accept (url, html, status_code, tier, category)."""
+
+    TWS_HTML = (
+        '<html><head><title>Nothing Ear (a)</title></head><body>'
+        '<h1 class="product-title">Nothing Ear (a)</h1>'
+        '<div class="product-description">Up to 42.5 hours total playtime with charging case. '
+        '11mm dynamic driver. Bluetooth 5.3. Active Noise Cancellation up to 45dB. 1 year warranty.</div>'
+        '</body></html>'
+    )
+    PB_HTML = (
+        '<html><head><title>Volt 20K</title></head><body><h1 class="product-title">Volt 20K</h1>'
+        '<div class="product-description">20000 mAh capacity, 22.5W output, 2 USB-A + 1 Type-C ports, '
+        '1 year warranty.</div></body></html>'
+    )
+
+    def test_every_registered_parser_accepts_category_kwarg(self):
+        from src.parsers import PARSER_REGISTRY
+        for name, parser in PARSER_REGISTRY.items():
+            with self.subTest(parser=name):
+                try:
+                    parser.parse(url="https://example.com/products/x", html=self.TWS_HTML,
+                                 status_code=200, tier=1, category="TWS")
+                except TypeError as e:
+                    self.fail(f"Parser '{name}' rejects the standard parse() signature: {e}")
+
+    def test_generic_parser_extracts_tws_specs(self):
+        from src.parsers.generic import GenericParser
+        res = GenericParser().parse(url="https://example.com/ear-a", html=self.TWS_HTML,
+                                    status_code=200, tier=1, category="TWS")
+        self.assertIn("playtime", res.specs)
+        self.assertIn("bluetooth", res.specs)
+
+    def test_generic_parser_powerbank_specs_unchanged(self):
+        from src.parsers.generic import GenericParser
+        res = GenericParser().parse(url="https://example.com/volt", html=self.PB_HTML,
+                                    status_code=200, tier=1, category="Powerbank")
+        self.assertEqual(res.specs.get("capacity"), "20000 mAh")
+        self.assertEqual(res.specs.get("output"), "22.5W")
+
+
 if __name__ == "__main__":
     unittest.main()
+
