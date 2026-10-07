@@ -1176,8 +1176,6 @@ def search_shopify_brand_store(
                                 out_diagnostics["ambiguous_candidates"].append(cand_display)
                 if candidates:
                     break
-                if candidates:
-                    break
 
     if candidates:
         candidates.sort(key=lambda c: c["score"], reverse=True)
