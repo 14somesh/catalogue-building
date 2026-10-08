@@ -622,6 +622,7 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
     if not parser_res or (not parser_res.specs and not parser_res.description_text):
         # AUTO-SKIP ON EXHAUSTION: All tiers (including Vision) exhausted. Write NOTHING to Raw_ columns.
         unsure = [v for v in verification if v.get("decision") == "unsure"]
+        rejected_now = [v for v in verification if v.get("decision") == "not_match"]
         ambiguous_cands = out_diagnostics.get("ambiguous_candidates", [])
         if unsure:
             options = " | ".join(f"{v.get('title') or 'page'} ({v['url']})" for v in unsure[:3])
@@ -629,19 +630,24 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
             flags_msg = f"Skipped: {reason_str}"
             fix_log_msg = f"Tier 1-4 escalation exhausted. {reason_str}{verify_note}"
             log_msg = f"[{product_id}] NEEDS PICK: {options}"
+        elif rejected_now:
+            # The verifier actually opened and checked these pages — trust its per-page reasons over the
+            # pre-verifier title-overlap heuristic below, which fires on the same near-miss titles but never
+            # looked at the page content.
+            flags_msg = ("Skipped: Product pages found were verified as a different product: "
+                         + "; ".join(f"{v.get('title') or v['url']} — {v.get('reason')}" for v in rejected_now[:3]))
+            fix_log_msg = "Tier 1-4 escalation (with Vision fallback) exhausted; candidates found but verified as a different product." + verify_note
+            log_msg = f"[{product_id}] SKIPPED: verified as different product ({len(rejected_now)} rejected)"
         elif ambiguous_cands:
+            # Fallback only: the verifier never got a page to check (all candidate fetches failed/blocked),
+            # but similarly-titled candidates were seen. Least informative path, kept as a last resort.
             cands_str = ", ".join(ambiguous_cands[:4])
             reason_str = f"Multiple candidates found: {cands_str} — model name may be ambiguous or outdated" if len(ambiguous_cands) > 1 else f"Candidate found: {cands_str} — model name may be ambiguous or outdated"
             flags_msg = f"Skipped: {reason_str}"
             fix_log_msg = f"Tier 1-4 escalation exhausted. {reason_str}"
             log_msg = f"[{product_id}] SKIPPED: {reason_str}"
         else:
-            rejected_now = [v for v in verification if v.get("decision") == "not_match"]
-            if rejected_now:
-                flags_msg = ("Skipped: Product pages found were verified as a different product: "
-                             + "; ".join(f"{v.get('title') or v['url']} — {v.get('reason')}" for v in rejected_now[:3]))
-            else:
-                flags_msg = "Skipped: All spec tiers exhausted (including Vision) without finding technical specifications"
+            flags_msg = "Skipped: All spec tiers exhausted (including Vision) without finding technical specifications"
             fix_log_msg = "Tier 1-4 escalation (with Vision fallback) exhausted; no verified technical specs found." + verify_note
             log_msg = f"[{product_id}] SKIPPED: All tiers exhausted"
 

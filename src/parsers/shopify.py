@@ -1,7 +1,7 @@
 import re
 from typing import Set, Dict, List, Optional
 from bs4 import BeautifulSoup
-from src.parsers.base import BaseParser, ParserResult
+from src.parsers.base import BaseParser, ParserResult, strip_noise_elements, fallback_page_text
 from src.utils.category_specs import extract_category_specs
 
 
@@ -35,12 +35,10 @@ class ShopifyParser(BaseParser):
         if any(w in page_title.lower() for w in ["404", "not found", "page not found"]):
             return ParserResult(success=False, status_code=404, url=url, is_delisted=True, tier=tier, error="Soft 404 page title")
 
-        # Strip noisy elements (header, footer, nav, scripts, reviews, recommendations)
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "svg"]):
-            tag.decompose()
-        for noisy_cls in ["site-footer", "footer", "site-header", "header", "announcement-bar", "related-products", "product-recommendations", "shopify-section-footer"]:
-            for el in soup.find_all(class_=re.compile(noisy_cls, re.I)):
-                el.decompose()
+        # Strip noisy elements (header, footer, nav, scripts, reviews, recommendations -- shared with
+        # GenericParser so the two can't drift) before any text extraction, including the full-page
+        # fallback below.
+        strip_noise_elements(soup)
 
         # Product Title
         product_title = None
@@ -56,6 +54,15 @@ class ShopifyParser(BaseParser):
         # Main product description container
         desc_container = soup.find("div", class_=re.compile(r"product.*description|description|rte", re.I))
         desc_text = desc_container.get_text(separator="\n", strip=True) if desc_container else ""
+
+        # Fallback for headless/custom Shopify themes (e.g. Hydrogen, a bespoke React storefront): the
+        # selectors above assume classic Shopify-theme class names ("accordion", "product-description",
+        # "rte", ...), which a custom-built theme may never use. See GenericParser for the full
+        # rationale -- same fix, shared helper, so the two parsers can't drift apart.
+        targeted_text_len = len(desc_text) + sum(len(b) for b in spec_text_blocks)
+        fallback_text = fallback_page_text(soup, targeted_text_len, anchor=h1)
+        if fallback_text:
+            spec_text_blocks.append(fallback_text)
 
         full_product_text = f"{product_title or ''}\n{desc_text}\n" + "\n".join(spec_text_blocks)
 

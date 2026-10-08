@@ -687,6 +687,144 @@ class TestParserContract(unittest.TestCase):
         self.assertEqual(res.specs.get("capacity"), "20000 mAh")
         self.assertEqual(res.specs.get("output"), "22.5W")
 
+    # A real Nothing.tech-style page: no WooCommerce/Shopify-theme class names anywhere (Tailwind
+    # utility classes / hashed CSS-module names, the norm for custom-built Next.js/React storefronts).
+    # The spec text is genuinely on the page in plain <div>/<span> tags, just not inside any container
+    # the old targeted selectors (class containing "spec", "attribute", "description", ...) recognize.
+    MODERN_SITE_HTML = (
+        '<html><head><title>CMF Buds 2</title></head><body>'
+        '<header class="h_a1b2"><nav>Shop All</nav></header>'
+        '<h1 class="tw-text-2xl tw-font-bold">CMF Buds 2</h1>'
+        '<div class="tw-grid tw-gap-4">'
+        '<span class="tw-text-sm">11 mm PMI driver</span>'
+        '<span class="tw-text-sm">48 dB Hybrid ANC</span>'
+        '<span class="tw-text-sm">6 HD microphones</span>'
+        '<span class="tw-text-sm">Up to 40 hours total playtime</span>'
+        '<span class="tw-text-sm">Bluetooth 5.3</span>'
+        '</div>'
+        '<footer class="f_x9y8">Copyright Nothing</footer>'
+        '</body></html>'
+    )
+
+    def test_generic_parser_finds_specs_with_no_semantic_class_names(self):
+        """Nothing/CMF regression: a page with real spec text but no recognizable container class
+        names must still yield specs, instead of silently coming back empty."""
+        from src.parsers.generic import GenericParser
+        res = GenericParser().parse(url="https://nothing.tech/products/cmf-buds-2", html=self.MODERN_SITE_HTML,
+                                    status_code=200, tier=1, category="TWS")
+        self.assertTrue(res.specs, f"Expected specs to be extracted from plain page text, got: {res.specs}")
+        self.assertIn("playtime", res.specs)
+        self.assertIn("bluetooth", res.specs)
+        # Footer/nav noise must not leak into the extracted spec text.
+        self.assertNotIn("Copyright", str(res.specs))
+
+    def test_generic_parser_fallback_does_not_override_targeted_match(self):
+        """When the targeted selectors already found real content, the full-page fallback should not
+        be needed (targeted_text_len >= 200), so behavior on a normal themed page is unchanged."""
+        from src.parsers.generic import GenericParser
+        res = GenericParser().parse(url="https://example.com/ear-a", html=self.TWS_HTML,
+                                    status_code=200, tier=1, category="TWS")
+        self.assertEqual(res.description_text.strip(),
+                         "Up to 42.5 hours total playtime with charging case. "
+                         "11mm dynamic driver. Bluetooth 5.3. Active Noise Cancellation up to 45dB. 1 year warranty.")
+
+    # Same page as MODERN_SITE_HTML, but with an unrelated "You may also like" carousel appended --
+    # a different product with its own (different) Bluetooth version and driver size, in a widget that
+    # itself has no recognizable class name either ("product-card" matches the shared noise-class list).
+    MODERN_SITE_WITH_RECOMMENDATIONS_HTML = (
+        '<html><head><title>CMF Buds 2</title></head><body>'
+        '<header class="h_a1b2"><nav>Shop All</nav></header>'
+        '<h1 class="tw-text-2xl tw-font-bold">CMF Buds 2</h1>'
+        '<div class="tw-grid tw-gap-4">'
+        '<span class="tw-text-sm">11 mm PMI driver</span>'
+        '<span class="tw-text-sm">48 dB Hybrid ANC</span>'
+        '<span class="tw-text-sm">6 HD microphones</span>'
+        '<span class="tw-text-sm">Up to 40 hours total playtime</span>'
+        '<span class="tw-text-sm">Bluetooth 5.3</span>'
+        '</div>'
+        '<section class="you-may-also-like">'
+        '<h2>You may also like</h2>'
+        '<div class="product-card"><span>CMF Buds Pro 2</span><span>10mm Driver</span><span>Bluetooth 5.4</span></div>'
+        '<div class="product-card"><span>CMF Neckband Pro</span><span>Bluetooth 5.2</span></div>'
+        '</section>'
+        '<footer class="f_x9y8">Copyright Nothing</footer>'
+        '</body></html>'
+    )
+
+    def test_generic_parser_fallback_ignores_recommended_products_noise(self):
+        """A 'You may also like' carousel full of OTHER products (own class-free spec-like text) must
+        not contaminate this product's specs -- e.g. its own Bluetooth 5.3 must win, not a
+        recommended product's Bluetooth 5.4 or 5.2."""
+        from src.parsers.generic import GenericParser
+        res = GenericParser().parse(url="https://nothing.tech/products/cmf-buds-2",
+                                    html=self.MODERN_SITE_WITH_RECOMMENDATIONS_HTML,
+                                    status_code=200, tier=1, category="TWS")
+        self.assertEqual(res.specs.get("bluetooth"), "Bluetooth v5.3")
+        self.assertNotIn("You may also like", res.description_text or "")
+        self.assertNotIn("CMF Buds Pro 2", str(res.specs))
+
+    def test_shopify_parser_finds_specs_on_headless_custom_theme(self):
+        """Same gap as GenericParser, for a Shopify store running a fully custom/headless theme
+        (e.g. Hydrogen) whose markup uses none of the classic Shopify-theme class names."""
+        from src.parsers.shopify import ShopifyParser
+        html = (
+            '<html><head><title>Volt 20K</title></head><body>'
+            '<h1 class="tw-text-xl">Volt 20K</h1>'
+            '<div class="tw-flex tw-flex-col">'
+            '<span>20000 mAh capacity</span>'
+            '<span>22.5W output</span>'
+            '<span>2 USB-A + 1 Type-C ports</span>'
+            '<span>1 year warranty</span>'
+            '</div></body></html>'
+        )
+        res = ShopifyParser().parse(url="https://brandx.myshopify.com/products/volt-20k", html=html,
+                                    status_code=200, tier=1, category="Powerbank")
+        self.assertTrue(res.success)
+        self.assertEqual(res.specs.get("capacity"), "20000mAh")
+        self.assertEqual(res.specs.get("output"), "22.5W Fast Charging")
+
+    def test_generic_parser_fallback_survives_unlisted_class_sibling_section(self):
+        """A recommendation widget whose class name is NOT in the noise blocklist (e.g. 'other-buyers-chose')
+        -- a blocklist can never be exhaustive -- must still be kept out, because it is a DOM sibling of the
+        real product's content block, not an ancestor of it. The real Bluetooth 5.3 must win over a
+        'frequently bought with' product's Bluetooth 5.4."""
+        from src.parsers.generic import GenericParser
+        html = (
+            '<html><head><title>CMF Buds 2</title></head><body>'
+            '<section class="other-buyers-chose"><h2>Frequently bought with</h2>'
+            '<div><span>CMF Buds Pro 2</span><span>10mm Driver</span><span>Bluetooth 5.4</span></div>'
+            '</section>'
+            '<div class="tw-product-block">'
+            '<h1 class="tw-text-2xl">CMF Buds 2</h1>'
+            '<div class="tw-grid tw-gap-4">'
+            '<span class="tw-text-sm">11 mm PMI driver</span>'
+            '<span class="tw-text-sm">48 dB Hybrid ANC</span>'
+            '<span class="tw-text-sm">Bluetooth 5.3</span>'
+            '</div></div>'
+            '</body></html>'
+        )
+        res = GenericParser().parse(url="https://nothing.tech/products/cmf-buds-2", html=html,
+                                    status_code=200, tier=1, category="TWS")
+        self.assertEqual(res.specs.get("bluetooth"), "Bluetooth v5.3")
+
+    def test_generic_parser_fallback_survives_classless_sibling_with_no_main(self):
+        """A page with no <main> landmark and a classless 'Trending now' sibling block placed BEFORE
+        the real product's own (short) content must not let that sibling's numbers win just because
+        climbing to <body> would otherwise pull both blocks in together."""
+        from src.parsers.generic import GenericParser
+        html = (
+            '<html><head><title>Volt 20K</title></head><body>'
+            '<div><h3>Trending now</h3>'
+            '<div><span>Volt 10K</span><span>10000 mAh capacity</span></div></div>'
+            '<div class="tw-product-block">'
+            '<h1 class="tw-text-xl">Volt 20K</h1>'
+            '<div><span>20000 mAh capacity</span><span>22.5W output</span></div>'
+            '</div></body></html>'
+        )
+        res = GenericParser().parse(url="https://brandx.com/products/volt-20k", html=html,
+                                    status_code=200, tier=1, category="Powerbank")
+        self.assertEqual(res.specs.get("capacity"), "20000 mAh")
+
 
 class TestCodeIntegrity(unittest.TestCase):
     """
@@ -1035,6 +1173,43 @@ class TestVerifyRetryWithMemory(unittest.TestCase):
         mem = {"https://a/x": "not_match: Plus variant", "https://a/y": "delisted: HTTP 404"}
         self.assertEqual(collect.parse_rejected_urls(collect.format_rejected_urls(mem)), mem)
         self.assertEqual(collect.parse_rejected_urls(float("nan")), {})
+
+    def test_verifier_rejection_reason_beats_legacy_ambiguous_message(self):
+        """CMF Buds 2 regression: a near-miss candidate (e.g. 'CMF Buds 2 Plus' for target 'CMF Buds 2') is both
+        (a) recorded as a near-miss candidate for the verifier, and (b) flagged by the older pre-verifier
+        title-overlap diagnostic (out_diagnostics['ambiguous_candidates']) that scraper.py still populates as a
+        side effect of scoring. When the verifier actually fetches and rejects that page with a real reason, its
+        decision must win — not the older heuristic's generic 'may be ambiguous or outdated' text, which never
+        looked at the page content and used to take priority by code order."""
+        from unittest.mock import patch, MagicMock
+        from src.parsers.base import ParserResult
+        collect = importlib.import_module("src.1_collect")
+        url = "https://in.nothing.tech/products/cmf-buds-2-plus"
+
+        def fake_search(*a, **k):
+            k["out_candidates"].append({"url": url, "title": "CMF Buds 2 Plus", "score": 0.0, "valid": False,
+                                        "reason": "qualifier mismatch", "source": "t"})
+            k["out_diagnostics"].setdefault("ambiguous_candidates", []).append("CMF Buds 2 Plus")
+            return None
+
+        cfg = {"domain": "in.nothing.tech", "platform": "shopify", "qualifier_tokens": ["Plus", "Pro"], "retail_order": []}
+        fake_generic_parser_cls = MagicMock(return_value=MagicMock(find_product_url=lambda *a, **k: None))
+        with patch.object(collect, "search_shopify_brand_store", side_effect=fake_search), \
+             patch("src.parsers.generic.GenericBrandParser", fake_generic_parser_cls), \
+             patch.object(collect, "fetch_and_parse_url",
+                          return_value=ParserResult(success=True, status_code=200, url=url, tier=1,
+                                                    title="CMF Buds 2 Plus", specs={"a": "b"})), \
+             patch("src.utils.product_verifier.verify_product_page",
+                   return_value=("not_match", "candidate is the Plus variant, not the base model", "groq:g")), \
+             patch.object(collect, "load_brand_defaults", return_value=cfg), \
+             patch.object(collect, "parse_brochure_for_model", return_value=None):
+            updates, ok, _ = collect.collect_data_for_row(
+                {"Product_ID": "TWS-CMF-002", "Brand": "CMF by Nothing", "Model_Name": "CMF Buds 2", "Category": "TWS"},
+                {"llm": {}})
+        self.assertFalse(ok)
+        self.assertIn("verified as a different product", updates["Flags"])
+        self.assertIn("Plus variant", updates["Flags"])
+        self.assertNotIn("may be ambiguous or outdated", updates["Flags"])
 
 
 class TestFinderRecallOnRealCatalogues(unittest.TestCase):

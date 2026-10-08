@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
-from src.parsers.base import BaseParser, ParserResult
+from src.parsers.base import BaseParser, ParserResult, strip_noise_elements, fallback_page_text
 from src.parsers.brochure import parse_specs_from_text
 from src.utils.category_specs import extract_category_specs, normalize_category_key
 
@@ -165,12 +165,10 @@ class GenericParser(BaseParser):
             except Exception:
                 continue
 
-        # Strip noisy elements before HTML text extraction
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "svg"]):
-            tag.decompose()
-        for noisy_cls in ["site-footer", "footer", "site-header", "header", "related-products", "product-recommendations"]:
-            for el in soup.find_all(class_=re.compile(noisy_cls, re.I)):
-                el.decompose()
+        # Strip noisy elements (nav/footer/scripts, and recommendation/review/newsletter widgets --
+        # shared with ShopifyParser so the two can't drift) before any text extraction, including the
+        # full-page fallback below, which depends on this having already removed "other products" noise.
+        strip_noise_elements(soup)
 
         # 3. HTML Description & Spec Table Extraction
         spec_text_blocks = []
@@ -179,6 +177,20 @@ class GenericParser(BaseParser):
 
         desc_container = soup.find(["div", "section"], class_=re.compile(r"woocommerce-product-details__short-description|product-description|description|entry-content", re.I))
         desc_text = clean_html_text(str(desc_container)) if desc_container else ""
+
+        # Fallback: the selectors above assume WooCommerce/Shopify-theme-style class names
+        # ("product-attributes", "tech-spec", "description", ...). Many modern storefronts (Next.js,
+        # custom React builds, Tailwind utility classes, hashed CSS-module names) never use those
+        # patterns, so real spec text sitting in plain <div>/<span> tags is skipped entirely and the
+        # parser comes back with zero specs even though the numbers are right there on the page. If the
+        # targeted containers found little, fall back to the page's whole remaining visible text --
+        # markup-agnostic, works regardless of the site's CSS naming convention. Noise (including other
+        # products' recommendation widgets) was already stripped above, and the existing unit-anchored
+        # regexes in parse_specs_from_text/extract_category_specs keep false positives low even so.
+        targeted_text_len = len(desc_text) + sum(len(b) for b in spec_text_blocks)
+        fallback_text = fallback_page_text(soup, targeted_text_len, anchor=h1)
+        if fallback_text:
+            spec_text_blocks.append(fallback_text)
 
         full_text = f"{product_title or ''}\n{desc_text}\n{json_ld_desc}\n" + "\n".join(spec_text_blocks)
         if normalize_category_key(category) == "powerbank":
