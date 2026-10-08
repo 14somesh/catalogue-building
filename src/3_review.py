@@ -104,8 +104,17 @@ def attempt_auto_fix(
 
     # Auto-Fix 4: Sibling / Capacity Mismatch -> Re-search via collection page
     if any("mismatch" in f.lower() for f in hard_flags):
-        # Force re-collection
+        # Force re-collection, never re-using the page that produced the mismatch
+        bad_src = updated.get("Source_URL")
+        wrong_product_flags = [f for f in hard_flags if any(k in f.lower() for k in (
+            "qualifier token mismatch", "capacity mismatch", "slug numeric token mismatch"))]
+        if wrong_product_flags and not is_empty_value(bad_src) and str(bad_src).startswith("http"):
+            mem = collect_mod.parse_rejected_urls(updated.get("Rejected_URLs"))
+            mem[str(bad_src).strip()] = f"review: {', '.join(wrong_product_flags)[:120]}"
+            updated["Rejected_URLs"] = collect_mod.format_rejected_urls(mem)
         collect_updates, success, c_log = collect_mod.collect_data_for_row(updated, config)
+        if collect_updates.get("Rejected_URLs") is not None:
+            updated["Rejected_URLs"] = collect_updates["Rejected_URLs"]
         if success:
             updated.update(collect_updates)
             log = f"Attempt {attempt_num}: Re-collected via tier escalation: {c_log}"

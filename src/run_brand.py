@@ -309,6 +309,9 @@ def resolve_brand_url_collisions(
                 df.at[loser_idx, "Status"] = "Pending"
                 df.at[loser_idx, "Attempts"] = 0
                 df.at[loser_idx, "Flags"] = None
+                mem = collect_mod.parse_rejected_urls(loser_dict.get("Rejected_URLs"))
+                mem[coll_url] = "collision: page was assigned to another product in this brand"
+                df.at[loser_idx, "Rejected_URLs"] = collect_mod.format_rejected_urls(mem)
 
                 # Re-run collection with exclude_urls
                 all_rows = [row.to_dict() for _, row in df.iterrows()]
@@ -440,6 +443,11 @@ def execute_automatic_llm_post_run_review(
                     df.at[idx, "Image_Status"] = "missing"
                     df.at[idx, "Status"] = "Pending"
                     df.at[idx, "Flags"] = None
+                    prev_src = row.get("Source_URL")
+                    if not is_empty_value(prev_src) and str(prev_src).startswith("http") and action == "recollect":
+                        mem = collect_mod.parse_rejected_urls(row.get("Rejected_URLs"))
+                        mem[str(prev_src).strip()] = f"review: {'; '.join(contradictions)[:120]}"
+                        df.at[idx, "Rejected_URLs"] = collect_mod.format_rejected_urls(mem)
 
                     cleared_row = df.loc[idx].to_dict()
                     all_rows = [r.to_dict() for _, r in df.iterrows()]
@@ -537,6 +545,11 @@ def derive_failure_reason(row: Dict[str, Any]) -> Optional[str]:
     status = str(row.get("Status", "")).strip()
     if status in ("Approved", "Ready_For_Review"):
         return None
+
+    raw_flags = "" if is_empty_value(row.get("Flags")) else str(row.get("Flags")).strip()
+    # Verifier outcomes are shown in full: the options / reasons are what the person acts on
+    if "needs your pick" in raw_flags.lower() or "verified as a different product" in raw_flags.lower():
+        return re.sub(r"^(?:(?:Skipped|Blocked|Hard Block|Deferred)\s*:\s*)+", "", raw_flags, flags=re.IGNORECASE)
 
     flags = str(row.get("Flags", "")).strip().lower()
     fix_log = str(row.get("Fix_Log", "")).strip().lower()
@@ -928,6 +941,12 @@ def re_run_product(
 
     for field in fields_to_clear:
         row_dict[field] = None
+
+    # Retry memory: pages the verifier rejected (or that are gone) stay excluded; exclusions set by the
+    # duplicate resolver or the post-run review are cleared so the retry can reconsider them.
+    collect_mem = collect_mod.parse_rejected_urls(row_dict.get("Rejected_URLs"))
+    kept = {u: r for u, r in collect_mem.items() if r.startswith(("not_match", "delisted"))}
+    row_dict["Rejected_URLs"] = collect_mod.format_rejected_urls(kept)
 
     # 2. Reset Attempts to 0 and Status to 'Pending'
     row_dict["Attempts"] = 0

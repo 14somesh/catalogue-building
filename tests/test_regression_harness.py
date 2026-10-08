@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import unittest
 import tempfile
@@ -791,6 +792,399 @@ class TestDisplayNameFallback(unittest.TestCase):
         self.assertEqual(rb.clean_display_name(float("nan"), brand="Zylo"), "")
         self.assertEqual(rb.clean_display_name(None, brand="Zylo"), "")
         self.assertEqual(rb.clean_display_name("Zylo Air 2", brand="Zylo"), "Air 2")
+
+
+class TestSubBrandAndRetailListingMatching(unittest.TestCase):
+    """
+    Real titles from in.nothing.tech/collections/earbuds and retail listings.
+    A sub-brand word in the user's own model name (CMF for Nothing) is not a foreign brand,
+    and colour / generic listing words never make a retail listing a different model.
+    """
+    Q = ["Pro", "Max", "Plus"]
+    SITE = [("Ear (3a)", "ear-3a"), ("Ear (3)", "ear-3"), ("Ear", "ear"), ("Ear (a)", "ear-a"), ("Ear (open)", "ear-open"),
+            ("CMF Buds Pro 2", "cmf-buds-pro-2"), ("CMF Buds 2 Plus", "cmf-buds-2-plus"),
+            ("CMF Buds 2a", "cmf-buds-2a"), ("CMF Buds 2", "cmf-buds-2")]
+
+    def _best(self, target):
+        best = None
+        for title, handle in self.SITE:
+            score, ok, _ = score_candidate_match(target, title, f"https://in.nothing.tech/products/{handle}",
+                                                 brand="Nothing", qualifier_tokens=self.Q, category="TWS")
+            if ok and (best is None or score > best[0]):
+                best = (score, title)
+        return best[1] if best else None
+
+    def test_cmf_sub_brand_products_resolve_to_exact_page(self):
+        self.assertEqual(self._best("CMF Buds 2"), "CMF Buds 2")
+        self.assertEqual(self._best("CMF Buds 2 Plus"), "CMF Buds 2 Plus")
+        self.assertEqual(self._best("CMF Buds Pro 2"), "CMF Buds Pro 2")
+        self.assertEqual(self._best("Ear (A)"), "Ear (a)")
+
+    def test_product_absent_from_site_matches_nothing(self):
+        self.assertIsNone(self._best("CMF Buds Neo"))
+
+    def test_retail_listing_colour_and_filler_words_accepted(self):
+        for target, title in [("Ear (A)", "Nothing TWS Ear (a) Earbuds, Black"),
+                              ("Ear (A)", "Nothing Ear (a) Bluetooth Truly Wireless in Ear Earbuds with Mic"),
+                              ("CMF Buds 2", "CMF BY NOTHING Buds 2 Wireless Earbuds, Orange")]:
+            with self.subTest(title=title):
+                self.assertTrue(score_candidate_match(target, title, "https://www.reliancedigital.in/x/p/1", brand="Nothing",
+                                                      qualifier_tokens=self.Q, category="TWS")[1])
+
+    def test_retail_listing_of_sibling_model_still_rejected(self):
+        for target, title in [("Ear (A)", "Nothing Ear (3a) Earbuds, White"),
+                              ("CMF Buds 2", "CMF by Nothing Buds 2 Plus, Blue"),
+                              ("CMF Buds 2", "CMF by Nothing Buds 2a, Dark Grey")]:
+            with self.subTest(title=title):
+                self.assertFalse(score_candidate_match(target, title, "https://www.reliancedigital.in/x/p/1", brand="Nothing",
+                                                       qualifier_tokens=self.Q, category="TWS")[1])
+
+    def test_foreign_brand_still_rejected(self):
+        ok, reason = reject_qualifier_mismatch("Tune Beam 2", "GOBOULT Tune Beam 2 Earbuds", ["Pro"], brand="JBL")
+        self.assertFalse(ok)
+
+
+class TestIngestDisplayNames(unittest.TestCase):
+    """The AI's short display name may drop generic words, never the words that identify the product."""
+
+    def _run(self, brand, rows):
+        from src.onboard_brand import BrandInferenceSchema, RawProductItem, enforce_distinct_display_names
+        inf = BrandInferenceSchema(brand_name=brand, brand_code="X", domain=None, platform=None, dp_column_explanation="x",
+                                   column_mapping=[], qualifier_tokens=[],
+                                   products=[RawProductItem(raw_text="", model_name=m, display_name=d) for m, d in rows])
+        return [p.display_name for p in enforce_distinct_display_names(inf).products]
+
+    def test_identifying_words_restored_and_duplicates_removed(self):
+        self.assertEqual(self._run("Nothing", [("CMF Buds 2", "CMF Buds 2"), ("CMF Buds Neo", "CMF Buds"),
+                                               ("CMF Buds Pro 2", "CMF Buds"), ("Ear (A)", "Ear")]),
+                         ["CMF Buds 2", "CMF Buds Neo", "CMF Buds Pro 2", "Ear (A)"])
+
+    def test_valid_short_names_kept(self):
+        self.assertEqual(self._run("Pebble", [("STRIKER Buds", "STRIKER"), ("Wave Buds", "Wave"),
+                                              ("Roam 20000mAh", "Roam"), ("Pebble Open Loop", "Open Loop")]),
+                         ["STRIKER", "Wave", "Roam", "Open Loop"])
+
+
+class TestProviderChain(unittest.TestCase):
+    """AI calls go Groq first, Gemini only as fallback; quota-exhausted providers are skipped; bad output falls through."""
+
+    def setUp(self):
+        from src.utils import llm_client
+        llm_client.reset_provider_states()
+        self.llm = llm_client
+
+    def _fake_groq(self, content=None, exc=None):
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        if exc:
+            client.chat.completions.create.side_effect = exc
+        else:
+            msg = MagicMock(); msg.message.content = content
+            client.chat.completions.create.return_value = MagicMock(choices=[msg])
+        return client
+
+    def _fake_gemini(self, text):
+        from unittest.mock import MagicMock
+        client = MagicMock(); client.models.generate_content.return_value = MagicMock(text=text)
+        return client
+
+    def test_groq_answers_first(self):
+        from unittest.mock import patch
+        from src.utils.product_verifier import ProductMatchVerdict
+        cfg = {"providers": [{"name": "groq", "model": "g"}, {"name": "gemini", "model": "m"}]}
+        gem = self._fake_gemini('{"decision": "not_match", "confidence": 1, "reason": "gemini"}')
+        with patch.object(self.llm, "get_groq_client", return_value=self._fake_groq('{"decision": "match", "confidence": 90, "reason": "groq"}')), \
+             patch.object(self.llm, "get_gemini_client", return_value=gem):
+            data, prov = self.llm.call_llm_json("s", "u", ProductMatchVerdict, llm_config=cfg)
+        self.assertEqual(data["reason"], "groq")
+        self.assertTrue(prov.startswith("groq"))
+        gem.models.generate_content.assert_not_called()
+
+    def test_falls_back_to_gemini_and_marks_quota_exhausted(self):
+        from unittest.mock import patch
+        from src.utils.product_verifier import ProductMatchVerdict
+        cfg = {"providers": [{"name": "groq", "model": "g"}, {"name": "gemini", "model": "m"}]}
+        with patch.object(self.llm, "get_groq_client", return_value=self._fake_groq(exc=Exception("429 rate_limit_exceeded: tokens per day (TPD) limit reached, quota exceeded"))), \
+             patch.object(self.llm, "get_gemini_client", return_value=self._fake_gemini('{"decision": "match", "confidence": 80, "reason": "gemini"}')):
+            data, prov = self.llm.call_llm_json("s", "u", ProductMatchVerdict, llm_config=cfg)
+        self.assertEqual(data["reason"], "gemini")
+        self.assertTrue(prov.startswith("gemini"))
+
+    def test_invalid_output_falls_through(self):
+        from unittest.mock import patch
+        from src.utils.product_verifier import ProductMatchVerdict
+        cfg = {"providers": [{"name": "groq", "model": "g"}, {"name": "gemini", "model": "m"}]}
+        with patch.object(self.llm, "get_groq_client", return_value=self._fake_groq('{"not": "the schema"}')), \
+             patch.object(self.llm, "get_gemini_client", return_value=self._fake_gemini('{"decision": "unsure", "confidence": 40, "reason": "gemini"}')):
+            data, _ = self.llm.call_llm_json("s", "u", ProductMatchVerdict, llm_config=cfg)
+        self.assertEqual(data["decision"], "unsure")
+
+    def test_vision_uses_vision_chain_and_fails_closed(self):
+        from unittest.mock import patch
+        cfg = {"providers": [{"name": "groq", "model": "g"}], "vision_providers": [{"name": "groq", "model": "qwen/qwen3.8-27b"}]}
+        with patch.object(self.llm, "get_groq_client", return_value=self._fake_groq(exc=Exception("boom"))):
+            ok, score, reason = self.llm.audit_collected_image_quality(b"x", "JBL", "Tour Pro 3", llm_config=cfg)
+        self.assertFalse(ok)
+        self.assertIn("Visual AI unavailable", reason)
+
+
+class TestProductVerifier(unittest.TestCase):
+    """The verifier's hard checks hold even when the AI is wrong or unavailable."""
+
+    def _verify(self, ai_answer, **kw):
+        from unittest.mock import patch
+        from src.utils import product_verifier as pv
+        args = dict(brand="Urbn", model_name="Nano 20000mAh", category="Powerbank", page_url="https://x/p/nano",
+                    page_title="20000 mAh Nano Power Bank")
+        args.update(kw)
+        with patch("src.utils.llm_client.call_llm_json", return_value=ai_answer):
+            return pv.verify_product_page(**args)
+
+    def test_capacity_conflict_rejected_without_ai(self):
+        decision, reason, provider = self._verify(({"decision": "match", "confidence": 99, "reason": "x"}, "groq:g"),
+                                                  page_title="10000 mAh Nano Power Bank", page_url="https://x/p/nano-10k")
+        self.assertEqual(decision, "not_match")
+        self.assertIsNone(provider)
+
+    def test_ai_match_with_absurd_price_downgraded(self):
+        decision, _, _ = self._verify(({"decision": "match", "confidence": 90, "reason": "same"}, "groq:g"),
+                                      page_price=24999, sheet_dp=1200, sheet_mrp=2999)
+        self.assertEqual(decision, "unsure")
+
+    def test_ai_unavailable_clear_rule_match_accepted_tie_not(self):
+        self.assertEqual(self._verify((None, None), rule_valid=True, rule_tied=False)[0], "match")
+        self.assertEqual(self._verify((None, None), rule_valid=True, rule_tied=True)[0], "unsure")
+        self.assertEqual(self._verify((None, None), rule_valid=False, rule_tied=False)[0], "unsure")
+
+    def test_ai_decision_passed_through(self):
+        self.assertEqual(self._verify(({"decision": "not_match", "confidence": 90, "reason": "Plus variant"}, "groq:g"))[0], "not_match")
+
+
+class TestVerifyRetryWithMemory(unittest.TestCase):
+    """Collect step: a page the verifier rejects is skipped, the next candidate is tried, and the rejection is remembered."""
+
+    def test_rejected_page_skipped_next_verified_and_remembered(self):
+        from unittest.mock import patch
+        from src.parsers.base import ParserResult
+        collect = importlib.import_module("src.1_collect")
+        wrong, right = "https://www.volto.in/products/volto-max-combo", "https://www.volto.in/products/volto-max-20k"
+        fetched = []
+
+        def fake_search(*a, **k):
+            k["out_candidates"].extend([
+                {"url": wrong, "title": "Volto Max 20K", "score": 250.0, "valid": True, "reason": "", "source": "t"},
+                {"url": right, "title": "Volto Max 20K", "score": 250.0, "valid": True, "reason": "", "source": "t"}])
+            return wrong
+
+        def fake_fetch(url, **k):
+            fetched.append(url)
+            return ParserResult(success=True, status_code=200, url=url, tier=1,
+                                title="Volto Max 20K Combo (2-pack)" if url == wrong else "Volto Max 20K",
+                                specs={"capacity": "20000 mAh", "output": "22.5W"}, description_text="20000 mAh 22.5W")
+
+        def fake_verify(brand, model, cat, url, title, *a, **k):
+            return ("not_match", "combo pack", "groq:g") if "Combo" in (title or "") else ("match", "same product", "groq:g")
+
+        row = {"Product_ID": "PB-VOL-001", "Brand": "Volto", "Model_Name": "Volto Max 20K", "Category": "Powerbank",
+               "MRP_Input": 1999}
+        cfg = {"domain": "volto.in", "platform": "shopify", "qualifier_tokens": ["Max"], "retail_order": []}
+        with patch.object(collect, "search_shopify_brand_store", side_effect=fake_search), \
+             patch.object(collect, "fetch_and_parse_url", side_effect=fake_fetch), \
+             patch("src.utils.product_verifier.verify_product_page", side_effect=fake_verify), \
+             patch.object(collect, "load_brand_defaults", return_value=cfg), \
+             patch.object(collect, "parse_brochure_for_model", return_value=None), \
+             patch.object(collect, "draft_bullets_and_subtitle", return_value=({"title": "Max 20K", "subtitle": "s.", "bullet_1": "b1.", "bullet_2": "b2."}, "groq")):
+            updates, ok, _ = collect.collect_data_for_row(dict(row), {"llm": {}})
+            self.assertTrue(ok)
+            self.assertEqual(updates["Source_URL"], right)
+            self.assertIn(wrong, updates["Rejected_URLs"])
+            # Retry: the remembered page is never fetched again
+            fetched.clear()
+            row2 = dict(row, Rejected_URLs=updates["Rejected_URLs"])
+            updates2, ok2, _ = collect.collect_data_for_row(row2, {"llm": {}})
+        self.assertTrue(ok2)
+        self.assertNotIn(wrong, fetched)
+        self.assertEqual(updates2["Source_URL"], right)
+
+    def test_unsure_everywhere_gives_needs_your_pick(self):
+        from unittest.mock import patch
+        from src.parsers.base import ParserResult
+        collect = importlib.import_module("src.1_collect")
+        rb = importlib.import_module("src.run_brand")
+        urls = ["https://p.in/products/konnect-x-a", "https://p.in/products/konnect-x-b"]
+
+        def fake_search(*a, **k):
+            k["out_candidates"].extend([{"url": u, "title": f"Konnect X variant {i}", "score": 200.0, "valid": True,
+                                         "reason": "", "source": "t"} for i, u in enumerate(urls)])
+            return urls[0]
+
+        cfg = {"domain": "p.in", "platform": "shopify", "qualifier_tokens": [], "retail_order": []}
+        with patch.object(collect, "search_shopify_brand_store", side_effect=fake_search), \
+             patch.object(collect, "fetch_and_parse_url", side_effect=lambda url, **k: ParserResult(success=True, status_code=200, url=url, title="Konnect X", specs={"a": "b"})), \
+             patch("src.utils.product_verifier.verify_product_page", return_value=("unsure", "sheet name fits several cable variants", "groq:g")), \
+             patch.object(collect, "load_brand_defaults", return_value=cfg), \
+             patch.object(collect, "parse_brochure_for_model", return_value=None):
+            updates, ok, _ = collect.collect_data_for_row({"Product_ID": "X", "Brand": "Portronics", "Model_Name": "Konnect X", "Category": "Cable"}, {"llm": {}})
+        self.assertFalse(ok)
+        self.assertIn("Needs your pick", updates["Flags"])
+        self.assertIn(urls[0], rb.derive_failure_reason(dict(updates)))
+        self.assertIsNone(updates["Rejected_URLs"])  # unsure pages are offered, not blacklisted
+
+    def test_memory_column_roundtrip(self):
+        collect = importlib.import_module("src.1_collect")
+        mem = {"https://a/x": "not_match: Plus variant", "https://a/y": "delisted: HTTP 404"}
+        self.assertEqual(collect.parse_rejected_urls(collect.format_rejected_urls(mem)), mem)
+        self.assertEqual(collect.parse_rejected_urls(float("nan")), {})
+
+
+class TestFinderRecallOnRealCatalogues(unittest.TestCase):
+    """
+    Generalisation guard on ~300 real catalogue/audio/power/watch products from 5 recorded brand stores:
+    for each product, written the way a dealer price sheet would list it (brand dropped, specs moved to the end),
+    the correct product must be among the top candidates handed to the verifier.
+    """
+    BRANDS = {"stuffcool.com": "Stuffcool", "pebblecart.com": "Pebble", "portronics.com": "Portronics",
+              "urbnworld.com": "Urbn", "glowgadgets.in": "Glow Gadget"}
+
+    @staticmethod
+    def _category(p):
+        t = f"{p.get('product_type', '')} {p.get('title', '')}".lower()
+        if re.search(r"earbud|\bbuds\b|\btws\b|earphone|headphone|neckband", t): return "TWS"
+        if re.search(r"power\s*bank|powerbank|\d+\s*mah", t): return "Powerbank"
+        if "speaker" in t or "soundbar" in t: return "Speaker"
+        if re.search(r"smart\s*watch|smartwatch|\bwatch\b|smart band", t): return "Smartwatch"
+        return None
+
+    @staticmethod
+    def _sheet_name(title, brand):
+        n = re.sub(rf"^\s*{re.escape(brand)}\s+", "", title, flags=re.I)
+        n = re.sub(r"(\d),(\d)", r"\1\2", n)
+        n = re.split(r"\s[-|–]\s|,|\s+with\s+|\(", n, maxsplit=1)[0]
+        specs = re.findall(r"\d+(?:\.\d+)?\s*(?:mah|w)\b", n, flags=re.I)
+        n = re.sub(r"\d+(?:\.\d+)?\s*(?:mah|w)\b", " ", n, flags=re.I)
+        n = re.sub(r"\b(?:power\s*bank|powerbank|earbuds|tws|bluetooth speaker|smart\s*watch)\b", " ", n, flags=re.I)
+        return " ".join(n.split() + [sp.replace(" ", "") for sp in specs]).strip()
+
+    def test_correct_product_within_verifier_shortlist(self):
+        import json, hashlib, logging
+        from src.utils.scraper import record_candidate, load_brand_defaults
+        from src.utils.product_verifier import order_candidates, MAX_CANDIDATES_PER_SOURCE
+        fx = json.load(open(os.path.join(WORKSPACE_ROOT, "tests", "fixtures", "http_fixtures.json"), encoding="utf-8"))["cache_files"]
+        logging.disable(logging.CRITICAL)
+        try:
+            total = found = 0
+            misses = []
+            for dom, brand in self.BRANDS.items():
+                catalogue = fx[hashlib.md5(f"shopify_cat_{dom}".encode()).hexdigest() + ".json"]
+                for p in catalogue:
+                    cat = self._category(p)
+                    if not cat:
+                        continue
+                    target = self._sheet_name(p["title"], brand)
+                    if len(target) < 2:
+                        continue
+                    q = load_brand_defaults(brand, category=cat).get("qualifier_tokens", [])
+                    cands = []
+                    for c in catalogue:
+                        url = f"https://www.{dom}/products/{c['handle']}"
+                        sc, ok, why = score_candidate_match(target, c["title"], url, brand=brand, qualifier_tokens=q,
+                                                            category=cat, source_is_brand_site=True)
+                        record_candidate(cands, url, c["title"], sc, ok, why, "catalogue", target, brand)
+                    shortlist = order_candidates(cands)[:MAX_CANDIDATES_PER_SOURCE]
+                    total += 1
+                    if any(c["url"].endswith("/" + p["handle"]) or c["title"].strip().lower() == p["title"].strip().lower() for c in shortlist):
+                        found += 1
+                    else:
+                        misses.append(f"{brand}: '{target}' -> wanted '{p['title']}'")
+        finally:
+            logging.disable(logging.NOTSET)
+        recall = found / total
+        self.assertGreaterEqual(total, 250)
+        self.assertGreaterEqual(recall, 0.99, f"Shortlist recall {recall:.3f} on {total} products; misses: {misses[:10]}")
+
+
+class TestReviewFindings(unittest.TestCase):
+    """Guards for defects found by the independent review of the verifier rebuild."""
+
+    def test_price_guard_accepts_normal_dealer_margins(self):
+        from src.utils.product_verifier import _price_out_of_range as out
+        self.assertFalse(out(3999, 1100, None))     # MRP on page vs DP only on sheet
+        self.assertFalse(out(12999, 7500, 12999))   # >10k product
+        self.assertFalse(out(129.99, 7500, None))   # unreliable tiny parse ignored
+        self.assertTrue(out(24999, 1200, 2999))     # clearly another product / bundle
+
+    def test_visible_mrp_above_10k_not_divided(self):
+        from src.parsers.shopify import ShopifyParser
+        h = ('<html><head><title>X</title></head><body><h1 class="product__title">Big Speaker</h1>'
+             '<div class="product__description rte">40W output speaker</div>'
+             '<span class="price-item--regular">MRP: ₹12,999</span></body></html>')
+        self.assertEqual(ShopifyParser().parse(url="https://x/products/a", html=h, category="Speaker").mrp, 12999.0)
+
+    def test_candidate_with_nonpositive_score_not_valid(self):
+        from src.utils.scraper import record_candidate
+        c = []
+        record_candidate(c, "https://x/products/a", "Luxcell Mini", -5.0, True, "", "t", "Luxcell Mini", "Portronics")
+        self.assertFalse(c[0]["valid"])
+
+    def test_anc_variant_is_a_different_model(self):
+        ok = score_candidate_match("Airdopes 141", "boAt Airdopes 141 ANC", "https://www.croma.com/p/1",
+                                   brand="boAt", qualifier_tokens=["Pro"], category="TWS")[1]
+        self.assertFalse(ok)
+
+    def test_ai_timeout_does_not_block(self):
+        import time
+        from unittest.mock import patch, MagicMock
+        from src.utils import llm_client
+        from src.utils.product_verifier import ProductMatchVerdict
+        llm_client.reset_provider_states()
+        slow = MagicMock()
+        slow.chat.completions.create.side_effect = lambda **k: time.sleep(3)
+        t0 = time.time()
+        with patch.object(llm_client, "get_groq_client", return_value=slow):
+            data, _ = llm_client.call_llm_json("s", "u", ProductMatchVerdict,
+                                               llm_config={"providers": [{"name": "groq", "model": "g"}]}, timeout_s=0.5)
+        self.assertIsNone(data)
+        self.assertLess(time.time() - t0, 2.0)
+
+    def test_groq_numbers_and_reasoning_text_accepted(self):
+        from unittest.mock import patch, MagicMock
+        from src.utils import llm_client
+        llm_client.reset_provider_states()
+        msg = MagicMock(); msg.message.content = '<think>checking</think>{"capacity": "10000 mAh", "weight": 380}'
+        client = MagicMock(); client.chat.completions.create.return_value = MagicMock(choices=[msg])
+        with patch.object(llm_client, "get_groq_client", return_value=client):
+            data, prov = llm_client.call_llm_json("s", "u", llm_client.VisionExtractedSpecsSchema,
+                                                  llm_config={"vision_providers": [{"name": "groq", "model": "q"}]},
+                                                  images=[(b"x", "image/png")])
+        self.assertEqual(data["weight"], "380")
+
+    def test_page_without_readable_specs_is_verified_not_blacklisted(self):
+        from unittest.mock import patch
+        from src.parsers.base import ParserResult
+        collect = importlib.import_module("src.1_collect")
+        url = "https://www.volto.in/products/volto-max-20k"
+        vision_calls = []
+
+        def fake_search(*a, **k):
+            k["out_candidates"].append({"url": url, "title": "Volto Max 20K", "score": 250.0, "valid": True, "reason": "", "source": "t"})
+            return url
+
+        def fake_vision(page_url, *a, **k):
+            vision_calls.append(page_url)
+            return ParserResult(success=True, status_code=200, url=page_url, tier=1, specs={"capacity": "20000 mAh", "output": "22.5W"})
+
+        cfg = {"domain": "volto.in", "platform": "shopify", "qualifier_tokens": [], "retail_order": []}
+        with patch.object(collect, "search_shopify_brand_store", side_effect=fake_search), \
+             patch.object(collect, "fetch_and_parse_url", return_value=ParserResult(success=False, status_code=200, url=url, is_delisted=True, error="Page lacks technical specs")), \
+             patch("src.utils.product_verifier.verify_product_page", return_value=("match", "same product", "groq:g")), \
+             patch.object(collect, "execute_vision_fallback_for_page", side_effect=fake_vision), \
+             patch.object(collect, "load_brand_defaults", return_value=cfg), \
+             patch.object(collect, "parse_brochure_for_model", return_value=None), \
+             patch.object(collect, "draft_bullets_and_subtitle", return_value=({"title": "Max", "subtitle": "s.", "bullet_1": "b1.", "bullet_2": "b2."}, "groq")):
+            updates, ok, _ = collect.collect_data_for_row({"Product_ID": "P", "Brand": "Volto", "Model_Name": "Volto Max 20K", "Category": "Powerbank"}, {"llm": {}})
+        self.assertTrue(ok)
+        self.assertEqual(vision_calls, [url])
+        self.assertIsNone(updates.get("Rejected_URLs"))
 
 
 if __name__ == "__main__":

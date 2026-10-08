@@ -3,7 +3,7 @@ import re
 import json
 import time
 from typing import Optional, Dict, Any, List, Tuple, Set
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 
 from google import genai
@@ -87,6 +87,7 @@ class PostRunReviewSchema(BaseModel):
 
 
 class VisionExtractedSpecsSchema(BaseModel):
+    model_config = ConfigDict(coerce_numbers_to_str=True)
     capacity: Optional[str] = Field(default=None, description="Battery capacity e.g. '10000 mAh' or '20000 mAh'")
     output: Optional[str] = Field(default=None, description="Max power output e.g. '22.5W Fast Charging' or '15W Wireless'")
     ports: Optional[str] = Field(default=None, description="Input/output port configuration e.g. 'Type-C, USB-A'")
@@ -94,6 +95,7 @@ class VisionExtractedSpecsSchema(BaseModel):
 
 
 class ImageQualityAuditSchema(BaseModel):
+    model_config = ConfigDict(coerce_numbers_to_str=True)
     is_correct_brand_and_model: bool = Field(description="True if the image shows a product belonging to the specified target brand and model, False if it belongs to another brand (e.g. Zebronics, Belkin, etc.) or is completely unrelated.")
     is_isolated_packshot: bool = Field(description="True if the image is a clean, standalone product render/packshot (with or without neutral phone attachment), False if it is a complex lifestyle shot, hand-held shot, or marketing infographic banner.")
     has_hand_holding: bool = Field(description="True if a human hand is holding or touching the device, False otherwise.")
@@ -210,7 +212,8 @@ def get_gemini_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not found in environment or .env file.")
-    return genai.Client(api_key=api_key)
+    # Bounded HTTP timeout (ms) so a stuck call can never hang a run or its exit
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=90_000))
 
 
 def get_groq_client():
@@ -219,7 +222,8 @@ def get_groq_client():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise ValueError("GROQ_API_KEY not found in environment or .env file.")
-    return Groq(api_key=api_key)
+    # Bounded HTTP timeout (s) so a stuck call can never hang a run or its exit
+    return Groq(api_key=api_key, timeout=90.0)
 
 
 def get_providers_from_config(llm_config: Optional[dict] = None) -> List[Dict[str, Any]]:
@@ -240,6 +244,117 @@ def get_providers_from_config(llm_config: Optional[dict] = None) -> List[Dict[st
         {"name": "groq", "model": "llama-3.3-70b-versatile", "temperature": temp}
     ]
 
+
+
+DEFAULT_VISION_PROVIDERS = [
+    {"name": "groq", "model": "qwen/qwen3.8-27b"},
+    {"name": "gemini", "model": "gemini-3.5-flash-lite"},
+    {"name": "gemini", "model": "gemini-3.5-flash"},
+]
+
+
+def _load_llm_section(llm_config: Optional[dict] = None) -> dict:
+    """Returns the 'llm' config section; reads config.yaml when the caller did not pass one."""
+    if llm_config:
+        return llm_config
+    try:
+        import yaml
+        with open("config.yaml", "r", encoding="utf-8") as f:
+            return (yaml.safe_load(f) or {}).get("llm", {}) or {}
+    except Exception:
+        return {}
+
+
+def call_llm_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: type,
+    llm_config: Optional[dict] = None,
+    images: Optional[List[Tuple[bytes, str]]] = None,
+    purpose: str = "LLM",
+    timeout_s: float = 25.0,
+    temperature: float = 0.1
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    SHARED PROVIDER CHAIN for structured (JSON) AI calls, text or vision.
+    Tries providers in configured order (config.yaml llm.providers for text, llm.vision_providers when images
+    are given): Groq first, Gemini as fallback. A provider that reports quota exhaustion is skipped for the
+    rest of the run. Output is validated against `schema` (pydantic); invalid output falls through to the next
+    provider. Never raises: returns (data, "provider:model") or (None, None) when every provider failed.
+    """
+    import base64
+    import concurrent.futures
+
+    cfg = _load_llm_section(llm_config)
+    if images:
+        chain = cfg.get("vision_providers") or DEFAULT_VISION_PROVIDERS
+    else:
+        chain = get_providers_from_config(cfg)
+    schema_hint = json.dumps(schema.model_json_schema())
+
+    for prov in chain:
+        name = str(prov.get("name", "")).strip().lower()
+        model = prov.get("model")
+        # Quota is tracked per model (Gemini quotas are per model); a provider marked dead as a whole
+        # (e.g. by the pre-flight check) is skipped for every model.
+        exhaust_key = f"{name}:{model}{':vision' if images else ''}"
+        if is_provider_exhausted(name) or is_provider_exhausted(exhaust_key):
+            continue
+
+        def _call():
+            if name == "groq":
+                client = get_groq_client()
+                sys_msg = system_prompt + f"\nReturn ONLY a JSON object matching this JSON schema: {schema_hint}"
+                if images:
+                    # Vision requests carry the instructions inside the user turn (most reliable with image input)
+                    content: List[Dict[str, Any]] = [{"type": "text", "text": f"{sys_msg}\n\n{user_prompt}"}]
+                    for img_bytes, mime in images[:3]:
+                        b64 = base64.b64encode(img_bytes).decode("ascii")
+                        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+                    messages = [{"role": "user", "content": content}]
+                else:
+                    messages = [{"role": "system", "content": sys_msg}, {"role": "user", "content": user_prompt}]
+                resp = client.chat.completions.create(
+                    model=model or "llama-3.3-70b-versatile", messages=messages,
+                    response_format={"type": "json_object"}, temperature=temperature
+                )
+                return resp.choices[0].message.content
+            if name == "gemini":
+                client = get_gemini_client()
+                contents: List[Any] = [system_prompt, user_prompt]
+                for img_bytes, mime in (images or [])[:4]:
+                    contents.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
+                resp = client.models.generate_content(
+                    model=model or "gemini-3.5-flash", contents=contents,
+                    config=types.GenerateContentConfig(response_mime_type="application/json",
+                                                       response_schema=schema, temperature=temperature)
+                )
+                return resp.text
+            raise ValueError(f"Unknown provider '{name}'")
+
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            raw = ex.submit(_call).result(timeout=timeout_s)
+            if not raw:
+                raise ValueError("empty response")
+            raw = re.sub(r"<think>.*?</think>", "", str(raw), flags=re.S).strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
+            data = schema.model_validate(json.loads(raw)).model_dump()
+            logger.info(f"[{purpose}] answered by {name} ({model})")
+            return data, f"{name}:{model}"
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"[{purpose}] {name} ({model}) timed out after {timeout_s:.0f}s; trying next provider")
+        except Exception as e:
+            kind = classify_groq_error(e) if name == "groq" else classify_gemini_error(e)
+            if kind == "QUOTA_EXHAUSTED":
+                mark_provider_exhausted(exhaust_key)
+            logger.warning(f"[{purpose}] {name} ({model}) failed ({kind}): {e}; trying next provider")
+        finally:
+            # Never wait for a stuck call: the timeout above is the real limit
+            ex.shutdown(wait=False, cancel_futures=True)
+    logger.warning(f"[{purpose}] no AI provider could answer")
+    return None, None
 
 DANGLING_STOPWORDS = {
     "to", "in", "on", "at", "for", "with", "and", "or", "the", "a", "an",
@@ -831,14 +946,6 @@ def extract_specs_via_vision(
     if not image_bytes_list:
         return None
 
-    if is_provider_exhausted("gemini"):
-        logger.warning(f"[Vision Fallback] Gemini is marked exhausted; cannot run vision extraction for {brand} {model_name}.")
-        return None
-
-    client = get_gemini_client()
-    cfg = llm_config or {}
-    candidate_models = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
-
     prompt = (
         f"You are an expert technical product specification extractor.\n"
         f"Examine these product infographic and specification images for '{brand} {model_name}' from the page '{page_url}'.\n"
@@ -854,61 +961,25 @@ def extract_specs_via_vision(
         f"3. Return valid JSON adhering to VisionExtractedSpecsSchema."
     )
 
-    image_parts = []
-    # Cap at 4 images max
-    for img_data, mime_type in image_bytes_list[:4]:
-        image_parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+    parsed, provider = call_llm_json(
+        "You extract product specifications from images.", prompt, VisionExtractedSpecsSchema,
+        llm_config=llm_config, images=list(image_bytes_list[:3]), purpose="Vision Fallback", timeout_s=20.0
+    )
+    if not parsed:
+        logger.warning(f"[Vision Fallback] No vision provider could read the images for {brand} {model_name}.")
+        return None
+    raw_specs = {}
+    for k in ["capacity", "output", "ports", "weight", "warranty"]:
+        val = parsed.get(k)
+        if val and str(val).strip().lower() not in ("null", "none", ""):
+            raw_specs[k] = str(val).strip()
 
-    contents = [prompt] + image_parts
-    import concurrent.futures
-
-    for model in candidate_models:
-        logger.info(f"[Vision Fallback] Calling Gemini Vision ({model}) on {len(image_parts)} images for {brand} {model_name} (15s timeout)...")
-        
-        def _call_gemini():
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=VisionExtractedSpecsSchema,
-                    temperature=0.1
-                )
-            )
-
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_call_gemini)
-                response = future.result(timeout=15.0)
-
-            parsed = json.loads(response.text)
-            raw_specs = {}
-            for k in ["capacity", "output", "ports", "weight", "warranty"]:
-                val = parsed.get(k)
-                if val and str(val).strip().lower() not in ("null", "none", ""):
-                    raw_specs[k] = str(val).strip()
-
-            # Sanity-check vision output before writing
-            clean_specs = validate_vision_specs(raw_specs)
-
-            if clean_specs:
-                logger.info(f"[Vision Fallback] Successfully extracted verified specs for {brand} {model_name}: {clean_specs}")
-                return clean_specs
-            else:
-                logger.warning(f"[Vision Fallback] Vision API returned no verifiable specs for {brand} {model_name}.")
-                return None
-
-        except concurrent.futures.TimeoutError:
-            logger.warning(f"[Vision Fallback] Gemini vision call for {model} TIMED OUT after 15s. Escalating immediately.")
-            continue
-        except Exception as e:
-            err_type = classify_gemini_error(e)
-            logger.warning(f"[Vision Fallback] Gemini vision model {model} failed ({err_type}): {e}")
-            if err_type in ("QUOTA_EXHAUSTED", "RATE_LIMIT"):
-                continue
-            else:
-                continue
-
+    # Sanity-check vision output before writing
+    clean_specs = validate_vision_specs(raw_specs)
+    if clean_specs:
+        logger.info(f"[Vision Fallback] Extracted verified specs for {brand} {model_name} via {provider}: {clean_specs}")
+        return clean_specs
+    logger.warning(f"[Vision Fallback] Vision returned no verifiable specs for {brand} {model_name}.")
     return None
 
 
@@ -984,14 +1055,6 @@ def audit_collected_image_quality(
     
     Returns (is_valid: bool, quality_score: int, rejection_reason: Optional[str]).
     """
-    if is_provider_exhausted("gemini"):
-        logger.warning(f"[Image Review Gate] Gemini is marked exhausted; failing closed for {brand} {model_name}.")
-        return False, 0, "Visual AI unavailable — image not brand-verified"
-
-    client = get_gemini_client()
-    candidate_models = ["gemini-3.5-flash-lite", "gemini-3.5-flash"]
-    import concurrent.futures
-
     prompt = (
         f"You are an expert product catalog image quality inspector.\n"
         f"Audit this product image for '{brand} {model_name}'.\n"
@@ -1004,73 +1067,42 @@ def audit_collected_image_quality(
         f"Adhere strictly to the ImageQualityAuditSchema."
     )
 
-    image_part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
-    contents = [prompt, image_part]
+    parsed, provider = call_llm_json(
+        "You are a strict product catalogue image inspector.", prompt, ImageQualityAuditSchema,
+        llm_config=llm_config, images=[(img_bytes, mime_type)], purpose="Image Review Gate",
+        timeout_s=20.0, temperature=0.0
+    )
+    if not parsed:
+        logger.warning(f"[Image Review Gate] No vision provider available for {brand} {model_name}; failing closed.")
+        return False, 0, "Visual AI unavailable — image not brand-verified"
 
-    for model in candidate_models:
-        logger.info(f"[Image Review Gate] Auditing image with {model} for {brand} {model_name}...")
-        
-        def _call():
-            return client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ImageQualityAuditSchema,
-                    temperature=0.0
-                )
-            )
+    is_brand_ok = bool(parsed.get("is_correct_brand_and_model", True))
+    is_packshot = bool(parsed.get("is_isolated_packshot", True))
+    has_hand = bool(parsed.get("has_hand_holding", False))
+    has_banner = bool(parsed.get("has_promotional_text_banner", False))
+    score = int(parsed.get("quality_score", 5) or 0)
+    detected_brand = parsed.get("detected_brand") or ""
+    reason = parsed.get("rejection_reason")
 
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_call)
-                resp = future.result(timeout=18.0)
+    if not is_brand_ok:
+        rejection = f"Wrong brand detected: '{detected_brand}' (expected '{brand}')"
+        logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
+        return False, 0, rejection
 
-            parsed = json.loads(resp.text)
-            is_brand_ok = bool(parsed.get("is_correct_brand_and_model", True))
-            is_packshot = bool(parsed.get("is_isolated_packshot", True))
-            has_hand = bool(parsed.get("has_hand_holding", False))
-            has_banner = bool(parsed.get("has_promotional_text_banner", False))
-            score = int(parsed.get("quality_score", 5))
-            detected_brand = parsed.get("detected_brand") or ""
-            reason = parsed.get("rejection_reason")
+    if has_banner:
+        rejection = "Marketing infographic banner with promotional text overlays"
+        logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
+        return False, score, rejection
 
-            if not is_brand_ok:
-                rejection = f"Wrong brand detected: '{detected_brand}' (expected '{brand}')"
-                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
-                return False, 0, rejection
+    if has_hand:
+        rejection = "Hand-held lifestyle shot instead of isolated studio packshot"
+        logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
+        return False, score, rejection
 
-            if has_banner:
-                rejection = "Marketing infographic banner with promotional text overlays"
-                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
-                return False, score, rejection
+    if score < 7 or not is_packshot:
+        rejection = reason or "Low visual packshot quality / complex lifestyle background"
+        logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection} (score={score})")
+        return False, score, rejection
 
-            if has_hand:
-                rejection = "Hand-held lifestyle shot instead of isolated studio packshot"
-                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection}")
-                return False, score, rejection
-
-            if score < 7 or not is_packshot:
-                rejection = reason or "Low visual packshot quality / complex lifestyle background"
-                logger.warning(f"[Image Review Gate] REJECTED [{brand} {model_name}]: {rejection} (score={score})")
-                return False, score, rejection
-
-            logger.info(f"[Image Review Gate] APPROVED [{brand} {model_name}] (score={score}/10)")
-            return True, score, None
-
-        except concurrent.futures.TimeoutError:
-            logger.warning(f"[Image Review Gate] Model {model} timed out after 12s. Escalating to next candidate model...")
-            continue
-        except Exception as e:
-            err_type = classify_gemini_error(e)
-            logger.warning(f"[Image Review Gate] Model {model} failed ({err_type}): {e}")
-            if err_type in ("QUOTA_EXHAUSTED", "RATE_LIMIT"):
-                continue
-            else:
-                continue
-
-    logger.warning(f"[Image Review Gate] All vision models exhausted for {brand} {model_name}; failing closed.")
-    return False, 0, "Visual AI unavailable — image not brand-verified"
-
-
-
+    logger.info(f"[Image Review Gate] APPROVED [{brand} {model_name}] (score={score}/10, via {provider})")
+    return True, score, None

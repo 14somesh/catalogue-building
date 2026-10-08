@@ -30,6 +30,7 @@ from src.utils.scraper import (
     search_retail_reliance,
     search_retail_croma,
     score_candidate_match,
+    record_candidate,
     DEFAULT_HEADERS
 )
 from src.utils.waf_detector import detect_waf_block
@@ -54,7 +55,8 @@ def find_product_on_brand_collection(
     qualifier_tokens: List[str],
     brand: str = "",
     exclude_urls: Optional[Set[str]] = None,
-    category: Optional[str] = None
+    category: Optional[str] = None,
+    out_candidates: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[str]:
     """
     Tier 2 helper: Scans brand collection page for product links matching model name with candidate scoring.
@@ -113,8 +115,10 @@ def find_product_on_brand_collection(
 
             combined_candidate = " ".join(text_list)
             score, is_valid, diag = score_candidate_match(
-                model_name, combined_candidate, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
+                model_name, combined_candidate, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category,
+                source_is_brand_site=True
             )
+            record_candidate(out_candidates, full_url, combined_candidate, score, is_valid, diag, "brand-collection", model_name, brand)
             if is_valid and score > 0:
                 candidates.append({"url": full_url, "title": combined_candidate, "score": score})
 
@@ -252,7 +256,9 @@ def execute_spec_escalation(
     brochure_override: Optional[str] = None,
     category: Optional[str] = None,
     out_diagnostics: Optional[Dict[str, Any]] = None,
-    target_capacity: Optional[str] = None
+    target_capacity: Optional[str] = None,
+    sheet_dp: Optional[float] = None,
+    sheet_mrp: Optional[float] = None
 ) -> Tuple[Optional[ParserResult], Optional[str]]:
     """
     Executes 5-tier escalation for product specs:
@@ -312,6 +318,44 @@ def execute_spec_escalation(
         combined_provenance = f"{combined_provenance} + {tier_name}"
         return base, combined_provenance
 
+    # ---- Candidate verification loop (Finder -> Verifier -> retry with memory) ----
+    from src.utils.product_verifier import verify_product_page, order_candidates, is_tied, MAX_CANDIDATES_PER_SOURCE
+    diag = out_diagnostics if out_diagnostics is not None else {}
+    verification_log: List[Dict[str, Any]] = diag.setdefault("verification", [])
+    tried_urls: Set[str] = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
+
+    def _verify_and_fetch(cands: List[Dict[str, Any]], tier: int, platform: Optional[str]) -> Tuple[Optional[str], Optional[ParserResult]]:
+        """Fetches candidates best-first and returns the first page the verifier confirms (or a WAF-blocked page)."""
+        ordered = order_candidates(cands, exclude=tried_urls)[:MAX_CANDIDATES_PER_SOURCE]
+        for cand in ordered:
+            url = cand["url"]
+            tried_urls.add(url.strip().rstrip("/").lower())
+            page = fetch_and_parse_url(url, tier=tier, platform=platform, category=category)
+            if page.is_blocked:
+                # Tiers 1-2: hand back so the existing WAF handling records the block (page data is never used).
+                # Tier 3: stop trying this retailer.
+                return (url, page) if tier in (1, 2) else (None, None)
+            if not page.success and page.status_code != 200:
+                truly_gone = page.status_code in (404, 410) and "soft 404" not in str(page.error or "").lower()
+                verification_log.append({"url": url, "title": cand.get("title"), "tier": tier,
+                                         "decision": "delisted" if truly_gone else "fetch_failed",
+                                         "reason": page.error or f"HTTP {page.status_code}", "provider": None})
+                continue
+            # A page that loads (HTTP 200) but has no readable specs is still verified by its title; if it is the
+            # right product, the caller's vision fallback reads the specs from its images.
+            others = [c.get("title") for c in cands if c is not cand]
+            decision, reason, provider = verify_product_page(
+                brand, model_name, category, url, page.title, page.description_text, page.specs, page.mrp,
+                sheet_dp=sheet_dp, sheet_mrp=sheet_mrp, candidate_title=cand.get("title"), other_candidates=others,
+                rule_valid=bool(cand.get("valid")), rule_tied=is_tied(cand, cands), llm_config=cfg.get("llm", {})
+            )
+            verification_log.append({"url": url, "title": cand.get("title"), "tier": tier, "decision": decision,
+                                     "reason": reason, "provider": provider})
+            logger.info(f"[{product_id}] [Verifier] {decision.upper()} tier-{tier} {url} — {reason}")
+            if decision == "match":
+                return url, page
+        return None, None
+
     # ==================== TIER 0: Brand Brochure PDF ====================
     brochure_res = parse_brochure_for_model(
         brand=brand,
@@ -367,26 +411,25 @@ def execute_spec_escalation(
             else:
                 logger.warning(f"[{product_id}] Universal URL resolver could not resolve '{manual_url}': {resolved.get('message')}")
 
+        brand_platform = brand_cfg.get("platform")
+        tier1_res: Optional[ParserResult] = None
         if not tier1_url:
-            # 1a. Try Shopify direct index
-            tier1_url = search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics, target_capacity=target_capacity)
-            
-            # 1b. Non-Shopify Generic Sitemap Fallback
-            if not tier1_url:
+            # 1a. Shopify store index + 1b. sitemap / site search: gather ranked candidates, then verify best-first
+            tier1_cands: List[Dict[str, Any]] = []
+            search_shopify_brand_store(brand, model_name, brand_domain, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics, target_capacity=target_capacity, out_candidates=tier1_cands)
+            if not any(c.get("valid") for c in tier1_cands):
                 try:
                     from src.parsers.generic import GenericBrandParser
                     generic_parser = GenericBrandParser(brand_domain, brand, brand_cfg)
-                    match_info = generic_parser.find_product_url(model_name, qualifier_tokens)
-                    if match_info:
-                        tier1_url = match_info[0]
-                        logger.info(f"[{product_id}] [Generic Sitemap Match] Found '{match_info[1]}' -> {tier1_url} (score={match_info[2]:.1f})")
+                    generic_parser.find_product_url(model_name, qualifier_tokens, category=category, exclude_urls=exclude_urls, out_candidates=tier1_cands)
                 except Exception as e:
                     logger.debug(f"[{product_id}] Generic parser search failed: {e}")
+            logger.info(f"[{product_id}] Tier 1 candidates: {len(tier1_cands)} ({sum(1 for c in tier1_cands if c.get('valid'))} rule-valid)")
+            tier1_url, tier1_res = _verify_and_fetch(tier1_cands, 1, brand_platform)
 
-        brand_platform = brand_cfg.get("platform")
         if tier1_url:
             logger.info(f"[{product_id}] Executing Tier 1 (Brand Product Page): {tier1_url}")
-            res = fetch_and_parse_url(tier1_url, tier=1, platform=brand_platform, category=category)
+            res = tier1_res if tier1_res is not None else fetch_and_parse_url(tier1_url, tier=1, platform=brand_platform, category=category)
             if res.is_blocked:
                 from src.utils.profiler import record_waf_block
                 record_waf_block(brand, domain=brand_domain, reason=res.error or "HTTP 403 / Bot Challenge")
@@ -403,7 +446,7 @@ def execute_spec_escalation(
                 logger.warning(f"[{product_id}] Tier 1 HTML yielded insufficient specs ({missing_count} empty: {missing_keys}). Checking Vision Fallback...")
             
             # VISION FALLBACK Tier 1: Fires if HTML returned 200 but specs are missing / thin
-            if res.status_code == 200:
+            if res.status_code == 200 and not res.is_blocked:
                 vision_res = execute_vision_fallback_for_page(tier1_url, brand, model_name, base_tier=1, config=cfg, existing_images=res.image_urls)
                 if vision_res and vision_res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-1-vision: brand-page ({tier1_url})")
@@ -423,9 +466,11 @@ def execute_spec_escalation(
         collection_url = brand_cfg.get("collection_url")
         if collection_url and (not brand_cfg.get("waf_blocked") or has_tinyfish_bypass):
             logger.info(f"[{product_id}] Executing Tier 2 (Brand Collection Page): {collection_url}")
-            tier2_prod_url = find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls, category=category)
+            tier2_cands: List[Dict[str, Any]] = []
+            find_product_on_brand_collection(model_name, collection_url, qualifier_tokens, brand=brand, exclude_urls=exclude_urls, category=category, out_candidates=tier2_cands)
+            tier2_prod_url, tier2_res = _verify_and_fetch(tier2_cands, 2, brand_platform)
             if tier2_prod_url:
-                res = fetch_and_parse_url(tier2_prod_url, tier=2, platform=brand_platform, category=category)
+                res = tier2_res
                 if res.is_blocked:
                     from src.utils.profiler import record_waf_block
                     record_waf_block(brand, domain=brand_domain, reason=res.error or "HTTP 403 / Bot Challenge")
@@ -442,7 +487,7 @@ def execute_spec_escalation(
                     logger.warning(f"[{product_id}] Tier 2 HTML yielded insufficient specs ({missing_count} empty). Checking Vision Fallback...")
                 
                 # VISION FALLBACK Tier 2
-                if res.status_code == 200:
+                if res.status_code == 200 and not res.is_blocked:
                     vision_res = execute_vision_fallback_for_page(tier2_prod_url, brand, model_name, base_tier=2, config=cfg, existing_images=res.image_urls)
                     if vision_res and vision_res.specs:
                         combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-2-vision: brand-collection ({tier2_prod_url})")
@@ -459,15 +504,16 @@ def execute_spec_escalation(
     retail_order = brand_cfg.get("retail_order", ["reliance", "croma"])
     for retail_store in retail_order:
         store_lower = retail_store.lower()
-        retail_url = None
+        retail_cands: List[Dict[str, Any]] = []
         if "reliance" in store_lower:
-            retail_url = search_retail_reliance(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics)
+            search_retail_reliance(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics, out_candidates=retail_cands)
         elif "croma" in store_lower:
-            retail_url = search_retail_croma(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics)
+            search_retail_croma(brand, model_name, qualifier_tokens, exclude_urls=exclude_urls, category=category, out_diagnostics=out_diagnostics, out_candidates=retail_cands)
+        retail_url, retail_res = _verify_and_fetch(retail_cands, 3, None)
 
         if retail_url:
             logger.info(f"[{product_id}] Executing Tier 3 ({retail_store}): {retail_url}")
-            res = fetch_and_parse_url(retail_url, tier=3, category=category)
+            res = retail_res
             if res.success and res.specs:
                 combined_res, combined_provenance = _merge_res(combined_res, res, f"tier-3: retail-{retail_store} ({retail_url})")
                 is_thin, missing_count, missing_keys = is_specs_insufficient(combined_res.specs, category=category)
@@ -476,7 +522,7 @@ def execute_spec_escalation(
                 logger.warning(f"[{product_id}] Tier 3 ({retail_store}) HTML yielded insufficient specs ({missing_count} empty). Checking Vision Fallback...")
             
             # VISION FALLBACK Tier 3
-            if res.status_code == 200:
+            if res.status_code == 200 and not res.is_blocked:
                 vision_res = execute_vision_fallback_for_page(retail_url, brand, model_name, base_tier=3, config=cfg, existing_images=res.image_urls)
                 if vision_res and vision_res.specs:
                     combined_res, combined_provenance = _merge_res(combined_res, vision_res, f"tier-3-vision: retail-{retail_store} ({retail_url})")
@@ -498,6 +544,38 @@ def execute_spec_escalation(
     return None, None
 
 
+REJECTED_URLS_MAX = 40
+
+
+def parse_rejected_urls(value: Any) -> Dict[str, str]:
+    """Reads the Rejected_URLs memory column ('url | reason' per line) into {url: reason}."""
+    out: Dict[str, str] = {}
+    if is_empty_value(value):
+        return out
+    for line in str(value).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        url, _, reason = line.partition(" | ")
+        if url.startswith("http"):
+            out[url.strip()] = reason.strip()
+    return out
+
+
+def format_rejected_urls(entries: Dict[str, str]) -> Optional[str]:
+    items = list(entries.items())[-REJECTED_URLS_MAX:]
+    return "\n".join(f"{u} | {r}" for u, r in items) if items else None
+
+
+def _to_price(value: Any) -> Optional[float]:
+    if is_empty_value(value):
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("₹", "").strip())
+    except ValueError:
+        return None
+
+
 def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: Optional[Set[str]] = None) -> Tuple[Dict[str, Any], bool, str]:
     """
     Executes collection for a single row following the Tier Escalation Model.
@@ -514,32 +592,64 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
     if not target_capacity:
         target_capacity = str(row_dict.get("Raw_Spec_Capacity", "")).strip() if not is_empty_value(row_dict.get("Raw_Spec_Capacity")) else None
 
+    # Retry memory: pages the verifier already rejected for THIS product are never fetched again.
+    prior_rejections = parse_rejected_urls(row_dict.get("Rejected_URLs"))
+    exclude_all: Set[str] = set(exclude_urls or set()) | set(prior_rejections)
+    sheet_dp = _to_price(row_dict.get("Override_DP")) or _to_price(row_dict.get("MRP_Input"))
+    sheet_mrp = _to_price(row_dict.get("Override_MRP")) or _to_price(row_dict.get("MRP_Display"))
+
     brand_defaults = load_brand_defaults(brand, category=category)
     out_diagnostics: Dict[str, Any] = {}
     parser_res, provenance = execute_spec_escalation(
         product_id, brand, model_name, manual_url, brand_defaults,
-        exclude_urls=exclude_urls, config=config, brochure_override=brochure_override, category=category,
-        out_diagnostics=out_diagnostics, target_capacity=target_capacity
+        exclude_urls=exclude_all, config=config, brochure_override=brochure_override, category=category,
+        out_diagnostics=out_diagnostics, target_capacity=target_capacity, sheet_dp=sheet_dp, sheet_mrp=sheet_mrp
     )
+
+    verification = out_diagnostics.get("verification", [])
+    rejections = dict(prior_rejections)
+    for v in verification:
+        if v.get("decision") in ("not_match", "delisted"):
+            rejections[v["url"]] = f"{v['decision']}: {v.get('reason') or ''}".strip()
+    rejected_value = format_rejected_urls(rejections)
+    verify_note = ""
+    if verification:
+        verify_note = "\nVerifier: " + "; ".join(
+            f"{v['decision']} {v.get('title') or v['url']}" + (f" ({v['provider']})" if v.get("provider") else "")
+            for v in verification[-6:]
+        )
 
     if not parser_res or (not parser_res.specs and not parser_res.description_text):
         # AUTO-SKIP ON EXHAUSTION: All tiers (including Vision) exhausted. Write NOTHING to Raw_ columns.
+        unsure = [v for v in verification if v.get("decision") == "unsure"]
         ambiguous_cands = out_diagnostics.get("ambiguous_candidates", [])
-        if ambiguous_cands:
+        if unsure:
+            options = " | ".join(f"{v.get('title') or 'page'} ({v['url']})" for v in unsure[:3])
+            reason_str = f"Needs your pick — could not confirm automatically. Options: {options}"
+            flags_msg = f"Skipped: {reason_str}"
+            fix_log_msg = f"Tier 1-4 escalation exhausted. {reason_str}{verify_note}"
+            log_msg = f"[{product_id}] NEEDS PICK: {options}"
+        elif ambiguous_cands:
             cands_str = ", ".join(ambiguous_cands[:4])
             reason_str = f"Multiple candidates found: {cands_str} — model name may be ambiguous or outdated" if len(ambiguous_cands) > 1 else f"Candidate found: {cands_str} — model name may be ambiguous or outdated"
             flags_msg = f"Skipped: {reason_str}"
             fix_log_msg = f"Tier 1-4 escalation exhausted. {reason_str}"
             log_msg = f"[{product_id}] SKIPPED: {reason_str}"
         else:
-            flags_msg = "Skipped: All spec tiers exhausted (including Vision) without finding technical specifications"
-            fix_log_msg = "Tier 1-4 escalation (with Vision fallback) exhausted; no verified technical specs found."
+            rejected_now = [v for v in verification if v.get("decision") == "not_match"]
+            if rejected_now:
+                flags_msg = ("Skipped: Product pages found were verified as a different product: "
+                             + "; ".join(f"{v.get('title') or v['url']} — {v.get('reason')}" for v in rejected_now[:3]))
+            else:
+                flags_msg = "Skipped: All spec tiers exhausted (including Vision) without finding technical specifications"
+            fix_log_msg = "Tier 1-4 escalation (with Vision fallback) exhausted; no verified technical specs found." + verify_note
             log_msg = f"[{product_id}] SKIPPED: All tiers exhausted"
 
         return {
             "Status": "Skipped",
             "Flags": flags_msg,
-            "Fix_Log": fix_log_msg
+            "Fix_Log": fix_log_msg,
+            "Rejected_URLs": rejected_value
         }, False, log_msg
 
     # Call LLM to draft bullets and subtitle from verified product text & category specs
@@ -600,7 +710,8 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
             "Status": "Deferred",
             "LLM_Provider": None,
             "Flags": "Deferred: LLM copy drafting failed due to infrastructure error",
-            "Fix_Log": f"Specs collected via {provenance}; LLM copy drafting deferred due to infrastructure error"
+            "Fix_Log": f"Specs collected via {provenance}; LLM copy drafting deferred due to infrastructure error{verify_note}",
+            "Rejected_URLs": rejected_value
         }
         if parser_res.image_urls:
             updates["Image_URL"] = parser_res.image_urls[0]
@@ -662,7 +773,8 @@ def collect_data_for_row(row_dict: Dict[str, Any], config: dict, exclude_urls: O
         "Tier_Bullet_4": tier if llm_copy.get("bullet_4") else None,
         "LLM_Provider": provider_used,
         "Flags": None,
-        "Fix_Log": f"Collected via {provenance}"
+        "Fix_Log": f"Collected via {provenance}{verify_note}",
+        "Rejected_URLs": rejected_value
     }
 
     if parser_res.image_urls:

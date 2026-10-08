@@ -177,6 +177,15 @@ def extract_model_name_portion(title: str, brand: str = "") -> str:
     return cleaned
 
 
+def extract_spec_quantities(text: str) -> Dict[str, Set[float]]:
+    """Capacity (mAh, '10K' = 10000 mAh) and wattage (W) figures mentioned in a product name."""
+    t = re.sub(r"(\d),(\d)", r"\1\2", str(text or "")).lower()
+    caps = {float(m) for m in re.findall(r"(\d+(?:\.\d+)?)\s*mah\b", t)}
+    caps |= {float(m) * 1000 for m in re.findall(r"\b(\d+(?:\.\d+)?)\s*k\b", t)}
+    watts = {float(m) for m in re.findall(r"\b(\d+(?:\.\d+)?)\s*w\b", t)}
+    return {"mah": caps, "w": watts}
+
+
 def score_candidate_match(
     target_model_name: str,
     candidate_title: str,
@@ -184,7 +193,8 @@ def score_candidate_match(
     brand: str = "",
     qualifier_tokens: Optional[List[str]] = None,
     category: Optional[str] = None,
-    target_capacity: Optional[str] = None
+    target_capacity: Optional[str] = None,
+    source_is_brand_site: bool = False
 ) -> Tuple[float, bool, str]:
     """
     BIDIRECTIONAL CANDIDATE MATCHER & SCORER:
@@ -194,7 +204,7 @@ def score_candidate_match(
     4. Strongly penalizes candidates with extra model-name tokens not in target (excluding category descriptors and internal SKUs).
     Returns (score, is_valid, diagnostic_reason).
     """
-    from src.utils.category_specs import get_category_descriptor_tokens
+    from src.utils.category_specs import get_category_descriptor_tokens, normalize_category_key
 
     brand_lower = brand.lower() if brand else ""
     category_descriptors = get_category_descriptor_tokens(category)
@@ -236,7 +246,10 @@ def score_candidate_match(
         return -1.0, False, f"Target tokens {primary_target_tokens} missing in candidate '{candidate_title}'"
         
     # Qualifier token check
-    is_valid_q, reason_q = reject_qualifier_mismatch(target_model_name, candidate_title, qualifier_tokens, brand=brand)
+    # On the brand's own website every product belongs to the brand (sub-brands like 'CMF' included),
+    # so the foreign-brand check only applies to retail / marketplace listings.
+    is_valid_q, reason_q = reject_qualifier_mismatch(target_model_name, candidate_title, qualifier_tokens,
+                                                     brand=None if source_is_brand_site else brand)
     if not is_valid_q:
         return -1.0, False, reason_q or "Qualifier mismatch"
 
@@ -256,6 +269,13 @@ def score_candidate_match(
     # Extra tokens penalty in model portion (Rule 1 & Rule 3)
     # If candidate model-name segment contains extra model tokens not in target, reject as different model
     raw_extra_tokens = (cand_model_tokens - target_tokens) - qualifiers_norm - category_descriptors
+    # Retail listings append colour variants and generic feature words (e.g. 'Ear (a) Earbuds, Black',
+    # 'Bluetooth Truly Wireless ... with Mic'); these never identify a different model.
+    listing_noise = {"black", "white", "blue", "grey", "gray", "green", "pink", "red", "silver", "gold",
+                     "purple", "yellow", "orange", "beige", "cream", "navy", "teal", "maroon", "brown", "by"}
+    if normalize_category_key(category) in ("tws", "audio"):
+        listing_noise |= {"bluetooth", "wireless", "mic", "true", "ear"}
+    raw_extra_tokens -= listing_noise
     # Ignore internal SKU part numbers (e.g. 'p0109', 'p0208', 'p0301', '0109', 'p')
     sku_tokens = {tok for tok in raw_extra_tokens if re.fullmatch(r'p\d+|\d{3,5}|p|sku', tok, re.I)}
     extra_model_tokens = raw_extra_tokens - sku_tokens
@@ -291,6 +311,14 @@ def score_candidate_match(
         cand_cap_tokens = {t for t in normalize_model_tokens(candidate_title + " " + cand_slug) if re.fullmatch(r'\d{2,6}', t)}
         if target_cap_tokens and cand_cap_tokens:
             score += 20.0 if (target_cap_tokens & cand_cap_tokens) else -20.0
+
+    # Spec figures written in the model name (capacity in mAh / 'K', wattage in W) identify the variant:
+    # a candidate stating a different figure for the same unit is ranked below one that matches.
+    tgt_q = extract_spec_quantities(target_model_name)
+    cand_q = extract_spec_quantities(f"{candidate_title} {cand_slug}")
+    for unit, penalty in (("mah", 60.0), ("w", 40.0)):
+        if tgt_q[unit] and cand_q[unit]:
+            score += 15.0 if (tgt_q[unit] & cand_q[unit]) else -penalty
 
     return score, True, f"Score: {score:.1f} (exact_model: {exact_model_portion})"
 
@@ -899,15 +927,20 @@ def reject_qualifier_mismatch(
         if not re.search(rf"\b{re.escape(tgt_brand)}\b", cand_lower):
             known_brands = [
                 "stuffcool", "pebble", "portronics", "urbn", "evm", "ambrane", "glow gadget",
-                "wangari", "jbl", "boat", "boult audio", "boult", "noise", "ptron", "mivi",
+                "wangari", "jbl", "boat", "boult audio", "boult", "goboult", "noise", "ptron", "mivi",
                 "crossbeats", "zebronics", "realme", "redmi", "xiaomi", "oneplus", "oppo",
                 "vivo", "apple", "samsung", "sony", "anker", "belkin", "hammer", "wings",
                 "truke", "skullcandy", "marshall", "sennheiser", "bose", "soundcore",
                 "philips", "panasonic", "jabra", "infinity", "fire-boltt", "beatxp",
                 "unix", "ubon", "syska", "mi", "nothing", "cmf", "honor", "motorola", "lenovo"
             ]
+            target_lower = str(target_model_name or "").lower()
             for b in known_brands:
                 b_clean = b.lower()
+                # A brand word that is part of the target's own model name (e.g. 'CMF' in 'CMF Buds 2' for brand
+                # Nothing) is a sub-brand / product-line name, not a foreign brand.
+                if re.search(rf"\b{re.escape(b_clean)}\b", target_lower):
+                    continue
                 if b_clean != tgt_brand and b_clean not in tgt_brand and tgt_brand not in b_clean:
                     match = re.search(rf"\b{re.escape(b_clean)}\b", cand_lower)
                     if match:
@@ -1018,6 +1051,44 @@ def fetch_shopify_catalogue(domain: str, timeout: int = 15) -> List[Dict[str, An
     return get_cached_json(cache_key, _fetch) or []
 
 
+def record_candidate(
+    out_candidates: Optional[List[Dict[str, Any]]],
+    url: str,
+    title: str,
+    score: float,
+    is_valid: bool,
+    reason: Optional[str],
+    source: str,
+    model_name: str,
+    brand: str = ""
+) -> None:
+    """
+    Records a scored candidate for the verifier. Rule-valid candidates are always kept; rule-rejected ones are
+    kept as 'near misses' only if every core word of the target model appears in them (so the AI can still
+    rescue a page the rules wrongly rejected, without flooding it with unrelated products).
+    """
+    if out_candidates is None or not url:
+        return
+    is_valid = bool(is_valid) and float(score or 0) > 0
+    if not is_valid:
+        target_clean = extract_model_name_portion(model_name, brand=brand)
+        generic = {"pb", (brand or "").lower(), "powerbank", "power", "bank", "portable", "charger", "earbuds",
+                   "headphones", "tws", "wireless"}
+        target_toks = normalize_model_tokens(target_clean) - generic
+        slug = url.rstrip("/").split("/")[-1].split("?")[0].replace("-", " ")
+        cand_toks = normalize_model_tokens(f"{title} {slug}")
+        if not target_toks or not target_toks.issubset(cand_toks):
+            return
+    clean = url.rstrip("/").lower()
+    for c in out_candidates:
+        if c["url"].rstrip("/").lower() == clean:
+            if is_valid and not c["valid"]:
+                c.update({"title": title, "score": float(score), "valid": True, "reason": reason, "source": source})
+            return
+    out_candidates.append({"url": url, "title": title, "score": float(score), "valid": bool(is_valid),
+                           "reason": reason, "source": source})
+
+
 def extract_clean_candidate_model_name(title: str, brand: str = "") -> str:
     """Extracts concise candidate model name for human-readable diagnostic reporting."""
     cleaned = title
@@ -1048,7 +1119,8 @@ def search_shopify_brand_store(
     timeout: int = 15,
     category: Optional[str] = None,
     out_diagnostics: Optional[Dict[str, Any]] = None,
-    target_capacity: Optional[str] = None
+    target_capacity: Optional[str] = None,
+    out_candidates: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[str]:
     """
     Tier 1 & Tier 2 Shopify Discovery:
@@ -1096,8 +1168,9 @@ def search_shopify_brand_store(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity
+            model_name, p_title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity, source_is_brand_site=True
         )
+        record_candidate(out_candidates, full_url, p_title, score, is_valid, diag, "brand-store-search", model_name, brand)
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": p_title, "score": score, "source": "suggest"})
             seen_urls.add(clean_full)
@@ -1123,8 +1196,9 @@ def search_shopify_brand_store(
             continue
 
         score, is_valid, diag = score_candidate_match(
-            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity
+            model_name, title, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity, source_is_brand_site=True
         )
+        record_candidate(out_candidates, full_url, title, score, is_valid, diag, "brand-store-catalogue", model_name, brand)
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": title, "score": score, "source": "catalogue"})
             seen_urls.add(clean_full)
@@ -1159,8 +1233,9 @@ def search_shopify_brand_store(
                     if clean_full in exclude or clean_full in seen_urls:
                         continue
                     score, is_valid, diag = score_candidate_match(
-                        model_name, cand_title, cand_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity
+                        model_name, cand_title, cand_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category, target_capacity=target_capacity, source_is_brand_site=True
                     )
+                    record_candidate(out_candidates, cand_url, cand_title, score, is_valid, diag, "brand-site-web-search", model_name, brand)
                     if is_valid and score > 0:
                         candidates.append({"url": cand_url, "title": cand_title, "score": score, "source": "tinyfish_search"})
                         seen_urls.add(clean_full)
@@ -1193,7 +1268,8 @@ def search_retail_reliance(
     exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15,
     category: Optional[str] = None,
-    out_diagnostics: Optional[Dict[str, Any]] = None
+    out_diagnostics: Optional[Dict[str, Any]] = None,
+    out_candidates: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[str]:
     """
     Tier 3 Reliance Digital Discovery:
@@ -1238,6 +1314,7 @@ def search_retail_reliance(
         score, is_valid, diag = score_candidate_match(
             model_name, display, product_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
         )
+        record_candidate(out_candidates, product_url, display, score, is_valid, diag, "retail-reliance", model_name, brand)
         if is_valid and score > 0:
             candidates.append({"url": product_url, "title": display, "score": score})
             seen_urls.add(clean_full)
@@ -1268,7 +1345,8 @@ def search_retail_croma(
     exclude_urls: Optional[Set[str]] = None,
     timeout: int = 15,
     category: Optional[str] = None,
-    out_diagnostics: Optional[Dict[str, Any]] = None
+    out_diagnostics: Optional[Dict[str, Any]] = None,
+    out_candidates: Optional[List[Dict[str, Any]]] = None
 ) -> Optional[str]:
     """
     Tier 3 Croma Discovery:
@@ -1315,6 +1393,7 @@ def search_retail_croma(
         score, is_valid, diag = score_candidate_match(
             model_name, name, full_url, brand=brand, qualifier_tokens=qualifier_tokens, category=category
         )
+        record_candidate(out_candidates, full_url, name, score, is_valid, diag, "retail-croma", model_name, brand)
         if is_valid and score > 0:
             candidates.append({"url": full_url, "title": name, "score": score})
             seen_urls.add(clean_full)

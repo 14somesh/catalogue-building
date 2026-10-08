@@ -333,14 +333,22 @@ class GenericBrandParser:
         self.sitemap_urls_cache = discovered
         return discovered
 
-    def find_product_url(self, model_name: str, qualifier_tokens: Optional[List[str]] = None) -> Optional[Tuple[str, str, float]]:
+    def find_product_url(
+        self,
+        model_name: str,
+        qualifier_tokens: Optional[List[str]] = None,
+        category: Optional[str] = None,
+        exclude_urls: Optional[Set[str]] = None,
+        out_candidates: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[Tuple[str, str, float]]:
         """
         Searches discovered sitemap URLs for target product model.
         Falls back to TinyFish Search if sitemaps yield no matching product URL.
         Returns (url, matched_title, score).
         """
-        from src.utils.scraper import score_candidate_match
-        urls = self._discover_sitemap_urls()
+        from src.utils.scraper import score_candidate_match, record_candidate
+        exclude = {u.strip().rstrip("/").lower() for u in (exclude_urls or set()) if u}
+        urls = [u for u in self._discover_sitemap_urls() if u.strip().rstrip("/").lower() not in exclude]
         best_match = None
         best_score = -1.0
 
@@ -348,8 +356,10 @@ class GenericBrandParser:
             for url in urls:
                 slug = url.split("/")[-1].split("?")[0].replace("-", " ").replace(".html", "")
                 score, is_valid, reason = score_candidate_match(
-                    model_name, slug, url, brand=self.brand_name, qualifier_tokens=qualifier_tokens
+                    model_name, slug, url, brand=self.brand_name, qualifier_tokens=qualifier_tokens,
+                    category=category, source_is_brand_site=True
                 )
+                record_candidate(out_candidates, url, slug, score, is_valid, reason, "brand-sitemap", model_name, self.brand_name)
                 if is_valid and score > best_score:
                     best_score = score
                     best_match = (url, slug, score)
@@ -367,11 +377,13 @@ class GenericBrandParser:
                     for it in results:
                         u = it.get("url", "")
                         t = it.get("title", "")
-                        if not u or self.brand_domain not in u.lower():
+                        if not u or self.brand_domain not in u.lower() or u.strip().rstrip("/").lower() in exclude:
                             continue
                         score, is_valid, reason = score_candidate_match(
-                            model_name, t, u, brand=self.brand_name, qualifier_tokens=qualifier_tokens
+                            model_name, t, u, brand=self.brand_name, qualifier_tokens=qualifier_tokens,
+                            category=category, source_is_brand_site=True
                         )
+                        record_candidate(out_candidates, u, t, score, is_valid, reason, "brand-site-web-search", model_name, self.brand_name)
                         if is_valid and score > best_score:
                             best_score = score
                             best_match = (u, t, score)

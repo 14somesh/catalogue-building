@@ -145,7 +145,40 @@ def _ocr_images_via_gemini(
 
     last_error = None
 
-    # 1. Primary: Gemini Models with Backoff Retries
+    # 1. Primary: Groq vision (configured first). Groq accepts at most 3 images per request, so pages are read
+    #    in batches of 3 and joined; if any batch fails the whole sheet falls back to Gemini (no partial sheets).
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key and image_parts:
+        try:
+            from src.utils.llm_client import get_groq_client, _load_llm_section, DEFAULT_VISION_PROVIDERS
+            import base64
+            vision_chain = _load_llm_section(None).get("vision_providers") or DEFAULT_VISION_PROVIDERS
+            g_model = next((v.get("model") for v in vision_chain if str(v.get("name")).lower() == "groq"), "qwen/qwen3.8-27b")
+            groq_client = get_groq_client()
+            texts = []
+            for start in range(0, len(image_parts), 3):
+                batch = image_parts[start:start + 3]
+                logger.info(f"[Ingest OCR] Calling Groq Vision ({g_model}) on pages {start + 1}-{start + len(batch)}...")
+                content_items = [{"type": "text", "text": prompt}]
+                for b_data, m_type in batch:
+                    b64 = base64.b64encode(b_data).decode("utf-8")
+                    content_items.append({"type": "image_url", "image_url": {"url": f"data:{m_type};base64,{b64}"}})
+                res = groq_client.chat.completions.create(
+                    model=g_model, messages=[{"role": "user", "content": content_items}], temperature=0.1
+                )
+                page_text = re.sub(r"<think>.*?</think>", "", res.choices[0].message.content or "", flags=re.S).strip()
+                if not page_text:
+                    raise ValueError(f"Groq returned no text for pages {start + 1}-{start + len(batch)}")
+                texts.append(page_text)
+            logger.info(f"[Ingest OCR] Successfully extracted text via Groq Vision ({g_model}).")
+            return "\n\n".join(texts)
+        except Exception as ge:
+            logger.warning(f"[Ingest OCR] Groq Vision failed ({ge}); falling back to Gemini.")
+            last_error = ge
+            if progress_cb:
+                progress_cb({"stage": "fallback", "message": "Falling back to secondary AI provider (Gemini)..."})
+
+    # 2. Fallback: Gemini models with backoff retries
     for model in candidate_models:
         for attempt in range(3):
             try:
@@ -175,40 +208,6 @@ def _ocr_images_via_gemini(
                     continue
                 else:
                     break
-
-    # 2. Secondary: Groq Vision Fallback if configured
-    groq_key = os.getenv("GROQ_API_KEY")
-    if groq_key:
-        try:
-            from src.utils.llm_client import get_groq_client, classify_groq_error
-            import base64
-            groq_client = get_groq_client()
-            groq_vision_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
-            for g_model in groq_vision_models:
-                logger.info(f"[Ingest OCR] Falling back to Groq Vision ({g_model})...")
-                if progress_cb:
-                    progress_cb({"stage": "fallback", "message": "Falling back to secondary AI provider (Groq)..."})
-
-                content_items = [{"type": "text", "text": prompt}]
-                for b_data, m_type in image_parts[:2]:
-                    b64 = base64.b64encode(b_data).decode("utf-8")
-                    content_items.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{m_type};base64,{b64}"}
-                    })
-
-                res = groq_client.chat.completions.create(
-                    model=g_model,
-                    messages=[{"role": "user", "content": content_items}],
-                    temperature=0.1
-                )
-                text = res.choices[0].message.content or ""
-                if text.strip():
-                    logger.info(f"[Ingest OCR] Successfully extracted text via Groq Vision ({g_model}).")
-                    return text
-        except Exception as ge:
-            logger.warning(f"[Ingest OCR] Groq Vision fallback failed: {ge}")
-            last_error = ge
 
     raise AIServiceUnavailableError(
         "The AI service is unavailable. Try again in a few minutes.",
@@ -306,61 +305,11 @@ PRICE SHEET CONTENT:
 
     last_error = None
 
-    # 1. Primary: Gemini Models with Backoff Retries
-    for model in candidate_gemini_models:
-        for attempt in range(3):
-            try:
-                client = get_gemini_client()
-                logger.info(f"[Analyze Sheet] Calling Gemini ({model}), attempt {attempt+1}/3...")
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=BrandInferenceSchema,
-                        temperature=0.1
-                    )
-                )
-                result_json = json.loads(response.text)
-                logger.info(f"[Analyze Sheet] Successfully analyzed price sheet via Gemini ({model}).")
-                inference = BrandInferenceSchema(**result_json)
-                if brand_name and brand_name.strip():
-                    inference.brand_name = brand_name.strip()
-                if category_name and category_name.strip():
-                    inference.category = category_name.strip()
-
-                # Verify domain against live storefront rules
-                v_domain, v_platform = verify_storefront_domain(inference.domain)
-                inference.domain = v_domain
-                inference.platform = v_platform
-                return inference
-            except Exception as e:
-                last_error = e
-                err_type = classify_gemini_error(e)
-                logger.warning(f"[Analyze Sheet] Error on Gemini '{model}' attempt {attempt+1}: {e} (type={err_type})")
-
-                if err_type in ("TRANSIENT", "RATE_LIMIT") and attempt < 2:
-                    backoff_sec = 2.0 * (attempt + 1)
-                    if progress_cb:
-                        progress_cb({
-                            "stage": "retry",
-                            "message": f"The AI service is busy right now. Trying again in {backoff_sec:.0f}s..."
-                        })
-                    time.sleep(backoff_sec)
-                    continue
-                else:
-                    break
-
-    # 2. Secondary: Groq Fallback Chain
+    # 1. Primary: Groq (configured first in the provider chain)
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
         groq_model = "llama-3.3-70b-versatile"
-        logger.info(f"[Analyze Sheet] Failing over to Groq ({groq_model})...")
-        if progress_cb:
-            progress_cb({
-                "stage": "fallback",
-                "message": "The AI service is busy. Failing over to secondary provider (Groq)..."
-            })
+        logger.info(f"[Analyze Sheet] Calling Groq ({groq_model})...")
 
         for attempt in range(3):
             try:
@@ -391,11 +340,58 @@ PRICE SHEET CONTENT:
                 v_domain, v_platform = verify_storefront_domain(inference.domain)
                 inference.domain = v_domain
                 inference.platform = v_platform
-                return inference
+                return enforce_distinct_display_names(inference)
             except Exception as ge:
                 last_error = ge
                 err_type = classify_groq_error(ge)
                 logger.warning(f"[Analyze Sheet] Groq error on attempt {attempt+1}: {ge} (type={err_type})")
+                if err_type in ("TRANSIENT", "RATE_LIMIT") and attempt < 2:
+                    backoff_sec = 2.0 * (attempt + 1)
+                    if progress_cb:
+                        progress_cb({
+                            "stage": "retry",
+                            "message": f"The AI service is busy right now. Trying again in {backoff_sec:.0f}s..."
+                        })
+                    time.sleep(backoff_sec)
+                    continue
+                else:
+                    break
+
+    # 2. Fallback: Gemini models with backoff retries
+    if last_error is not None and progress_cb:
+        progress_cb({"stage": "fallback", "message": "The AI service is busy. Failing over to secondary provider (Gemini)..."})
+    for model in candidate_gemini_models:
+        for attempt in range(3):
+            try:
+                client = get_gemini_client()
+                logger.info(f"[Analyze Sheet] Calling Gemini ({model}), attempt {attempt+1}/3...")
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=BrandInferenceSchema,
+                        temperature=0.1
+                    )
+                )
+                result_json = json.loads(response.text)
+                logger.info(f"[Analyze Sheet] Successfully analyzed price sheet via Gemini ({model}).")
+                inference = BrandInferenceSchema(**result_json)
+                if brand_name and brand_name.strip():
+                    inference.brand_name = brand_name.strip()
+                if category_name and category_name.strip():
+                    inference.category = category_name.strip()
+
+                # Verify domain against live storefront rules
+                v_domain, v_platform = verify_storefront_domain(inference.domain)
+                inference.domain = v_domain
+                inference.platform = v_platform
+                return enforce_distinct_display_names(inference)
+            except Exception as e:
+                last_error = e
+                err_type = classify_gemini_error(e)
+                logger.warning(f"[Analyze Sheet] Error on Gemini '{model}' attempt {attempt+1}: {e} (type={err_type})")
+
                 if err_type in ("TRANSIENT", "RATE_LIMIT") and attempt < 2:
                     backoff_sec = 2.0 * (attempt + 1)
                     if progress_cb:
@@ -414,6 +410,51 @@ PRICE SHEET CONTENT:
         "The AI service is unavailable. Try again in a few minutes.",
         technical_details=f"All AI providers exhausted. Last error: {last_error}"
     )
+
+
+_DISPLAY_DROPPABLE_WORDS = {
+    "buds", "bud", "earbuds", "earbud", "tws", "earphones", "earphone", "headphones", "headphone",
+    "neckband", "wireless", "true", "truly", "power", "bank", "powerbank", "charger", "speaker",
+    "black", "white", "blue", "grey", "gray", "green", "pink", "red", "silver", "gold", "purple",
+}
+
+
+def _strip_brand_prefix(name: str, brand: str) -> str:
+    cleaned = str(name or "").strip()
+    if brand:
+        cleaned = re.sub(rf"^{re.escape(brand)}\s+", "", cleaned, flags=re.I).strip()
+    return cleaned or str(name or "").strip()
+
+
+def _identity_tokens(model_name: str, brand: str) -> set:
+    """Words in a model name that tell it apart from sibling products (numbers, variant words, letters)."""
+    text = _strip_brand_prefix(model_name, brand).lower()
+    # Capacity / wattage figures may be dropped from a display name (e.g. 'Roam 20000mAh' -> 'Roam')
+    text = re.sub(r"\b\d+(?:,\d+)?\s*mah\b|\b\d+k\b|\b\d+(?:\.\d+)?\s*w\b", " ", text)
+    return {t for t in re.findall(r"[a-z0-9]+", text) if t not in _DISPLAY_DROPPABLE_WORDS}
+
+
+def enforce_distinct_display_names(inference: "BrandInferenceSchema") -> "BrandInferenceSchema":
+    """
+    Guards the AI-generated display_name: it may shorten a model name but must keep every word that
+    identifies the product (e.g. 'CMF Buds Pro 2' must not become 'CMF Buds', 'Ear (A)' must not become 'Ear').
+    Falls back to the model name (brand prefix removed) when a word is lost or two products would share a name.
+    """
+    brand = inference.brand_name or ""
+    for p in inference.products:
+        fallback = _strip_brand_prefix(p.model_name, brand)
+        disp = str(p.display_name or "").strip()
+        disp_tokens = set(re.findall(r"[a-z0-9]+", disp.lower()))
+        if not disp or not _identity_tokens(p.model_name, brand).issubset(disp_tokens):
+            p.display_name = fallback
+    seen: Dict[str, int] = {}
+    for p in inference.products:
+        key = str(p.display_name).strip().lower()
+        seen[key] = seen.get(key, 0) + 1
+    for p in inference.products:
+        if seen[str(p.display_name).strip().lower()] > 1:
+            p.display_name = _strip_brand_prefix(p.model_name, brand)
+    return inference
 
 
 def generate_onboarding_summary(inference: BrandInferenceSchema) -> str:

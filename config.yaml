@@ -30,16 +30,25 @@ validation_rules:
   min_bullets: 2
   max_bullets: 4
 llm:
+  # Text AI calls try providers top to bottom: Groq first, Gemini only if Groq fails or runs out.
   providers:
+  - name: groq
+    model: llama-3.3-70b-versatile
+    temperature: 0.2
   - name: gemini
     model: gemini-3.5-flash-lite
     temperature: 0.2
   - name: gemini
     model: gemini-3.5-flash
     temperature: 0.2
+  # Image AI calls (image checker, specs-from-images) in the same order.
+  vision_providers:
   - name: groq
-    model: llama-3.3-70b-versatile
-    temperature: 0.2
+    model: qwen/qwen3.8-27b
+  - name: gemini
+    model: gemini-3.5-flash-lite
+  - name: gemini
+    model: gemini-3.5-flash
 search:
   provider: gemini_grounding
   max_results: 3

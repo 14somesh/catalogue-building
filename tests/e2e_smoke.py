@@ -23,7 +23,7 @@ import shutil
 import tempfile
 import subprocess
 import traceback
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 COPY_ITEMS = ["src", "config", "config.yaml", "data", "templates", "styles", "fonts", "assets", "tests/e2e_smoke.py"]
@@ -123,15 +123,28 @@ VOLTO_PRODUCT = {
     "body_html": "<p>20000 mAh capacity, 22.5W fast charging output, 2 USB-A + 1 Type-C ports, weighs 380g, 1 year warranty.</p>",
     "images": [{"src": "https://cdn.volto.in/volto-max-20k.png"}],
     "variants": [{"price": "1999.00", "compare_at_price": "3499.00"}], "tags": []}
+# A combo pack listed FIRST with the identical listing title: the rules tie, so only the verifier can catch it.
+VOLTO_PRODUCT = dict(VOLTO_PRODUCT, handle="volto-max-20k-single")
+VOLTO_COMBO = dict(VOLTO_PRODUCT, handle="volto-max-20k", images=[{"src": "https://cdn.volto.in/volto-max-20k-combo.png"}],
+                   variants=[{"price": "3699.00", "compare_at_price": "6499.00"}])
+VOLTO_COMBO_PAGE = """<html><head><title>Volto Max 20K Combo (2-pack)</title></head><body>
+<h1 class="product__title">Volto Max 20K Combo (2-pack)</h1>
+<div class="product__description rte">Two units of 20000 mAh capacity, 22.5W fast charging output, 2 USB-A + 1 Type-C ports.</div>
+<img src="https://cdn.volto.in/volto-max-20k-combo.png" alt="Volto Max 20K Combo"></body></html>"""
 VOLTO_PAGE = """<html><head><title>Volto Max 20K</title></head><body><h1 class="product__title">Volto Max 20K</h1>
 <div class="product__description rte">20000 mAh capacity, 22.5W fast charging output, 2 USB-A + 1 Type-C ports,
 weighs 380g. Regular price MRP: Rs. 3,499</div>
 <img src="https://cdn.volto.in/volto-max-20k.png" alt="Volto Max 20K"></body></html>"""
 
 
+FETCHED: List[str] = []
+AI_CALLS = {"groq": 0, "gemini": 0, "verifier_not_match": 0}
+
+
 def _fake_get(url, *a, **k):
     u = str(url)
     ul = u.lower()
+    FETCHED.append(ul)
     if ul.endswith((".png", ".jpg", ".jpeg", ".webp")) or "/media/" in ul or "cdn.volto.in" in ul:
         return _Resp(200, "", _png_bytes(u), "image/png")
     if "zylo-audio.in" in ul:
@@ -144,20 +157,59 @@ def _fake_get(url, *a, **k):
         return _Resp(200, ZYLO_HOME)
     if "volto.in" in ul:
         if "products.json" in ul:
-            return _Resp(200, json.dumps({"products": [VOLTO_PRODUCT]}), ctype="application/json")
+            return _Resp(200, json.dumps({"products": [VOLTO_COMBO, VOLTO_PRODUCT]}), ctype="application/json")
         if "suggest.json" in ul:
             return _Resp(200, json.dumps({"resources": {"results": {"products": [
-                {"title": VOLTO_PRODUCT["title"], "url": "/products/volto-max-20k"}]}}}), ctype="application/json")
-        if "/products/volto-max-20k.json" in ul or "/products/volto-max-20k.js" in ul:
+                {"title": VOLTO_COMBO["title"], "url": "/products/volto-max-20k"},
+                {"title": VOLTO_PRODUCT["title"], "url": "/products/volto-max-20k-single"}]}}}), ctype="application/json")
+        if "/products/volto-max-20k-single.json" in ul or "/products/volto-max-20k-single.js" in ul:
             return _Resp(200, json.dumps({"product": VOLTO_PRODUCT}), ctype="application/json")
-        if "/products/volto-max-20k" in ul:
+        if "/products/volto-max-20k-single" in ul:
             return _Resp(200, VOLTO_PAGE)
+        if "/products/volto-max-20k.json" in ul or "/products/volto-max-20k.js" in ul:
+            return _Resp(200, json.dumps({"product": VOLTO_COMBO}), ctype="application/json")
+        if "/products/volto-max-20k" in ul:
+            return _Resp(200, VOLTO_COMBO_PAGE)
         return _Resp(200, "<html><body>Volto</body></html>")
     return _Resp(404, "<html><title>404 Not Found</title></html>")
 
 
 def _fake_post(url, *a, **k):
     return _Resp(404, "{}", ctype="application/json")
+
+
+def _ai_answer(schema_name: str, blob: str) -> Dict[str, Any]:
+    brand = "Zylo" if "Zylo" in blob else ("Volto" if "Volto" in blob else "Unknown")
+    if schema_name == "ProductMatchVerdict":
+        # Only the page facts (URL / titles / text), never the verifier's own instructions
+        page = blob.split("URL: ", 1)[-1].split("OTHER LISTINGS", 1)[0].lower()
+        if "combo" in page:
+            AI_CALLS["verifier_not_match"] += 1
+            return {"decision": "not_match", "confidence": 95, "reason": "page is a 2-pack combo, sheet lists a single unit"}
+        return {"decision": "match", "confidence": 92, "reason": "same model and variant"}
+    if schema_name == "ProductCopySchema":
+        if brand == "Zylo":
+            return {"title": "Air 2", "subtitle": "True wireless earbuds with 40 hours of total playtime.",
+                    "bullet_1": "40 hours total playtime with the charging case.",
+                    "bullet_2": "13mm dynamic drivers tuned for deep, punchy bass.",
+                    "bullet_3": "Bluetooth 5.3 with a low latency gaming mode.",
+                    "bullet_4": "Active noise cancellation of up to 32dB depth."}
+        return {"title": "Max 20K", "subtitle": "20000mAh power bank with 22.5W fast charging output.",
+                "bullet_1": "20000mAh capacity charges a phone several times.",
+                "bullet_2": "22.5W fast charging output for quick top ups.",
+                "bullet_3": "Two USB-A ports and one Type-C port for devices.",
+                "bullet_4": None}
+    if schema_name == "SemanticAuditSchema":
+        return {"is_valid": True, "contradictions": [], "factual_discrepancies": [], "tone_and_quality_issues": [], "summary_flags": []}
+    if schema_name == "PostRunReviewSchema":
+        return {"is_satisfied": True, "contradictions": [], "capacity_model_mismatch": False,
+                "copy_mismatch_critique": None, "recommended_action": "pass"}
+    if schema_name == "VisionExtractedSpecsSchema":
+        return {"capacity": None, "output": None, "ports": None, "weight": None}
+    if schema_name == "ImageQualityAuditSchema":
+        return {"is_correct_brand_and_model": True, "is_isolated_packshot": True, "has_hand_holding": False,
+                "has_promotional_text_banner": False, "detected_brand": brand, "quality_score": 9, "rejection_reason": None}
+    return {}
 
 
 class _FakeGenaiResp:
@@ -167,42 +219,42 @@ class _FakeGenaiResp:
 
 class _FakeGenaiModels:
     def generate_content(self, model=None, contents=None, config=None, **k):
+        AI_CALLS["gemini"] += 1
         schema = getattr(config, "response_schema", None)
         name = getattr(schema, "__name__", str(schema))
         blob = json.dumps(contents, default=str) if contents is not None else ""
-        brand = "Zylo" if "Zylo" in blob else ("Volto" if "Volto" in blob else "Unknown")
-        if name == "ProductCopySchema":
-            if brand == "Zylo":
-                d = {"title": "Air 2", "subtitle": "True wireless earbuds with 40 hours of total playtime.",
-                     "bullet_1": "40 hours total playtime with the charging case.",
-                     "bullet_2": "13mm dynamic drivers tuned for deep, punchy bass.",
-                     "bullet_3": "Bluetooth 5.3 with a low latency gaming mode.",
-                     "bullet_4": "Active noise cancellation of up to 32dB depth."}
-            else:
-                d = {"title": "Max 20K", "subtitle": "20000mAh power bank with 22.5W fast charging output.",
-                     "bullet_1": "20000mAh capacity charges a phone several times.",
-                     "bullet_2": "22.5W fast charging output for quick top ups.",
-                     "bullet_3": "Two USB-A ports and one Type-C port for devices.",
-                     "bullet_4": None}
-            return _FakeGenaiResp(json.dumps(d))
-        if name == "SemanticAuditSchema":
-            return _FakeGenaiResp(json.dumps({"is_valid": True, "contradictions": [], "factual_discrepancies": [],
-                                              "tone_and_quality_issues": [], "summary_flags": []}))
-        if name == "PostRunReviewSchema":
-            return _FakeGenaiResp(json.dumps({"is_satisfied": True, "contradictions": [], "capacity_model_mismatch": False,
-                                              "copy_mismatch_critique": None, "recommended_action": "pass"}))
-        if name == "VisionExtractedSpecsSchema":
-            return _FakeGenaiResp(json.dumps({"capacity": None, "output": None, "ports": None, "weight": None}))
-        if name == "ImageQualityAuditSchema":
-            return _FakeGenaiResp(json.dumps({"is_correct_brand_and_model": True, "is_isolated_packshot": True,
-                                              "has_hand_holding": False, "has_promotional_text_banner": False,
-                                              "detected_brand": brand, "quality_score": 9, "rejection_reason": None}))
-        return _FakeGenaiResp("{}")
+        return _FakeGenaiResp(json.dumps(_ai_answer(name, blob)))
 
 
 class _FakeGenaiClient:
     def __init__(self, *a, **k):
         self.models = _FakeGenaiModels()
+
+
+class _FakeGroqCompletions:
+    def create(self, model=None, messages=None, **k):
+        AI_CALLS["groq"] += 1
+        system = str((messages or [{}])[0].get("content", ""))
+        blob = json.dumps(messages, default=str)
+        if '"decision"' in system:
+            name = "ProductMatchVerdict"
+        elif "bullet_1" in system:
+            name = "ProductCopySchema"
+        elif "is_satisfied" in system:
+            name = "PostRunReviewSchema"
+        elif "is_correct_brand_and_model" in system:
+            name = "ImageQualityAuditSchema"
+        elif "summary_flags" in system:
+            name = "SemanticAuditSchema"
+        else:
+            name = "VisionExtractedSpecsSchema"
+        msg = type("M", (), {"content": json.dumps(_ai_answer(name, blob))})()
+        return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+
+
+class _FakeGroqClient:
+    def __init__(self, *a, **k):
+        self.chat = type("Chat", (), {"completions": _FakeGroqCompletions()})()
 
 
 def _child_main() -> None:
@@ -249,8 +301,9 @@ def _child_main() -> None:
             patch("requests.Session.get", side_effect=lambda self, url, *a, **k: _fake_get(url, *a, **k)),
             patch.object(rb, "preflight_quota_check", return_value=None),
             patch("src.utils.llm_client.genai.Client", _FakeGenaiClient),
+            patch("src.utils.llm_client.get_groq_client", lambda: _FakeGroqClient()),
             patch("src.utils.tinyfish.is_tinyfish_configured", return_value=False),
-            patch.dict(os.environ, {"GEMINI_API_KEY": "offline-e2e-fake-key"}),
+            patch.dict(os.environ, {"GEMINI_API_KEY": "offline-e2e-fake-key", "GROQ_API_KEY": "offline-e2e-fake-key"}),
         ]
         for f in fakes:
             f.start()
@@ -282,6 +335,31 @@ def _child_main() -> None:
                     messages.append(f"{label}: {why}")
             if all(p for p, _ in checks):
                 messages.append(f"{label}: collected, specs + image OK, Ready_For_Review")
+
+        # Verifier + retry memory: the identical-title combo listing must be rejected and remembered
+        combo = "https://www.volto.in/products/volto-max-20k"
+        v = df[df["Brand"] == "Volto"].iloc[0].to_dict()
+        agent_checks = [
+            (str(v.get("Source_URL") or "").rstrip("/").endswith("/volto-max-20k-single"), f"Volto used '{v.get('Source_URL')}' (expected the single-unit page)"),
+            (combo + " |" in str(v.get("Rejected_URLs") or ""), f"combo page not remembered as rejected (Rejected_URLs='{v.get('Rejected_URLs')}')"),
+            (AI_CALLS["verifier_not_match"] >= 1, "verifier never rejected the combo page"),
+            (AI_CALLS["groq"] > 0, "no AI call went to Groq (expected Groq first)"),
+        ]
+        FETCHED.clear()
+        rb.re_run_product("PB-E2E-001")
+        df = load_catalogue_data("data/catalogue_data.xlsx")
+        v2 = df[df["Brand"] == "Volto"].iloc[0].to_dict()
+        agent_checks += [
+            (not any(u.rstrip("/").endswith("/products/volto-max-20k") for u in FETCHED),
+             "Retry fetched the previously rejected combo page again"),
+            (v2.get("Status") == "Ready_For_Review", f"Retry ended '{v2.get('Status')}': {v2.get('Flags')}"),
+        ]
+        for passed, why in agent_checks:
+            if not passed:
+                ok = False
+                messages.append(f"Verifier/memory: {why}")
+        if all(p for p, _ in agent_checks):
+            messages.append("Verifier rejected identical-title combo page, used the right page, Retry skipped the rejected page; AI via Groq first")
 
         # Stages 4-5 (approve + build PDF)
         for brand in expectations:

@@ -64,14 +64,13 @@ class ShopifyParser(BaseParser):
 
         # Extract MRP / List Price
         mrp = None
+        # Visible price text is in rupees (only script JSON can be in paise, handled in step 3).
         # 1. First priority: explicit HTML regular price / MRP text in price-list or product containers
         for s_tag in soup.find_all(["s", "del", "span", "div", "price-list"], class_=re.compile(r"price-item--regular|compare|mrp|regular-price|price-list", re.I)):
             txt = s_tag.get_text()
             m_mrp = re.search(r'MRP[:\s]+(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', txt, re.I) or re.search(r'Regular price\s+(?:MRP[:\s]+)?(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', txt, re.I)
             if m_mrp:
                 val = float(m_mrp.group(1).replace(",", ""))
-                if val > 10000:
-                    val = val / 100.0
                 if val > 100:
                     mrp = val
                     break
@@ -81,8 +80,6 @@ class ShopifyParser(BaseParser):
             m = re.search(r'MRP[:\s]+(?:Rs\.?|₹)?\s*([0-9,]+(?:\.\d+)?)', html, re.I)
             if m:
                 val = float(m.group(1).replace(",", ""))
-                if val > 10000:
-                    val = val / 100.0
                 if val > 100:
                     mrp = val
 
